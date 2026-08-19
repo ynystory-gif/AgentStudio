@@ -1,0 +1,56 @@
+{
+  "version": "1.2",
+  "id": "AGENT_FACTORY_WORKFLOW_POLICY",
+  "identity": "THEANOVA AgentStudio 제작 Workflow",
+  "distinction": {
+    "factory_workflow": "AgentStudio가 Agent 프로그램을 분석/설계/생성/검증하는 제작 공정",
+    "target_agent_workflow": "생성된 Agent가 실제 업무를 수행하는 순서"
+  },
+  "nodes": [
+    "requirement_analysis",
+    "analyze_project",
+    "capability_design",
+    "tool_mcp_decision",
+    "agent_architecture",
+    "target_workflow_design",
+    "project_file_plan",
+    "settings_requirement_analysis",
+    "settings_schema_design",
+    "settings_ui_design",
+    "checkpoint",
+    "approval",
+    "code_generation",
+    "settings_generator",
+    "settings_validation",
+    "build_artifact_validation",
+    "environment_configuration",
+    "test",
+    "debug",
+    "package_completion",
+    "review"
+  ],
+  "repair_loop": [
+    "test",
+    "debug",
+    "code_generation",
+    "environment_configuration",
+    "test"
+  ],
+  "completion_rule": "코드 생성만으로 완료하지 않고 테스트 성공 후 package_completion과 review를 통과해야 완료",
+  "settings_generator": {
+    "purpose": "대상 Agent별 Settings Backend/API/UI 자동 생성",
+    "stages": [
+      "settings_requirement_analysis",
+      "settings_schema_design",
+      "settings_ui_design",
+      "settings_generator",
+      "settings_validation"
+    ]
+  },
+  "completion_gate": {
+    "required_planned_files_exist": true,
+    "no_placeholder_core_code": true,
+    "coding_style_errors_zero": true,
+    "tests_pass": true
+  }
+}

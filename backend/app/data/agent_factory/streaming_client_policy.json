@@ -1,0 +1,28 @@
+{
+  "version": "1.0",
+  "id": "STREAMING_CLIENT_POLICY",
+  "purpose": "클라이언트 종류에 맞는 스트리밍 소비 방식을 결정",
+  "clients": {
+    "curl": {
+      "strategy": "curl -N",
+      "purpose": "서버 스트리밍 동작을 가장 빠르게 검증"
+    },
+    "python_async": {
+      "strategy": "httpx.AsyncClient + client.stream + aiter_lines",
+      "purpose": "Python 기반 비동기 SSE 소비"
+    },
+    "browser_get_sse": {
+      "strategy": "EventSource",
+      "condition": "GET SSE인 경우"
+    },
+    "browser_post_stream": {
+      "strategy": "fetch + ReadableStream",
+      "condition": "POST streaming인 경우"
+    }
+  },
+  "rules": [
+    "client timeout은 고정 교육값이 아니라 예상 작업 시간과 proxy/provider timeout에 맞춰 설정한다.",
+    "SSE parser가 복잡한 id/retry/multiline을 지원해야 하면 parser abstraction을 고려한다.",
+    "브라우저와 backend origin이 다르면 CORS 정책을 함께 검토한다."
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "version": "1.0",
+  "id": "STREAMING_TEST_POLICY",
+  "purpose": "Streaming endpoint를 서버→프록시→클라이언트 경로 전체에서 검증",
+  "matrix": [
+    "정상 request",
+    "Pydantic 422 request",
+    "첫 message event 수신",
+    "done event 수신",
+    "safe error event",
+    "client disconnect",
+    "proxy buffering",
+    "client timeout",
+    "curl -N",
+    "httpx async client",
+    "TTFT",
+    "total latency"
+  ],
+  "diagnostics": [
+    {
+      "symptom": "응답 전체가 한 번에 도착",
+      "checks": [
+        "curl -N 사용 여부",
+        "reverse proxy buffering",
+        "CDN/사내 프록시 정책"
+      ]
+    },
+    {
+      "symptom": "중간 연결 종료",
+      "checks": [
+        "client timeout",
+        "proxy timeout",
+        "provider timeout"
+      ]
+    },
+    {
+      "symptom": "async_generator 객체 문자열 출력",
+      "checks": [
+        "async for 사용 여부"
+      ]
+    }
+  ]
+}

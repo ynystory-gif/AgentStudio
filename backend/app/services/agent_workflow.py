@@ -1,0 +1,3973 @@
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Literal, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
+
+from app.core.config import get_settings
+from app.services.agent_factory_workflow_design import design_agent_factory
+from app.services.approval_service import approval_payload, requires_approval
+from app.services.debug_service import analyze_failure
+from app.services.git_service import checkpoint
+from app.services.local_control import read_file, run_command
+from app.services.patch_service import PatchApplyError, apply_patch, create_patch
+from app.services.project_analyzer import local_project_summary
+from app.services.coding_rule_selector import coding_rules_for_request
+from app.services.coding_rule_validator import validate_code_style
+from app.services.settings_generator import (
+    generate_settings_artifacts,
+    validate_settings_artifacts,
+)
+
+
+class AgentState(TypedDict, total=False):
+    # Workflow identity
+    thread_id: str
+    project_root: str
+    request: str
+    provider: str
+
+    # Explicit distinction:
+    # AgentStudio 제작 Workflow의 설계 Bundle
+    design_bundle: dict
+    requirement_coverage_gate: dict
+    file_apply_validation: dict
+    code_plan_validation: dict
+    repair_plan_validation: dict
+
+    # Agent Factory design artifacts
+    requirement_spec: dict
+    project_analysis: dict
+    capability_plan: dict
+    tool_mcp_plan: dict
+    agent_architecture: dict
+    target_agent_workflow: dict
+    file_plan: dict
+    settings_plan: dict
+    settings_path_normalization: dict
+    settings_requirement_spec: dict
+    settings_schema: dict
+    settings_ui_plan: dict
+    settings_generation_result: dict
+    settings_validation_result: dict
+    build_artifact_validation: dict
+    coding_style_context: dict
+    environment_plan: dict
+    launcher_generation_result: dict
+    fastapi_import_validation: dict
+
+    # Existing code context
+    target_files: list[str]
+    related_files: list[dict]
+
+    # Build / patch
+    plan: dict
+    checkpoint: dict
+    patch_result: list[dict]
+
+    # Runtime validation
+    test_command: str
+    test_result: dict
+    debug_iteration: int
+    debug_history: list[dict]
+
+    # Completion
+    package_result: dict
+    review: str
+    status: str
+    error: str
+
+
+def _bundle(state: AgentState) -> dict:
+    value = state.get("design_bundle")
+    return value if isinstance(value, dict) else {}
+
+
+_RUNTIME_CONTEXT_DIRS = {
+    "reports", "debug", "logs", "history", "cache", "temp", "output",
+    ".venv", "venv", "node_modules", ".git", "__pycache__",
+}
+
+
+def _is_runtime_artifact_path(project_root: str, raw_path: str) -> bool:
+    """AgentStudio 실행/진단 파일이 다음 Code Plan의 수정 대상이 되는 것을 막습니다."""
+    if not raw_path:
+        return False
+    root = Path(project_root).resolve()
+    path = Path(str(raw_path)).expanduser()
+    try:
+        resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
+        relative = resolved.relative_to(root)
+    except Exception:
+        return False
+    return any(part.casefold() in _RUNTIME_CONTEXT_DIRS for part in relative.parts[:-1]) or (
+        bool(relative.parts) and relative.parts[0].casefold() in _RUNTIME_CONTEXT_DIRS
+    )
+
+
+def _sanitize_context_paths(project_root: str, paths: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in paths or []:
+        value = str(raw or "").strip()
+        if not value or _is_runtime_artifact_path(project_root, value):
+            continue
+        key = value.replace("\\", "/").casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def _canonical_planned_path(file_plan: dict, raw_path: str, group: str = "") -> str:
+    raw = str(raw_path or "").replace("\\", "/").lstrip("./")
+    if not raw:
+        return raw
+
+    planned: list[str] = []
+    for item in file_plan.get("new_files") or []:
+        value = item if isinstance(item, str) else str((item or {}).get("path") or "")
+        value = value.replace("\\", "/").lstrip("./")
+        if value:
+            planned.append(value)
+
+    raw_cf = raw.casefold()
+    for candidate in planned:
+        if candidate.casefold() == raw_cf:
+            return candidate
+
+    # LLM 설계가 app/... 로 반환했어도 File Plan의 backend/app/...가 유일하면 그 경로를 사용합니다.
+    suffix_matches = [
+        candidate
+        for candidate in planned
+        if candidate.casefold().endswith("/" + raw_cf)
+    ]
+    if group == "backend":
+        backend_matches = [x for x in suffix_matches if x.casefold().startswith("backend/")]
+        if len(backend_matches) == 1:
+            return backend_matches[0]
+    if len(suffix_matches) == 1:
+        return suffix_matches[0]
+
+    if group == "backend" and raw_cf.startswith("app/"):
+        return "backend/" + raw
+    return raw
+
+
+def _normalize_settings_plan_paths(plan: dict, file_plan: dict) -> tuple[dict, dict]:
+    normalized = dict(plan or {})
+    changes: list[dict] = []
+    for group in ("backend", "frontend"):
+        values = dict(normalized.get(group) or {})
+        for key, value in list(values.items()):
+            if not isinstance(value, str) or not value.strip():
+                continue
+            canonical = _canonical_planned_path(file_plan, value, group)
+            if canonical != value.replace("\\", "/"):
+                changes.append({"group": group, "key": key, "from": value, "to": canonical})
+            values[key] = canonical
+        normalized[group] = values
+    return normalized, {"changed": bool(changes), "changes": changes}
+
+
+async def requirement_analysis_node(state: AgentState):
+    """
+    Workflow 설계 단계에서 확정한 design_bundle이 전달되면 그것을 재사용합니다.
+
+    개발 시작 때 짧은 최초 요청만으로 다시 설계하여 React/FastAPI/stdio 등
+    인터뷰 확정 요구사항을 잃어버리는 문제를 방지합니다.
+    """
+    supplied = state.get("design_bundle")
+
+    if isinstance(supplied, dict) and supplied:
+        design = supplied
+    else:
+        design = await design_agent_factory(
+            request=state["request"],
+            project_context={},
+            provider=state.get("provider"),
+        )
+
+    return {
+        "design_bundle": design,
+        "requirement_spec": design.get("requirement_spec") or {},
+        "status": "REQUIREMENTS_ANALYZED",
+    }
+
+
+async def analyze_project_node(state: AgentState):
+    explicit_targets = _sanitize_context_paths(
+        state["project_root"],
+        list(state.get("target_files") or []),
+    )
+    if explicit_targets:
+        related = [
+            {
+                "path": p,
+                "score": 999,
+                "matched": ["explicit"],
+            }
+            for p in explicit_targets
+        ]
+        analysis = {
+            "related_files": related,
+            "source": "explicit_target_files",
+            "excluded_runtime_artifacts": len(state.get("target_files") or []) - len(explicit_targets),
+        }
+    else:
+        analysis = await local_project_summary(
+            state["project_root"],
+            state["request"],
+        )
+        related = list(analysis.get("related_files") or [])
+
+    return {
+        "project_analysis": analysis,
+        "related_files": related,
+        "target_files": [
+            x["path"]
+            for x in related[:12]
+            if isinstance(x, dict) and x.get("path")
+        ],
+        "status": "PROJECT_ANALYZED",
+    }
+
+
+async def capability_design_node(state: AgentState):
+    value = _bundle(state).get("capability_plan") or {}
+
+    return {
+        "capability_plan": value,
+        "status": "CAPABILITIES_DESIGNED",
+    }
+
+
+async def tool_mcp_decision_node(state: AgentState):
+    value = _bundle(state).get("tool_mcp_plan") or {
+        "decisions": []
+    }
+
+    return {
+        "tool_mcp_plan": value,
+        "status": "TOOL_MCP_DECIDED",
+    }
+
+
+async def agent_architecture_node(state: AgentState):
+    value = _bundle(state).get("agent_architecture") or {}
+
+    return {
+        "agent_architecture": value,
+        "status": "AGENT_ARCHITECTURE_DESIGNED",
+    }
+
+
+async def target_workflow_design_node(state: AgentState):
+    """
+    생성 대상 Agent의 실제 업무 Workflow입니다.
+
+    이 State는 AgentStudio 자체 제작 Graph와 별개입니다.
+    """
+    value = _bundle(state).get("target_agent_workflow") or {
+        "name": "Generated Agent Workflow",
+        "steps": [],
+        "branches": [],
+        "retry_policy": [],
+        "failure_policy": [],
+    }
+
+    return {
+        "target_agent_workflow": value,
+        "status": "TARGET_WORKFLOW_DESIGNED",
+    }
+
+
+def _append_planned_file(
+    value: dict,
+    path: str,
+    purpose: str,
+    component: str,
+    required: bool = True,
+) -> None:
+    rows = value.setdefault("new_files", [])
+    existing = {
+        str(
+            item.get("path") if isinstance(item, dict) else item
+        ).replace("\\", "/").casefold()
+        for item in rows
+    }
+
+    normalized = path.replace("\\", "/").casefold()
+    if normalized not in existing:
+        rows.append({
+            "path": path,
+            "purpose": purpose,
+            "required": bool(required),
+            "component": component,
+        })
+
+
+def _map_component_file(
+    value: dict,
+    component: str,
+    paths: list[str],
+) -> None:
+    rows = value.setdefault("component_file_map", [])
+    existing = {
+        str(item.get("component") or "").casefold()
+        for item in rows
+        if isinstance(item, dict)
+    }
+    if component.casefold() not in existing:
+        rows.append({
+            "component": component,
+            "files": paths,
+            "status": "planned",
+        })
+
+
+def _ensure_minimum_agent_file_plan(
+    value: dict,
+    request: str,
+    design_bundle: dict,
+) -> dict:
+    """
+    LLM file_plan이 지나치게 축약되어도 설계된 Agent가 실행 가능한
+    애플리케이션 단위 산출물을 갖도록 최소 artifact manifest를 보강합니다.
+    """
+    text = (
+        request
+        + "\n"
+        + json.dumps(design_bundle or {}, ensure_ascii=False)
+    ).casefold()
+
+    is_fastapi = "fastapi" in text
+    is_react = "react" in text or "vite" in text
+    has_mcp = "mcp" in text
+    needs_settings = bool(
+        (design_bundle.get("settings_plan") or {}).get("enabled")
+    )
+
+    _append_planned_file(
+        value,
+        "README.md",
+        "설치, 설정, 실행, 테스트 방법과 Agent Workflow 설명",
+        "documentation",
+    )
+    _append_planned_file(
+        value,
+        ".env.example",
+        "실제 Secret 없이 필요한 환경변수 Key와 안전한 예시 제공",
+        "configuration",
+    )
+
+    # v5.172: 생성 Agent는 SYSTEM_ADMIN.cmd 하나로 실행할 수 있어야 합니다.
+    # v5.174: Generated Agent FastAPI import contract + v5.173 UTF-8 BOM launcher contract.
+    # Launcher 내용은 package_completion에서 AgentStudio가 결정적으로 생성합니다.
+    _append_planned_file(
+        value,
+        "SYSTEM_ADMIN.cmd",
+        "사용자 단일 실행 진입점 — UTF-8 설정 후 SYSTEM_ADMIN.ps1을 호출",
+        "system administration",
+        required=False,
+    )
+    _append_planned_file(
+        value,
+        "SYSTEM_ADMIN.ps1",
+        "가상환경/의존성/Backend/Frontend/MCP 준비를 자동 관리하는 실행 스크립트",
+        "system administration",
+        required=False,
+    )
+    _map_component_file(
+        value,
+        "System Administration",
+        ["SYSTEM_ADMIN.cmd", "SYSTEM_ADMIN.ps1"],
+    )
+
+    if is_fastapi:
+        backend_files = [
+            ("backend/app/main.py", "FastAPI Application entrypoint와 Router 등록"),
+            ("backend/app/routers/summary.py", "파일 요약 HTTP API 경계"),
+            ("backend/app/schemas/summary.py", "요약 Request/Response Pydantic Schema"),
+            ("backend/app/services/summary_service.py", "요약 Use Case orchestration"),
+            ("backend/app/services/llm_service.py", "OpenAI/Ollama Provider 추상화와 실제 LLM 호출"),
+            ("backend/app/core/config.py", "환경변수 기반 Runtime 설정"),
+            ("backend/requirements.txt", "Backend 실행 의존성"),
+            ("backend/tests/test_summary_api.py", "요약 API 핵심 계약 테스트"),
+        ]
+        for path, purpose in backend_files:
+            _append_planned_file(value, path, purpose, "backend")
+        _map_component_file(
+            value,
+            "FastAPI Backend",
+            [x[0] for x in backend_files],
+        )
+
+    if has_mcp:
+        mcp_files = [
+            ("backend/app/mcp/client.py", "MCP Client 요청과 응답 처리"),
+            ("backend/app/mcp/transport.py", "stdio 기본 및 Streamable HTTP 확장 가능한 Transport 추상화"),
+            ("mcp_server/server.py", "로컬 MCP Server entrypoint"),
+            ("mcp_server/tools/file_reader.py", "Root/확장자 검증 후 파일을 읽는 MCP Tool"),
+            ("backend/tests/test_mcp_file_reader.py", "Root 탈출/확장자/MCP 파일 읽기 계약 테스트"),
+        ]
+        for path, purpose in mcp_files:
+            _append_planned_file(value, path, purpose, "mcp")
+        _map_component_file(
+            value,
+            "MCP File Access",
+            [x[0] for x in mcp_files],
+        )
+
+    if is_react:
+        frontend_files = [
+            ("frontend/package.json", "React/Vite 실행 및 build scripts"),
+            ("frontend/index.html", "Vite HTML entrypoint"),
+            ("frontend/src/main.jsx", "React Application bootstrap"),
+            ("frontend/src/App.jsx", "요약 UI와 Settings navigation"),
+            ("frontend/src/pages/SummaryPage.jsx", "파일 선택, 요약 실행, 결과 표시/저장 UI"),
+            ("frontend/src/services/api.js", "FastAPI 호출 Client"),
+        ]
+        for path, purpose in frontend_files:
+            _append_planned_file(value, path, purpose, "frontend")
+        _map_component_file(
+            value,
+            "React Frontend",
+            [x[0] for x in frontend_files],
+        )
+
+    if needs_settings:
+        settings_plan = design_bundle.get("settings_plan") or {}
+        for group in ("backend", "frontend"):
+            for _, relative in (settings_plan.get(group) or {}).items():
+                if isinstance(relative, str) and relative.strip():
+                    path = relative.replace("\\", "/")
+                    if group == "backend" and not path.startswith("backend/"):
+                        path = "backend/" + path.lstrip("/")
+                    _append_planned_file(
+                        value,
+                        path,
+                        "Settings Generator가 관리하는 설정 구성요소",
+                        "settings",
+                    )
+
+    return value
+
+
+async def project_file_plan_node(state: AgentState):
+    bundle = _bundle(state)
+    value = dict(bundle.get("file_plan") or {})
+
+    existing = _sanitize_context_paths(
+        state["project_root"],
+        list(
+            value.get("existing_files_to_modify")
+            or state.get("target_files")
+            or []
+        ),
+    )
+
+    value["existing_files_to_modify"] = existing
+    value.setdefault("new_files", [])
+    value.setdefault("component_file_map", [])
+
+    value = _ensure_minimum_agent_file_plan(
+        value=value,
+        request=state["request"],
+        design_bundle=bundle,
+    )
+
+    coding_style = coding_rules_for_request(
+        request=state["request"],
+        project_scope=True,
+    )
+
+    return {
+        "file_plan": value,
+        "coding_style_context": coding_style,
+        "status": "FILE_PLAN_READY",
+    }
+
+
+
+def _normalized_file_plan_paths(file_plan: dict) -> set[str]:
+    result: set[str] = set()
+
+    for item in file_plan.get("new_files") or []:
+        if isinstance(item, str):
+            path = item
+        elif isinstance(item, dict):
+            path = str(item.get("path") or "")
+        else:
+            continue
+
+        value = path.replace("\\", "/").strip().casefold()
+        if value:
+            result.add(value)
+
+    return result
+
+
+def _requirement_contracts(state: AgentState) -> dict:
+    """
+    최초 한 문장뿐 아니라 Workflow Preview가 보존한 인터뷰 전체 문맥,
+    confirmed requirements, design bundle을 모두 검사합니다.
+    """
+    bundle = state.get("design_bundle") or {}
+    payload = (
+        str(state.get("request") or "")
+        + "\n"
+        + str(bundle.get("full_request") or "")
+        + "\n"
+        + str(bundle.get("interview_context") or "")
+        + "\n"
+        + json.dumps(
+            bundle,
+            ensure_ascii=False,
+        )
+    ).casefold()
+
+    return {
+        "fastapi": (
+            "fastapi" in payload
+            or "uvicorn" in payload
+        ),
+        "react": (
+            "react" in payload
+            or "vite" in payload
+        ),
+        "mcp": "mcp" in payload,
+        "stdio": (
+            "stdio" in payload
+            or "standard input" in payload
+            or "표준 입출력" in payload
+        ),
+        "ollama_switch": "ollama" in payload,
+        "gpt_4o_mini": "gpt-4o-mini" in payload,
+        "file_limit_10mb": (
+            "10mb" in payload
+            or "10 mb" in payload
+        ),
+        "timeout_120s": (
+            "120초" in payload
+            or "120 second" in payload
+            or "120s" in payload
+        ),
+        "chunking": (
+            "chunk" in payload
+            or "청크" in payload
+        ),
+        "no_database": (
+            "db 사용하지" in payload
+            or "데이터베이스를 사용하지" in payload
+            or '"database": {"enabled": false' in payload
+        ),
+    }
+
+
+def _enrich_file_plan_from_contracts(
+    state: AgentState,
+    file_plan: dict,
+) -> dict:
+    """
+    확정 요구사항을 File Plan 설명에 보강합니다.
+    자연어 purpose의 특정 단어 유무는 Coverage 실패 조건으로 사용하지 않습니다.
+    """
+    contracts = _requirement_contracts(state)
+    result = json.loads(
+        json.dumps(
+            file_plan or {},
+            ensure_ascii=False,
+        )
+    )
+
+    for item in result.get("new_files") or []:
+        if not isinstance(item, dict):
+            continue
+
+        path = str(item.get("path") or "").replace("\\", "/").casefold()
+        purpose = str(item.get("purpose") or "").strip()
+
+        if path == "backend/app/mcp/transport.py" and contracts["stdio"]:
+            if "stdio" not in purpose.casefold():
+                item["purpose"] = (
+                    (purpose + " — ") if purpose else ""
+                ) + "로컬 stdio를 기본 Transport로 사용하고 확장 가능한 Transport 계층을 구현"
+
+        if path == "backend/app/services/llm_service.py":
+            additions = []
+            if contracts["gpt_4o_mini"]:
+                additions.append("기본 OpenAI gpt-4o-mini")
+            if contracts["ollama_switch"]:
+                additions.append("Ollama 전환 가능")
+            if additions:
+                item["purpose"] = (
+                    (purpose + " — ") if purpose else ""
+                ) + ", ".join(additions)
+
+        if path == "backend/app/core/config.py":
+            additions = []
+            if contracts["file_limit_10mb"]:
+                additions.append("기본 최대 파일 크기 10MB")
+            if contracts["timeout_120s"]:
+                additions.append("기본 처리 타임아웃 120초")
+            if additions:
+                item["purpose"] = (
+                    (purpose + " — ") if purpose else ""
+                ) + ", ".join(additions)
+
+    return result
+
+
+async def requirement_coverage_gate_node(state: AgentState):
+    """
+    File Plan의 필수 구조를 검사합니다.
+
+    confirmed requirements가 source of truth이며,
+    purpose 문자열에 특정 단어가 없다는 이유만으로 개발을 중단하지 않습니다.
+    """
+    contracts = _requirement_contracts(state)
+
+    enriched_plan = _enrich_file_plan_from_contracts(
+        state,
+        state.get("file_plan") or {},
+    )
+
+    paths = _normalized_file_plan_paths(enriched_plan)
+    missing: list[str] = []
+    warnings: list[str] = []
+
+    def require(path: str, reason: str):
+        if path.casefold() not in paths:
+            missing.append(f"{path} — {reason}")
+
+    require("SYSTEM_ADMIN.cmd", "사용자 단일 실행 진입점")
+    require("SYSTEM_ADMIN.ps1", "Windows 실행 관리자 스크립트")
+
+    if contracts["fastapi"]:
+        require("backend/app/main.py", "FastAPI Backend entrypoint")
+        require("backend/app/routers/summary.py", "FastAPI 요약 API Router")
+        require("backend/app/schemas/summary.py", "FastAPI Request/Response Schema")
+        require("backend/app/services/summary_service.py", "Backend Service 계층")
+        require("backend/app/services/llm_service.py", "LLM Provider Service 계층")
+        require("backend/app/core/config.py", "환경/Provider 설정 중앙화")
+
+    if contracts["react"]:
+        require("frontend/package.json", "React/Vite Frontend 의존성 및 scripts")
+        require("frontend/index.html", "Vite HTML entrypoint")
+        require("frontend/src/main.jsx", "React bootstrap")
+        require("frontend/src/app.jsx", "React UI")
+        require("frontend/src/pages/summarypage.jsx", "요약 결과 페이지")
+        require("frontend/src/services/api.js", "FastAPI API Client")
+
+    if contracts["mcp"]:
+        require("backend/app/mcp/client.py", "MCP Client")
+        require("backend/app/mcp/transport.py", "분리된 MCP Transport 계층")
+        require("mcp_server/server.py", "MCP Server entrypoint")
+        require("mcp_server/tools/file_reader.py", "파일 읽기 MCP Tool")
+
+    if contracts["mcp"] and contracts["stdio"]:
+        if "backend/app/mcp/transport.py" in paths:
+            warnings.append(
+                "MCP Transport는 confirmed stdio 계약을 기준으로 Code/Architecture 단계에서 검증합니다."
+            )
+
+    result = {
+        "ok": not missing,
+        "contracts": contracts,
+        "planned_file_count": len(paths),
+        "missing_requirements": missing,
+        "warnings": warnings,
+        "validation_mode": "STRUCTURE_FIRST",
+    }
+
+    return {
+        "file_plan": enriched_plan,
+        "requirement_coverage_gate": result,
+        "status": (
+            "REQUIREMENT_COVERAGE_VALIDATED"
+            if result["ok"]
+            else "REQUIREMENT_COVERAGE_FAILED"
+        ),
+        "error": (
+            ""
+            if result["ok"]
+            else "확정 요구사항의 필수 구조가 File Plan에 모두 반영되지 않았습니다."
+        ),
+    }
+
+
+def route_after_requirement_coverage(
+    state: AgentState,
+) -> Literal["settings_requirement_analysis", "end"]:
+    return (
+        "settings_requirement_analysis"
+        if state.get("status")
+        == "REQUIREMENT_COVERAGE_VALIDATED"
+        else "end"
+    )
+
+
+async def settings_requirement_analysis_node(state: AgentState):
+    raw_plan = dict(_bundle(state).get("settings_plan") or {})
+    plan, path_normalization = _normalize_settings_plan_paths(
+        raw_plan,
+        state.get("file_plan") or {},
+    )
+    categories = list(plan.get("categories") or [])
+
+    requirement_spec = {
+        "enabled": bool(plan.get("enabled")),
+        "reason": plan.get("reason") or "",
+        "categories": [
+            {
+                "id": item.get("id"),
+                "label": item.get("label"),
+                "field_count": len(item.get("fields") or []),
+            }
+            for item in categories
+            if isinstance(item, dict)
+        ],
+    }
+
+    return {
+        "settings_plan": plan,
+        "settings_path_normalization": path_normalization,
+        "settings_requirement_spec": requirement_spec,
+        "status": "SETTINGS_REQUIREMENTS_ANALYZED",
+    }
+
+
+async def settings_schema_design_node(state: AgentState):
+    plan = state.get("settings_plan") or {}
+    fields = []
+
+    for category in plan.get("categories") or []:
+        if not isinstance(category, dict):
+            continue
+
+        for field in category.get("fields") or []:
+            if not isinstance(field, dict):
+                continue
+
+            fields.append({
+                **field,
+                "category_id": category.get("id"),
+                "category_label": category.get("label"),
+            })
+
+    schema = {
+        "enabled": bool(plan.get("enabled")),
+        "fields": fields,
+        "secret_fields": [
+            item.get("key")
+            for item in fields
+            if item.get("secret")
+        ],
+        "backend": plan.get("backend") or {},
+        "security": plan.get("security") or {},
+    }
+
+    return {
+        "settings_schema": schema,
+        "status": "SETTINGS_SCHEMA_DESIGNED",
+    }
+
+
+async def settings_ui_design_node(state: AgentState):
+    plan = state.get("settings_plan") or {}
+
+    ui_plan = {
+        "enabled": bool(plan.get("enabled")),
+        "categories": [
+            {
+                "id": item.get("id"),
+                "label": item.get("label"),
+                "controls": [
+                    {
+                        "key": field.get("key"),
+                        "label": field.get("label"),
+                        "type": field.get("type"),
+                        "secret": bool(field.get("secret")),
+                        "options": field.get("options") or [],
+                    }
+                    for field in item.get("fields") or []
+                    if isinstance(field, dict)
+                ],
+            }
+            for item in plan.get("categories") or []
+            if isinstance(item, dict)
+        ],
+        "frontend": plan.get("frontend") or {},
+    }
+
+    return {
+        "settings_ui_plan": ui_plan,
+        "status": "SETTINGS_UI_DESIGNED",
+    }
+
+
+async def checkpoint_node(state: AgentState):
+    cp = await checkpoint(state["project_root"])
+
+    return {
+        "checkpoint": cp,
+        "status": "CHECKPOINTED",
+    }
+
+
+async def approval_node(state: AgentState):
+    capability = "agent_factory_build"
+
+    if requires_approval(
+        risk_level=1,
+        capability=capability,
+        server_trust_level="SYSTEM",
+        allow_read_without_prompt=True,
+        allow_write_without_prompt=True,
+    ):
+        decision = interrupt(
+            approval_payload(
+                action="BUILD_AGENT_PROGRAM",
+                summary=(
+                    "AgentStudio가 분석한 설계와 파일 계획을 기준으로 "
+                    "프로젝트 코드를 생성/수정합니다."
+                ),
+                risk_level=1,
+                capability=capability,
+                server_trust_level="SYSTEM",
+                payload={
+                    "requirement_spec": state.get("requirement_spec", {}),
+                    "capability_plan": state.get("capability_plan", {}),
+                    "tool_mcp_plan": state.get("tool_mcp_plan", {}),
+                    "agent_architecture": state.get("agent_architecture", {}),
+                    "target_agent_workflow": state.get(
+                        "target_agent_workflow",
+                        {},
+                    ),
+                    "file_plan": state.get("file_plan", {}),
+                    "settings_plan": state.get("settings_plan", {}),
+                },
+            )
+        )
+
+        if isinstance(decision, dict):
+            decision = decision.get("decision")
+
+        if decision != "approve":
+            return {"status": "REJECTED"}
+
+    return {"status": "APPROVED"}
+
+
+def route_after_approval(
+    state: AgentState,
+) -> Literal["code_generation", "end"]:
+    return (
+        "code_generation"
+        if state.get("status") == "APPROVED"
+        else "end"
+    )
+
+
+async def _read_existing_context(state: AgentState) -> dict[str, str]:
+    files: dict[str, str] = {}
+
+    paths = []
+
+    for path in state.get("target_files", [])[:12]:
+        if path not in paths:
+            paths.append(path)
+
+    file_plan = state.get("file_plan") or {}
+
+    for path in file_plan.get("existing_files_to_modify", [])[:20]:
+        if path not in paths:
+            paths.append(path)
+
+    for path in paths:
+        try:
+            files[path] = await read_file(path)
+        except (FileNotFoundError, IsADirectoryError):
+            continue
+
+    return files
+
+
+def _absolute_new_file_plan(
+    project_root: str,
+    file_plan: dict,
+) -> list[dict]:
+    root = Path(project_root)
+    rows = []
+
+    for item in file_plan.get("new_files", []):
+        if isinstance(item, str):
+            relative = item
+            purpose = ""
+        elif isinstance(item, dict):
+            relative = str(item.get("path") or "")
+            purpose = str(item.get("purpose") or "")
+        else:
+            continue
+
+        relative = relative.strip()
+
+        if not relative:
+            continue
+
+        rows.append({
+            "path": str((root / relative).resolve()),
+            "purpose": purpose,
+        })
+
+    return rows
+
+
+
+def _normalize_relative_path(
+    path: str,
+    project_root: str,
+) -> str:
+    """
+    Windows 절대경로/상대경로를 project_root 기준의 동일한 manifest key로 정규화합니다.
+
+    예:
+    F:\\Source\\repos\\Test\\agent\\backend\\app\\main.py
+    backend/app/main.py
+
+    두 값 모두:
+    backend/app/main.py
+    """
+    raw = str(path or "").strip().replace("\\", "/")
+    root_raw = str(project_root or "").strip().replace("\\", "/")
+
+    def clean(value: str) -> str:
+        value = re.sub(r"/+", "/", value.strip())
+        while value.startswith("./"):
+            value = value[2:]
+        return value.rstrip("/").casefold()
+
+    raw_clean = clean(raw)
+    root_clean = clean(root_raw)
+
+    if not raw_clean:
+        return ""
+
+    # Windows 드라이브 경로는 실행 OS와 무관하게 문자열 기준으로 처리합니다.
+    if root_clean:
+        prefix = root_clean + "/"
+
+        if raw_clean == root_clean:
+            return ""
+
+        if raw_clean.startswith(prefix):
+            return raw_clean[len(prefix):]
+
+    # Path가 현재 OS에서 정상적인 절대경로로 인식되는 경우도 처리합니다.
+    try:
+        p = Path(path).expanduser().resolve()
+        root = Path(project_root).expanduser().resolve()
+        return p.relative_to(root).as_posix().casefold()
+    except Exception:
+        pass
+
+    # 드라이브 표기가 남아 있는 외부 절대경로는 그대로 상대경로로 오인하지 않습니다.
+    if re.match(r"^[a-z]:/", raw_clean):
+        return raw_clean
+
+    return raw_clean.lstrip("/")
+
+
+def _canonical_manifest_path(
+    path: str,
+    project_root: str,
+    required_paths: set[str] | None = None,
+) -> str:
+    """
+    manifest 비교 전 특수 dotfile 이름을 보존/보정합니다.
+
+    일부 LLM Patch 응답이 `.env.example`을 `env.example`로 반환하더라도
+    File Plan에 `.env.example`이 required로 존재하면 같은 파일로 간주합니다.
+    일반 파일의 선행 점은 임의로 제거하지 않습니다.
+    """
+    normalized = _normalize_relative_path(
+        path,
+        project_root,
+    )
+
+    required = required_paths or set()
+
+    dotfile_aliases = {
+        "env.example": ".env.example",
+        "gitignore": ".gitignore",
+        "dockerignore": ".dockerignore",
+    }
+
+    alias = dotfile_aliases.get(normalized)
+    if alias and alias in required:
+        return alias
+
+    return normalized
+
+
+def _required_manifest_paths(state: AgentState) -> set[str]:
+    result: set[str] = set()
+
+    for item in (state.get("file_plan") or {}).get("new_files") or []:
+        if isinstance(item, str):
+            path = item
+            required = True
+        elif isinstance(item, dict):
+            path = str(item.get("path") or "")
+            required = bool(item.get("required", True))
+        else:
+            continue
+
+        if required and path.strip():
+            result.add(
+                _normalize_relative_path(
+                    path,
+                    state["project_root"],
+                )
+            )
+
+    return result
+
+
+def _existing_project_manifest_paths(
+    state: AgentState,
+) -> set[str]:
+    root = Path(state["project_root"]).resolve()
+    result: set[str] = set()
+
+    if not root.exists():
+        return result
+
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+
+        try:
+            relative = path.relative_to(root).as_posix().casefold()
+        except ValueError:
+            continue
+
+        # 진단 산출물은 생성 Agent의 기능 파일로 계산하지 않습니다.
+        if relative.split("/", 1)[0] in {
+            "reports",
+            "debug",
+            "logs",
+            "venv",
+            ".venv",
+            "node_modules",
+            ".git",
+        }:
+            continue
+
+        result.add(relative)
+
+    return result
+
+
+def _patch_plan_paths(
+    plan: dict,
+    project_root: str,
+    required_paths: set[str] | None = None,
+) -> set[str]:
+    result: set[str] = set()
+
+    for change in plan.get("changes") or []:
+        if not isinstance(change, dict):
+            continue
+
+        path = str(change.get("path") or "").strip()
+        if path:
+            result.add(
+                _canonical_manifest_path(
+                    path,
+                    project_root,
+                    required_paths,
+                )
+            )
+
+    return result
+
+
+def _merge_patch_plans(
+    primary: dict,
+    supplement: dict,
+    project_root: str,
+    required_paths: set[str] | None = None,
+) -> dict:
+    merged: dict[str, dict] = {}
+
+    for source in (
+        primary.get("changes") or [],
+        supplement.get("changes") or [],
+    ):
+        for change in source:
+            if not isinstance(change, dict):
+                continue
+
+            manifest_path = _canonical_manifest_path(
+                str(change.get("path") or ""),
+                project_root,
+                required_paths,
+            )
+
+            if not manifest_path:
+                continue
+
+            merged[manifest_path] = {
+                **change,
+                "path": manifest_path,
+            }
+
+    return {
+        "changes": list(merged.values()),
+    }
+
+
+def _normalize_patch_plan(
+    plan: dict,
+    project_root: str,
+    required_paths: set[str] | None = None,
+) -> dict:
+    """
+    Plan 내부 경로를 project_root 기준 상대경로로 통일하고 중복을 제거합니다.
+    required dotfile alias도 여기서 정규화합니다.
+    """
+    merged: dict[str, dict] = {}
+
+    for change in plan.get("changes") or []:
+        if not isinstance(change, dict):
+            continue
+
+        manifest_path = _canonical_manifest_path(
+            str(change.get("path") or ""),
+            project_root,
+            required_paths,
+        )
+
+        if not manifest_path:
+            continue
+
+        merged[manifest_path] = {
+            **change,
+            "path": manifest_path,
+        }
+
+    return {
+        **plan,
+        "changes": list(merged.values()),
+    }
+
+
+async def _focused_patch_apply_recovery_plan(
+    state: AgentState,
+    failed_change: dict,
+    exc: PatchApplyError,
+) -> dict:
+    """
+    v5.170: stale/exact-string Patch 실패 시 전체 Code Generation을 다시 하지 않고
+    실패한 단일 파일의 현재 내용을 다시 읽어 focused whole-file recovery plan을 생성합니다.
+    """
+    root = Path(state["project_root"]).resolve()
+    target = Path(exc.target).resolve()
+    try:
+        relative = target.relative_to(root).as_posix()
+    except ValueError as path_exc:
+        raise PermissionError(
+            f"Focused Patch Recovery 대상이 프로젝트 Root 밖입니다: {target}"
+        ) from path_exc
+
+    current_content = await read_file(str(target))
+    intended = {
+        "path": relative,
+        "reason": str(failed_change.get("reason") or ""),
+        "failed_old": exc.old,
+        "intended_new": exc.new,
+    }
+
+    recovery_request = (
+        str(state.get("request") or "")
+        + "\n\n[Focused Patch Recovery]\n"
+        + "기존 Patch의 old 문자열이 현재 파일과 일치하지 않아 적용에 실패했습니다. "
+          "전체 Agent를 다시 생성하지 말고 아래 한 파일만 현재 내용 기준으로 복구하세요.\n"
+        + f"대상 파일: {relative}\n"
+        + "이전 변경 의도:\n"
+        + json.dumps(intended, ensure_ascii=False, indent=2)
+        + "\n\n[절대 규칙]\n"
+          "1. changes에는 위 대상 파일 하나만 반환합니다.\n"
+          "2. 현재 파일을 보존하면서 이전 변경 의도를 실제 코드에 반영합니다.\n"
+          "3. 정확한 old 문자열 추측을 다시 하지 않습니다.\n"
+          "4. replace_entire_file=true와 content에 수정 완료된 전체 파일을 반환합니다.\n"
+          "5. 다른 파일은 수정하지 않습니다.\n"
+          "6. TODO/placeholder/stub를 새로 만들지 않습니다.\n"
+    )
+
+    raw_plan = await create_patch(
+        recovery_request,
+        {str(target): current_content},
+        state.get("provider"),
+        project_scope=True,
+    )
+    normalized = _normalize_patch_plan(
+        raw_plan,
+        state["project_root"],
+        _required_manifest_paths(state),
+    )
+
+    required_paths = _required_manifest_paths(state)
+    canonical_target = _canonical_manifest_path(
+        relative,
+        state["project_root"],
+        required_paths,
+    )
+    matching = []
+    for change in normalized.get("changes") or []:
+        change_path = _canonical_manifest_path(
+            str(change.get("path") or ""),
+            state["project_root"],
+            required_paths,
+        )
+        if change_path.casefold() == canonical_target.casefold():
+            row = dict(change)
+            row["path"] = canonical_target
+            # Focused recovery는 현재 파일 전체를 모델이 이미 본 상태이므로
+            # content가 있으면 partial replacement 대신 전체 파일 교체를 강제합니다.
+            if str(row.get("content") or "").strip():
+                row["create_file"] = False
+                row["replace_entire_file"] = True
+                row["replacements"] = []
+            matching.append(row)
+
+    if len(matching) != 1:
+        raise RuntimeError(
+            "Focused Patch Recovery가 대상 파일 하나의 안전한 Plan을 반환하지 않았습니다: "
+            f"{canonical_target}"
+        )
+
+    if not str(matching[0].get("content") or "").strip():
+        raise RuntimeError(
+            "Focused Patch Recovery가 전체 파일 content를 반환하지 않았습니다: "
+            f"{canonical_target}"
+        )
+
+    return {"changes": matching}
+
+
+async def _apply_patch_with_focused_recovery(
+    state: AgentState,
+    plan: dict,
+    max_recoveries: int = 2,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Patch를 순서대로 적용하되 old-string drift가 발생하면 해당 파일만 다시 생성합니다.
+    이미 성공한 앞쪽 변경은 다시 호출하지 않으므로 중복 적용과 토큰 낭비를 막습니다.
+    """
+    pending = list(plan.get("changes") or [])
+    results: list[dict] = []
+    recoveries: list[dict] = []
+
+    while pending:
+        try:
+            batch_results = await apply_patch(
+                {"changes": pending},
+                project_root=state["project_root"],
+            )
+            results.extend(batch_results)
+            return results, recoveries
+        except PatchApplyError as exc:
+            results.extend(exc.partial_results)
+            if len(recoveries) >= max_recoveries:
+                exc.partial_results = list(results)
+                raise
+            if exc.change_index < 0 or exc.change_index >= len(pending):
+                exc.partial_results = list(results)
+                raise
+
+            failed_change = pending[exc.change_index]
+            focused_plan = await _focused_patch_apply_recovery_plan(
+                state,
+                failed_change,
+                exc,
+            )
+            try:
+                focused_result = await apply_patch(
+                    focused_plan,
+                    project_root=state["project_root"],
+                )
+            except PatchApplyError as focused_exc:
+                focused_exc.partial_results = list(results) + list(focused_exc.partial_results or [])
+                raise
+            results.extend(focused_result)
+            recoveries.append({
+                "target": exc.target,
+                "failed_change_index": exc.change_index,
+                "failed_replacement_index": exc.replacement_index,
+                "strategy": "focused_replace_entire_file",
+                "old_excerpt": exc.old[:500],
+                "new_excerpt": exc.new[:500],
+                "recovery_plan": focused_plan,
+            })
+
+            # 실패 change는 focused whole-file repair로 대체했고, 그 뒤 change만 계속합니다.
+            pending = pending[exc.change_index + 1 :]
+
+    return results, recoveries
+
+
+def _validate_code_plan_manifest(
+    state: AgentState,
+    plan: dict,
+) -> dict:
+    required = _required_manifest_paths(state)
+    existing = _existing_project_manifest_paths(state)
+    planned = _patch_plan_paths(
+        plan,
+        state["project_root"],
+        required,
+    )
+
+    missing = sorted(
+        required - (existing | planned)
+    )
+
+    return {
+        "ok": not missing,
+        "required_count": len(required),
+        "existing_count": len(existing & required),
+        "planned_change_count": len(planned),
+        "missing_required_paths": missing,
+    }
+
+
+CODE_PLAN_SUPPLEMENT_BATCH_SIZE = 3
+CODE_PLAN_SUPPLEMENT_MAX_ROUNDS = 24
+CODE_PLAN_SUPPLEMENT_NO_PROGRESS_LIMIT = 3
+
+
+def _deterministic_support_file_change(
+    state: AgentState,
+    path: str,
+) -> dict | None:
+    """
+    LLM이 hidden dotfile만 반복 누락할 때 안전하게 만들 수 있는 지원 파일은
+    AgentStudio가 결정적으로 보강합니다. 실행 로직 파일은 여기서 임의 생성하지 않습니다.
+    """
+    normalized = str(path or "").replace("\\", "/").casefold()
+
+    if normalized == ".env.example":
+        rows = [
+            "# THEANOVA AgentStudio generated environment example",
+            "# 실제 비밀키/비밀번호는 이 파일에 넣지 마십시오.",
+            "",
+        ]
+        fields = (state.get("settings_schema") or {}).get("fields") or []
+        seen = set()
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            key = str(field.get("key") or "").strip()
+            if not key:
+                continue
+            env_key = re.sub(r"[^A-Za-z0-9_]+", "_", key).upper().strip("_")
+            if not env_key or env_key in seen:
+                continue
+            seen.add(env_key)
+            default = field.get("default")
+            secret = bool(field.get("secret"))
+            value = "" if secret or default is None else str(default)
+            rows.append(f"{env_key}={value}")
+
+        if not seen:
+            rows += [
+                "OPENAI_API_KEY=",
+                "OLLAMA_BASE_URL=http://127.0.0.1:11434",
+            ]
+
+        return {
+            "path": ".env.example",
+            "create_file": True,
+            "content": "\n".join(rows).rstrip() + "\n",
+            "reason": "required .env.example deterministic support-file fallback",
+        }
+
+    if normalized == ".gitignore":
+        return {
+            "path": ".gitignore",
+            "create_file": True,
+            "content": (
+                ".env\n"
+                ".venv/\n"
+                "venv/\n"
+                "__pycache__/\n"
+                "*.py[cod]\n"
+                "node_modules/\n"
+                "dist/\n"
+                "logs/\n"
+            ),
+            "reason": "required .gitignore deterministic support-file fallback",
+        }
+
+    if normalized == ".dockerignore":
+        return {
+            "path": ".dockerignore",
+            "create_file": True,
+            "content": (
+                ".git\n"
+                ".env\n"
+                ".venv\n"
+                "venv\n"
+                "node_modules\n"
+                "__pycache__\n"
+                "logs\n"
+            ),
+            "reason": "required .dockerignore deterministic support-file fallback",
+        }
+
+    return None
+
+
+def _file_plan_rows_for_paths(
+    state: AgentState,
+    paths: list[str],
+) -> list[dict]:
+    """보강 대상 path에 해당하는 File Plan 행만 추립니다."""
+    requested = set(paths)
+    rows: list[dict] = []
+
+    for item in (state.get("file_plan") or {}).get("new_files") or []:
+        if isinstance(item, str):
+            raw_path = item
+            row = {
+                "path": item,
+                "required": True,
+            }
+        elif isinstance(item, dict):
+            raw_path = str(item.get("path") or "")
+            row = dict(item)
+        else:
+            continue
+
+        normalized = _normalize_relative_path(
+            raw_path,
+            state["project_root"],
+        )
+
+        if normalized in requested:
+            rows.append(row)
+
+    return rows
+
+
+def _filter_patch_plan_paths(
+    plan: dict,
+    project_root: str,
+    allowed_paths: set[str],
+    required_paths: set[str],
+) -> dict:
+    """
+    Code Plan 보강 응답이 이미 생성된 다른 파일까지 다시 반환하더라도
+    이번 배치에서 요청한 누락 파일만 병합합니다.
+    """
+    changes = []
+
+    for change in plan.get("changes") or []:
+        if not isinstance(change, dict):
+            continue
+
+        manifest_path = _canonical_manifest_path(
+            str(change.get("path") or ""),
+            project_root,
+            required_paths,
+        )
+
+        if manifest_path not in allowed_paths:
+            continue
+
+        changes.append({
+            **change,
+            "path": manifest_path,
+        })
+
+    return {
+        **plan,
+        "changes": changes,
+    }
+
+
+async def _complete_code_plan_manifest(
+    state: AgentState,
+    plan: dict,
+    files: dict[str, str],
+) -> tuple[dict, dict]:
+    """
+    LLM이 많은 required 파일을 한 번의 JSON 응답에 모두 담지 못하는 경우를
+    대비해 누락 파일을 작은 배치로 반복 생성합니다.
+
+    기존 v5.161은 보강 요청을 단 한 번만 수행했기 때문에, 20~30개 파일을
+    계획한 Agent에서 일부만 반환되면 CODE_PLAN_INCOMPLETE로 즉시 종료됐습니다.
+    """
+    required_paths = _required_manifest_paths(state)
+    plan = _normalize_patch_plan(
+        plan,
+        state["project_root"],
+        required_paths,
+    )
+    validation = _validate_code_plan_manifest(
+        state,
+        plan,
+    )
+
+    initial_missing = list(
+        validation.get("missing_required_paths") or []
+    )
+    attempts: list[dict] = []
+
+    if validation.get("ok"):
+        return plan, {
+            **validation,
+            "initial_missing_count": 0,
+            "supplement_rounds": 0,
+            "supplement_attempts": [],
+        }
+
+    estimated_rounds = (
+        len(initial_missing) + CODE_PLAN_SUPPLEMENT_BATCH_SIZE - 1
+    ) // CODE_PLAN_SUPPLEMENT_BATCH_SIZE
+    max_rounds = min(
+        CODE_PLAN_SUPPLEMENT_MAX_ROUNDS,
+        max(6, estimated_rounds + 4),
+    )
+    no_progress_rounds = 0
+
+    for round_no in range(1, max_rounds + 1):
+        missing_before = list(
+            validation.get("missing_required_paths") or []
+        )
+        if not missing_before:
+            break
+
+        # 직전 보강이 진전이 없었다면 한 파일씩 집중 생성합니다.
+        batch_size = (
+            1
+            if no_progress_rounds > 0
+            else CODE_PLAN_SUPPLEMENT_BATCH_SIZE
+        )
+        targets = missing_before[:batch_size]
+        target_rows = _file_plan_rows_for_paths(
+            state,
+            targets,
+        )
+
+        supplement_request = (
+            state["request"]
+            + "\n\n[Code Plan 자동 보강 - 현재 배치]\n"
+            + json.dumps(
+                target_rows,
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n\n[이번 배치에서 반드시 생성할 정확한 상대경로]\n"
+            + json.dumps(
+                targets,
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n\n[확정 Agent Architecture]\n"
+            + json.dumps(
+                state.get("agent_architecture") or {},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n\n[확정 Tool/MCP Plan]\n"
+            + json.dumps(
+                state.get("tool_mcp_plan") or {},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n\n"
+            "이번 응답은 위 정확한 상대경로만 changes[]에 반환하십시오. "
+            "각 target path마다 정확히 하나의 change를 포함하고, "
+            "아직 존재하지 않는 파일은 create_file=true와 전체 content를 작성하십시오. "
+            "실행 가능한 구현이어야 하며 TODO/placeholder/stub를 남기지 마십시오. "
+            "이미 Code Plan에 들어 있는 다른 파일은 반복 생성하거나 수정하지 마십시오."
+        )
+
+        try:
+            supplement = await create_patch(
+                supplement_request,
+                files,
+                state.get("provider"),
+                project_scope=True,
+            )
+            supplement = _normalize_patch_plan(
+                supplement,
+                state["project_root"],
+                required_paths,
+            )
+            supplement = _filter_patch_plan_paths(
+                supplement,
+                state["project_root"],
+                set(targets),
+                required_paths,
+            )
+        except Exception as exc:
+            attempts.append({
+                "round": round_no,
+                "requested_paths": targets,
+                "returned_paths": [],
+                "added_paths": [],
+                "remaining_count": len(missing_before),
+                "error": str(exc),
+            })
+            no_progress_rounds += 1
+            if (
+                no_progress_rounds
+                >= CODE_PLAN_SUPPLEMENT_NO_PROGRESS_LIMIT
+            ):
+                break
+            continue
+
+        returned_paths = sorted(
+            _patch_plan_paths(
+                supplement,
+                state["project_root"],
+                required_paths,
+            )
+        )
+
+        plan = _merge_patch_plans(
+            plan,
+            supplement,
+            state["project_root"],
+            required_paths,
+        )
+        next_validation = _validate_code_plan_manifest(
+            state,
+            plan,
+        )
+        missing_after = list(
+            next_validation.get("missing_required_paths") or []
+        )
+        added_paths = sorted(
+            set(missing_before) - set(missing_after)
+        )
+
+        attempts.append({
+            "round": round_no,
+            "requested_paths": targets,
+            "returned_paths": returned_paths,
+            "added_paths": added_paths,
+            "remaining_count": len(missing_after),
+            "error": "",
+        })
+
+        validation = next_validation
+
+        if added_paths:
+            no_progress_rounds = 0
+        else:
+            no_progress_rounds += 1
+
+        if validation.get("ok"):
+            break
+
+        if (
+            no_progress_rounds
+            >= CODE_PLAN_SUPPLEMENT_NO_PROGRESS_LIMIT
+        ):
+            break
+
+    # LLM이 .env.example 같은 hidden support file 하나만 끝까지 누락하는 경우
+    # 실행 코드와 무관한 안전한 파일에 한해서 결정적 fallback을 적용합니다.
+    remaining_before_fallback = list(
+        validation.get("missing_required_paths") or []
+    )
+    deterministic_changes = []
+    for missing_path in remaining_before_fallback:
+        change = _deterministic_support_file_change(
+            state,
+            missing_path,
+        )
+        if change is not None:
+            deterministic_changes.append(change)
+
+    if deterministic_changes:
+        fallback_plan = _normalize_patch_plan(
+            {"changes": deterministic_changes},
+            state["project_root"],
+            required_paths,
+        )
+        plan = _merge_patch_plans(
+            plan,
+            fallback_plan,
+            state["project_root"],
+            required_paths,
+        )
+        next_validation = _validate_code_plan_manifest(
+            state,
+            plan,
+        )
+        missing_after = list(
+            next_validation.get("missing_required_paths") or []
+        )
+        added_paths = sorted(
+            set(remaining_before_fallback) - set(missing_after)
+        )
+        attempts.append({
+            "round": "deterministic",
+            "strategy": "support_file_fallback",
+            "requested_paths": remaining_before_fallback,
+            "returned_paths": [
+                str(item.get("path") or "")
+                for item in deterministic_changes
+            ],
+            "added_paths": added_paths,
+            "remaining_count": len(missing_after),
+            "error": "",
+        })
+        validation = next_validation
+
+    return plan, {
+        **validation,
+        "initial_missing_count": len(initial_missing),
+        "supplement_rounds": len(attempts),
+        "supplement_attempts": attempts,
+        "supplement_completed": bool(validation.get("ok")),
+        "supplement_no_progress_rounds": no_progress_rounds,
+    }
+
+
+def _validate_stdio_code_plan(
+    state: AgentState,
+    plan: dict,
+) -> dict:
+    """
+    stdio 확정 요구인데 Code Plan 자체에 Flask/requests/localhost HTTP 구현이
+    들어 있으면 실제 파일 적용 전에 중단합니다.
+    """
+    contracts = _requirement_contracts(state)
+    if not contracts.get("stdio"):
+        return {"ok": True, "violations": []}
+
+    forbidden = [
+        "from flask",
+        "import flask",
+        "requests.post",
+        "requests.get",
+        "localhost:5000",
+        "127.0.0.1:5000",
+        "app.run(",
+    ]
+
+    violations = []
+
+    for change in plan.get("changes") or []:
+        if not isinstance(change, dict):
+            continue
+
+        path = str(change.get("path") or "").replace("\\", "/").casefold()
+        if not (
+            "mcp" in path
+            or path.endswith("server.py")
+        ):
+            continue
+
+        content = str(
+            change.get("content")
+            or change.get("new_content")
+            or change.get("replacement")
+            or ""
+        ).casefold()
+
+        found = [
+            token
+            for token in forbidden
+            if token in content
+        ]
+
+        if found:
+            violations.append({
+                "path": path,
+                "forbidden": found,
+                "message": (
+                    "MCP stdio 확정 요구와 충돌하는 HTTP/Flask 구현이 "
+                    "Code Plan에 포함되어 있습니다."
+                ),
+            })
+
+    return {
+        "ok": not violations,
+        "violations": violations,
+    }
+
+
+def _repair_targets_from_validation(
+    state: AgentState,
+) -> dict:
+    artifact = state.get("build_artifact_validation") or {}
+    root = Path(state["project_root"]).resolve()
+
+    def rel(path: str) -> str:
+        try:
+            return Path(path).resolve().relative_to(root).as_posix()
+        except Exception:
+            return str(path).replace("\\", "/")
+
+    missing = [
+        rel(path)
+        for path in artifact.get("missing_files") or []
+    ]
+
+    architecture = [
+        {
+            **item,
+            "relative_path": rel(str(item.get("path") or "")),
+        }
+        for item in artifact.get("architecture_errors") or []
+        if isinstance(item, dict)
+    ]
+
+    placeholders = [
+        rel(path)
+        for path in artifact.get("placeholder_files") or []
+    ]
+
+    placeholder_details = []
+    for item in artifact.get("placeholder_details") or []:
+        if not isinstance(item, dict):
+            continue
+        placeholder_details.append({
+            "relative_path": rel(str(item.get("path") or "")),
+            "findings": list(item.get("findings") or []),
+        })
+
+    style = [
+        {
+            **item,
+            "relative_path": rel(str(item.get("path") or "")),
+        }
+        for item in artifact.get("coding_style_errors") or []
+        if isinstance(item, dict)
+    ]
+
+    return {
+        "missing_files": missing,
+        "architecture_errors": architecture,
+        "placeholder_files": placeholders,
+        "placeholder_details": placeholder_details,
+        "coding_style_errors": style,
+    }
+
+
+def _repair_required_paths(
+    targets: dict,
+) -> set[str]:
+    result = set(
+        str(path).replace("\\", "/").casefold()
+        for path in targets.get("missing_files") or []
+    )
+
+    for key in (
+        "architecture_errors",
+        "coding_style_errors",
+    ):
+        for item in targets.get(key) or []:
+            path = str(item.get("relative_path") or "").replace("\\", "/").casefold()
+            if path:
+                result.add(path)
+
+    result.update(
+        str(path).replace("\\", "/").casefold()
+        for path in targets.get("placeholder_files") or []
+    )
+
+    return result
+
+
+
+_TEST_REPAIR_SUFFIXES = (
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".json", ".html", ".css", ".md", ".txt",
+)
+
+
+def _latest_debug_entry(state: AgentState) -> dict:
+    history = state.get("debug_history") or []
+    if history and isinstance(history[-1], dict):
+        return history[-1]
+    return {}
+
+
+def _debug_history_count(state: AgentState, kind: str) -> int:
+    return sum(
+        1
+        for item in state.get("debug_history") or []
+        if isinstance(item, dict) and str(item.get("type") or "") == kind
+    )
+
+
+def _candidate_code_paths_from_text(text: str) -> list[str]:
+    """테스트/디버그 로그에서 명시된 소스 경로를 보수적으로 추출합니다."""
+    value = str(text or "")
+    result: list[str] = []
+    seen: set[str] = set()
+
+    patterns = (
+        # Windows/Unix 상대·절대 경로. 공백이 거의 없는 소스 경로를 대상으로 합니다.
+        re.compile(r"(?i)([A-Za-z]:[\\/][^\r\n\"'<>|]+?\.(?:py|jsx?|tsx?|json|html|css|md|txt))"),
+        re.compile(r"(?i)((?:\.?\.?[\\/])?(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+\.(?:py|jsx?|tsx?|json|html|css|md|txt))"),
+        # Python compileall / traceback가 basename만 주는 경우.
+        re.compile(r"(?i)\(([A-Za-z0-9_.-]+\.py),\s*line\s*\d+\)"),
+    )
+
+    for pattern in patterns:
+        for match in pattern.finditer(value):
+            raw = str(match.group(1) or "").strip().strip("`'\"")
+            if not raw:
+                continue
+            key = raw.replace("\\", "/").casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(raw)
+
+    return result
+
+
+def _test_repair_target_paths(state: AgentState, analysis: dict) -> list[str]:
+    """
+    테스트 실패 로그/Debug 지시에서 실제 수정 대상 파일을 찾습니다.
+
+    basename만 있는 경우 File Plan 또는 현재 프로젝트에서 유일하게 일치하는 파일만 선택하여
+    엉뚱한 파일을 수정하지 않습니다.
+    """
+    project_root = str(state.get("project_root") or "")
+    root = Path(project_root).resolve()
+    file_plan = state.get("file_plan") or {}
+    planned = []
+    for item in file_plan.get("new_files") or []:
+        raw = item if isinstance(item, str) else str((item or {}).get("path") or "")
+        if raw:
+            planned.append(str(raw).replace("\\", "/").lstrip("./"))
+
+    source_text = "\n".join([
+        str(analysis.get("request_for_patch") or ""),
+        str(analysis.get("diagnosis") or ""),
+        str(analysis.get("local_log_triage") or ""),
+        str((state.get("test_result") or {}).get("output") or ""),
+    ])
+    candidates = _candidate_code_paths_from_text(source_text)
+    result: list[str] = []
+    seen: set[str] = set()
+
+    def add(relative: str) -> None:
+        rel = str(relative or "").replace("\\", "/").lstrip("./")
+        if not rel or _is_runtime_artifact_path(project_root, rel):
+            return
+        if Path(rel).suffix.casefold() not in _TEST_REPAIR_SUFFIXES:
+            return
+        # File Plan의 원래 대소문자를 우선 보존합니다.
+        rel = _canonical_planned_path(file_plan, rel)
+        key = rel.casefold()
+        if key in seen:
+            return
+        target = root / rel
+        if target.is_file():
+            seen.add(key)
+            result.append(rel)
+
+    for raw in candidates:
+        normalized = _normalize_relative_path(raw, project_root)
+        if normalized and not re.match(r"^[a-z]:/", normalized):
+            if "/" in normalized:
+                add(normalized)
+                continue
+
+        basename = Path(str(raw).replace("\\", "/")).name.casefold()
+        if not basename:
+            continue
+        matches = [path for path in planned if Path(path).name.casefold() == basename]
+        if len(matches) == 1:
+            add(matches[0])
+            continue
+
+        disk_matches = []
+        try:
+            for path in root.rglob("*"):
+                if not path.is_file() or path.name.casefold() != basename:
+                    continue
+                try:
+                    relative = path.relative_to(root).as_posix()
+                except ValueError:
+                    continue
+                if _is_runtime_artifact_path(project_root, relative):
+                    continue
+                disk_matches.append(relative)
+        except OSError:
+            disk_matches = []
+        if len(disk_matches) == 1:
+            add(disk_matches[0])
+
+    return result[:3]
+
+
+async def _focused_test_failure_repair_plan(
+    state: AgentState,
+    analysis: dict,
+) -> tuple[dict, dict]:
+    """
+    TEST_FAILED 후에는 이전 Build Placeholder Repair를 재사용하지 않고,
+    테스트 로그가 지목한 파일만 현재 내용 기준으로 전체 파일 복구합니다.
+    """
+    root = Path(state["project_root"]).resolve()
+    targets = _test_repair_target_paths(state, analysis)
+    validation = {
+        "ok": False,
+        "repair_type": "test_failure",
+        "targets": targets,
+        "target_count": len(targets),
+        "missing_repair_targets": [],
+    }
+    if not targets:
+        validation["error"] = "테스트 로그에서 안전하게 특정할 수 있는 수정 대상 파일을 찾지 못했습니다."
+        return {"changes": []}, validation
+
+    combined_changes: list[dict] = []
+    missing: list[str] = []
+    test_output = str((state.get("test_result") or {}).get("output") or "")[-12_000:]
+
+    for relative in targets:
+        target = (root / relative).resolve()
+        if root != target and root not in target.parents:
+            missing.append(relative)
+            continue
+        if not target.is_file():
+            missing.append(relative)
+            continue
+
+        current_content = await read_file(str(target))
+        request = (
+            str(state.get("request") or "")
+            + "\n\n[AgentStudio Test Failure Focused Repair]\n"
+            + f"대상 파일: {relative}\n"
+            + f"실패 진단: {analysis.get('diagnosis') or ''}\n"
+            + f"구체적 수정 지시: {analysis.get('request_for_patch') or ''}\n\n"
+            + "테스트 실패 로그:\n"
+            + test_output
+            + "\n\n[절대 규칙]\n"
+              "1. changes에는 위 대상 파일 하나만 반환합니다.\n"
+              "2. 현재 파일 전체를 읽고 테스트 오류를 실제로 해결한 완전한 코드를 작성합니다.\n"
+              "3. replace_entire_file=true와 content에 수정 완료된 전체 파일을 반환합니다.\n"
+              "4. replacements 기반 부분 패치보다 전체 파일 교체를 사용합니다.\n"
+              "5. Python이면 들여쓰기/문법/import를 포함해 파일 단위 문법이 유효해야 합니다.\n"
+              "6. TODO/placeholder/stub를 남기지 않습니다.\n"
+              "7. 다른 파일은 수정하지 않습니다.\n"
+        )
+        raw_plan = await create_patch(
+            request,
+            {str(target): current_content},
+            state.get("provider"),
+            project_scope=True,
+        )
+        normalized = _normalize_patch_plan(
+            raw_plan,
+            state["project_root"],
+            _required_manifest_paths(state),
+        )
+        canonical_target = _canonical_manifest_path(
+            relative,
+            state["project_root"],
+            _required_manifest_paths(state),
+        )
+        matching = []
+        for change in normalized.get("changes") or []:
+            change_path = _canonical_manifest_path(
+                str(change.get("path") or ""),
+                state["project_root"],
+                _required_manifest_paths(state),
+            )
+            if change_path.casefold() != canonical_target.casefold():
+                continue
+            row = dict(change)
+            row["path"] = canonical_target
+            if str(row.get("content") or "").strip():
+                row["create_file"] = False
+                row["replace_entire_file"] = True
+                row["replacements"] = []
+            matching.append(row)
+
+        if len(matching) != 1 or not str(matching[0].get("content") or "").strip():
+            missing.append(relative)
+            continue
+        combined_changes.append(matching[0])
+
+    validation["missing_repair_targets"] = missing
+    validation["planned_repair_count"] = len(combined_changes)
+    validation["ok"] = bool(combined_changes) and not missing
+    return {"changes": combined_changes}, validation
+
+
+def _clip_generation_context(value: str, limit: int = 12_000) -> str:
+    """Code Generation에 필요한 인터뷰 원문은 확정 요구사항을 보조하는 범위로 제한합니다."""
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+
+    marker = (
+        "\n\n... [AgentStudio v5.166: 인터뷰 원문 중간 축약 / "
+        f"원본 {len(text):,}자] ...\n\n"
+    )
+    usable = max(0, limit - len(marker))
+    head = usable // 3
+    tail = usable - head
+    return text[:head] + marker + text[-tail:]
+
+
+def _compact_coding_style_context(state: AgentState) -> dict:
+    """
+    Coding Style 전체 rule 본문은 patch_service가 다시 선택해서 Prompt에 적용합니다.
+    Agent Factory 설계 Context에는 태그/Rule ID만 넣어 동일 규칙이 두 번 들어가는 것을 막습니다.
+    """
+    style = state.get("coding_style_context") or {}
+    rules = style.get("rules") or []
+    return {
+        "tags": list(style.get("tags") or []),
+        "rule_ids": [
+            str(item.get("id") or "")
+            for item in rules
+            if isinstance(item, dict) and item.get("id")
+        ],
+    }
+
+
+async def _read_repair_context(state: AgentState, targets: dict) -> dict[str, str]:
+    """Repair 단계에서는 실패 대상 파일만 LLM Context에 넣어 재생성 범위를 좁힙니다."""
+    root = Path(state["project_root"]).resolve()
+    paths: list[str] = []
+
+    for raw in targets.get("missing_files") or []:
+        paths.append(str(raw))
+    for raw in targets.get("placeholder_files") or []:
+        paths.append(str(raw))
+    for key in ("architecture_errors", "coding_style_errors"):
+        for item in targets.get(key) or []:
+            if isinstance(item, dict) and item.get("relative_path"):
+                paths.append(str(item.get("relative_path")))
+
+    result: dict[str, str] = {}
+    seen: set[str] = set()
+    for raw in paths:
+        relative = _normalize_relative_path(raw, state["project_root"])
+        if not relative or relative in seen:
+            continue
+        seen.add(relative)
+        target = (root / relative).resolve()
+        if root != target and root not in target.parents:
+            continue
+        if not target.is_file():
+            continue
+        try:
+            result[str(target)] = target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return result
+
+
+
+
+def _normalize_generated_fastapi_imports(project_root: str) -> dict:
+    """생성된 표준 backend/app FastAPI 패키지의 내부 import를 실행 위치와 일치시킵니다.
+
+    Generated SYSTEM_ADMIN은 backend 폴더를 WorkingDirectory로 두고
+    ``uvicorn app.main:app``을 실행합니다. 따라서 backend/app 내부 모듈은
+    ``app.*`` 또는 상대 import를 사용해야 합니다. 이전 생성본의
+    ``from routers import ...`` / ``from backend.app...`` 혼용을 결정적으로 정리합니다.
+    """
+    root = Path(project_root).resolve()
+    backend_dir = root / "backend"
+    app_dir = backend_dir / "app"
+    if not app_dir.is_dir():
+        return {"ok": True, "changed_files": [], "created_package_files": [], "reason": "backend/app 없음"}
+
+    changed_files: list[str] = []
+    created_package_files: list[str] = []
+    patch_rows: list[dict] = []
+
+    # 표준 패키지 경계를 명확히 하여 Windows/Python 환경별 namespace package 차이를 제거합니다.
+    package_dirs = [app_dir]
+    for name in ("routers", "services", "schemas", "core", "mcp"):
+        candidate = app_dir / name
+        if candidate.is_dir():
+            package_dirs.append(candidate)
+    for directory in package_dirs:
+        init_file = directory / "__init__.py"
+        if not init_file.exists():
+            init_file.write_text("", encoding="utf-8", newline="\n")
+            rel = init_file.relative_to(root).as_posix()
+            created_package_files.append(rel)
+            patch_rows.append({
+                "path": str(init_file),
+                "changed": True,
+                "created": True,
+                "verified": True,
+                "reason": "FastAPI Python package 경계 자동 생성",
+            })
+
+    bare_prefixes = "routers|services|schemas|core|mcp"
+    from_bare = re.compile(
+        rf"(?m)^(?P<indent>\s*)from\s+(?P<module>(?:{bare_prefixes})(?:\.[A-Za-z_][A-Za-z0-9_\.]*)?)\s+import\s+"
+    )
+    from_backend = re.compile(r"(?m)^(?P<indent>\s*)from\s+backend\.app(?P<rest>(?:\.[A-Za-z_][A-Za-z0-9_\.]*)?)\s+import\s+")
+
+    for path in sorted(app_dir.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            original = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            original = path.read_text(encoding="utf-8-sig", errors="replace")
+
+        updated = from_backend.sub(
+            lambda m: f"{m.group('indent')}from app{m.group('rest')} import ",
+            original,
+        )
+        updated = from_bare.sub(
+            lambda m: f"{m.group('indent')}from app.{m.group('module')} import ",
+            updated,
+        )
+
+        if updated != original:
+            path.write_text(updated, encoding="utf-8", newline="\n")
+            rel = path.relative_to(root).as_posix()
+            changed_files.append(rel)
+            patch_rows.append({
+                "path": str(path),
+                "changed": True,
+                "created": False,
+                "verified": True,
+                "reason": "Generated FastAPI 내부 import를 backend cwd + app.* 기준으로 정규화",
+            })
+
+    # main.py의 대표적인 위험 import가 남아 있으면 COMPLETED로 진행하지 않습니다.
+    violations: list[dict] = []
+    for path in sorted(app_dir.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for line_no, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            if re.match(rf"^from\s+(?:{bare_prefixes})(?:\.|\s)", stripped):
+                violations.append({"path": path.relative_to(root).as_posix(), "line": line_no, "snippet": stripped})
+            if re.match(r"^from\s+backend\.app(?:\.|\s)", stripped):
+                violations.append({"path": path.relative_to(root).as_posix(), "line": line_no, "snippet": stripped})
+
+    return {
+        "ok": not violations,
+        "changed_files": changed_files,
+        "created_package_files": created_package_files,
+        "violations": violations,
+        "patch_rows": patch_rows,
+        "uvicorn_target": "app.main:app",
+        "working_directory": str(backend_dir),
+    }
+
+async def code_generation_node(state: AgentState):
+    files = await _read_existing_context(state)
+
+    design_bundle = state.get("design_bundle") or {}
+    build_context = {
+        "requirement_spec": state.get("requirement_spec", {}),
+        "capability_plan": state.get("capability_plan", {}),
+        "tool_mcp_plan": state.get("tool_mcp_plan", {}),
+        "agent_architecture": state.get("agent_architecture", {}),
+        "target_agent_workflow": state.get("target_agent_workflow", {}),
+        "file_plan": state.get("file_plan", {}),
+        "settings_plan": state.get("settings_plan", {}),
+        "settings_schema": state.get("settings_schema", {}),
+        "settings_ui_plan": state.get("settings_ui_plan", {}),
+        # 전체 Coding Style rule/prompt는 create_patch()가 한 번만 주입합니다.
+        "coding_style": _compact_coding_style_context(state),
+        "confirmed_requirements": design_bundle.get("confirmed_requirements") or {},
+        # 확정 요구사항이 있으므로 인터뷰 전체 원문은 보조 Context만 유지합니다.
+        "interview_context": _clip_generation_context(
+            design_bundle.get("interview_context") or ""
+        ),
+        "new_files_absolute": _absolute_new_file_plan(
+            state["project_root"],
+            state.get("file_plan") or {},
+        ),
+    }
+
+    latest_debug = _latest_debug_entry(state)
+    test_repair_mode = (
+        state.get("status") == "DEBUG_PATCH_READY"
+        and str(latest_debug.get("type") or "") == "test_failure"
+    )
+    repair_mode = (
+        state.get("status") == "DEBUG_PATCH_READY"
+        and not test_repair_mode
+        and bool(state.get("build_artifact_validation"))
+        and not bool((state.get("build_artifact_validation") or {}).get("ok"))
+    )
+    repair_validation: dict = {}
+
+    if test_repair_mode:
+        try:
+            plan, repair_validation = await _focused_test_failure_repair_plan(
+                state,
+                latest_debug,
+            )
+        except Exception as exc:
+            return {
+                "plan": {"changes": []},
+                "repair_plan_validation": {
+                    "ok": False,
+                    "repair_type": "test_failure",
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                "status": "TEST_REPAIR_PLAN_FAILED",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+        if not repair_validation.get("ok"):
+            return {
+                "plan": plan,
+                "repair_plan_validation": repair_validation,
+                "status": "TEST_REPAIR_PLAN_INCOMPLETE",
+                "error": str(
+                    repair_validation.get("error")
+                    or "테스트 실패 Focused Repair Plan이 수정 대상 파일을 완전하게 포함하지 못했습니다."
+                ),
+            }
+
+        code_plan_validation = state.get("code_plan_validation") or _validate_code_plan_manifest(
+            state,
+            plan,
+        )
+
+    elif repair_mode:
+        targets = _repair_targets_from_validation(state)
+        focused_files = await _read_repair_context(state, targets)
+        if focused_files:
+            files = focused_files
+
+        repair_attempt = int(state.get("debug_iteration") or 0)
+        emergency_repair_instruction = (
+            "동일 Placeholder가 이전 Repair 후에도 남아 있습니다. "
+            "부분 치환이 아니라 대상 파일의 관련 함수/컴포넌트를 완전한 구현으로 다시 작성하십시오. "
+            if repair_attempt >= 2
+            else ""
+        )
+
+        patch_request = (
+            state["request"]
+            + "\\n\\n[Agent Factory 확정 설계]\\n"
+            + json.dumps(
+                build_context,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\\n\\n[이번 Repair 대상만 수정]\\n"
+            + json.dumps(
+                targets,
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\\n\\n"
+            + emergency_repair_instruction
+            + "이전 전체 Code Plan을 반복하지 마십시오. "
+            "위 missing_files는 반드시 create_file=true로 생성하고, "
+            "architecture_errors / placeholder_files / coding_style_errors는 "
+            "해당 파일만 실제 수정하십시오. "
+            "placeholder_details의 line/reason/snippet은 검증기가 실제로 발견한 미구현 근거입니다. "
+            "해당 미구현 로직을 동작 가능한 구현으로 교체하고 같은 marker가 남지 않게 하십시오. "
+            "React/HTML의 placeholder= 속성은 정상 입력 힌트이므로 제거하거나 미구현 코드로 취급하지 마십시오. "
+            "이번 Repair 대상에 없는 파일은 changes[]에 포함하지 마십시오. "
+            "MCP stdio 요구에서는 Flask/requests/localhost HTTP 서버를 사용하지 마십시오. "
+            "기본 LLM은 설정에서 gpt-4o-mini를 읽고 Ollama로 전환 가능해야 하며 "
+            "gpt-4를 소스에 직접 하드코딩하지 마십시오. "
+            "React + Vite, FastAPI + Uvicorn, MCP stdio 계약을 확정 요구사항 그대로 유지하십시오."
+        )
+
+        try:
+            plan = await create_patch(
+                patch_request,
+                files,
+                state.get("provider"),
+                project_scope=True,
+            )
+        except Exception as exc:
+            return {
+                "plan": {"changes": []},
+                "status": "CODE_GENERATION_FAILED",
+                "error": f"{type(exc).__name__}: {exc}",
+                "code_generation_error_type": type(exc).__name__,
+            }
+        required_paths = _required_manifest_paths(state)
+        plan = _normalize_patch_plan(
+            plan,
+            state["project_root"],
+            required_paths,
+        )
+
+        required_repair = _repair_required_paths(targets)
+        plan = _filter_patch_plan_paths(
+            plan,
+            state["project_root"],
+            required_repair,
+            required_paths,
+        )
+        repair_plan_paths = _patch_plan_paths(
+            plan,
+            state["project_root"],
+        )
+        missing_repair = sorted(
+            required_repair - repair_plan_paths
+        )
+
+        repair_validation = {
+            "ok": not missing_repair,
+            "repair_target_count": len(required_repair),
+            "planned_repair_count": len(repair_plan_paths),
+            "missing_repair_targets": missing_repair,
+            "targets": targets,
+        }
+
+        if missing_repair:
+            return {
+                "plan": plan,
+                "repair_plan_validation": repair_validation,
+                "status": "REPAIR_PLAN_INCOMPLETE",
+                "error": (
+                    "Repair Plan이 실패 원인의 모든 대상 파일을 포함하지 않습니다."
+                ),
+            }
+
+        code_plan_validation = _validate_code_plan_manifest(
+            state,
+            plan,
+        )
+
+    else:
+        patch_request = (
+            state["request"]
+            + "\\n\\n[Agent Factory 설계 결과]\\n"
+            + json.dumps(
+                build_context,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\\n\\n[필수 Code Plan 계약]\\n"
+            "file_plan.new_files에서 required=true인 모든 파일을 이번 changes[]에 포함하십시오. "
+            "대상 프로젝트에 이미 존재하는 파일은 필요한 경우 수정하고, "
+            "존재하지 않는 required 파일은 모두 create_file=true로 생성하십시오. "
+            "한두 파일만 생성하고 종료하지 마십시오. "
+            "React + Vite가 요구되면 Frontend 전체 실행 골격을 생성하고, "
+            "FastAPI가 요구되면 main/router/schema/service/config/dependency/test 골격을 생성하십시오. "
+            "backend/app 구조에서는 SYSTEM_ADMIN이 backend 폴더에서 uvicorn app.main:app을 실행하므로 내부 import는 from app.routers..., from app.services...처럼 app.* 또는 올바른 상대 import를 사용하고 from routers... 또는 from backend.app...를 혼용하지 마십시오. "
+            "MCP stdio 요구에서는 Flask/requests 기반 localhost HTTP 서버로 대체하지 마십시오. "
+            "기본 모델/Provider는 환경설정에서 읽고 gpt-4를 직접 하드코딩하지 마십시오. "
+            "10MB/120초/Chunking 등 인터뷰 확정값도 구현하십시오. "
+            "AgentStudio Coding Style Registry의 선택 규칙을 생성 코드에 적용하십시오."
+        )
+
+        try:
+            plan = await create_patch(
+                patch_request,
+                files,
+                state.get("provider"),
+                project_scope=True,
+            )
+        except Exception as exc:
+            return {
+                "plan": {"changes": []},
+                "status": "CODE_GENERATION_FAILED",
+                "error": f"{type(exc).__name__}: {exc}",
+                "code_generation_error_type": type(exc).__name__,
+            }
+        plan = _normalize_patch_plan(
+            plan,
+            state["project_root"],
+            _required_manifest_paths(state),
+        )
+
+        # v5.162: required 파일 수가 많아도 한 번의 거대한 LLM 응답에 의존하지 않고
+        # 작은 배치로 반복 보강하여 Code Plan을 완성합니다.
+        plan, code_plan_validation = await _complete_code_plan_manifest(
+            state,
+            plan,
+            files,
+        )
+
+        if not code_plan_validation["ok"]:
+            remaining = len(
+                code_plan_validation.get("missing_required_paths") or []
+            )
+            rounds = int(
+                code_plan_validation.get("supplement_rounds") or 0
+            )
+            return {
+                "plan": plan,
+                "code_plan_validation": code_plan_validation,
+                "status": "CODE_PLAN_INCOMPLETE",
+                "error": (
+                    "Code Generation Plan 자동 보강 후에도 "
+                    f"required 파일 {remaining}개가 누락되어 있습니다. "
+                    f"자동 보강 {rounds}회 수행 후 파일 적용을 중단했습니다."
+                ),
+            }
+
+    stdio_plan_validation = _validate_stdio_code_plan(
+        state,
+        plan,
+    )
+
+    if not stdio_plan_validation["ok"]:
+        return {
+            "plan": plan,
+            "code_plan_validation": code_plan_validation,
+            "stdio_plan_validation": stdio_plan_validation,
+            "status": "CODE_PLAN_ARCHITECTURE_FAILED",
+            "error": (
+                "MCP stdio 확정 요구와 충돌하는 Flask/HTTP 구현이 "
+                "Code Plan에 포함되어 실제 파일 적용을 중단했습니다."
+            ),
+        }
+
+    patch_apply_recoveries: list[dict] = []
+    try:
+        # v5.170: exact old 문자열이 stale해졌더라도 즉시 전체 Workflow를 실패시키지 않고
+        # 안전한 whitespace/idempotent 적용 후, 필요한 경우 해당 파일만 focused recovery합니다.
+        result, patch_apply_recoveries = await _apply_patch_with_focused_recovery(
+            state,
+            plan,
+            max_recoveries=2,
+        )
+    except PatchApplyError as exc:
+        return {
+            "plan": plan,
+            "patch_result": list(exc.partial_results or []),
+            "code_plan_validation": code_plan_validation,
+            "file_apply_validation": {
+                "ok": False,
+                "error": str(exc),
+                "failure": exc.to_dict(),
+                "focused_recoveries": patch_apply_recoveries,
+            },
+            "status": "FILE_APPLY_FAILED",
+            "error": str(exc),
+        }
+    except Exception as exc:
+        return {
+            "plan": plan,
+            "patch_result": [],
+            "code_plan_validation": code_plan_validation,
+            "file_apply_validation": {
+                "ok": False,
+                "error": str(exc),
+                "focused_recoveries": patch_apply_recoveries,
+            },
+            "status": "FILE_APPLY_FAILED",
+            "error": str(exc),
+        }
+
+    # v5.174: FastAPI 내부 import를 Generated SYSTEM_ADMIN 실행 계약과 일치시킵니다.
+    # backend cwd + uvicorn app.main:app을 기준으로 app.* import를 사용하도록 정규화합니다.
+    fastapi_import_validation = _normalize_generated_fastapi_imports(state["project_root"])
+    result.extend(fastapi_import_validation.get("patch_rows") or [])
+    if not fastapi_import_validation.get("ok"):
+        return {
+            "plan": plan,
+            "patch_result": result,
+            "code_plan_validation": code_plan_validation,
+            "fastapi_import_validation": fastapi_import_validation,
+            "status": "FASTAPI_IMPORT_CONTRACT_FAILED",
+            "error": "FastAPI 내부 import 경로가 SYSTEM_ADMIN 실행 계약과 일치하지 않습니다.",
+        }
+
+    unverified = [
+        row
+        for row in result
+        if not row.get("verified")
+    ]
+
+    if unverified:
+        return {
+            "plan": plan,
+            "patch_result": result,
+            "code_plan_validation": code_plan_validation,
+            "file_apply_validation": {
+                "ok": False,
+                "unverified": unverified,
+            },
+            "status": "FILE_APPLY_FAILED",
+            "error": "Patch 결과 중 실제 파일 검증에 실패한 항목이 있습니다.",
+        }
+
+    return {
+        "plan": plan,
+        "patch_result": result,
+        "code_plan_validation": code_plan_validation,
+        "repair_plan_validation": (
+            repair_validation
+            if (repair_mode or test_repair_mode)
+            else {}
+        ),
+        "fastapi_import_validation": fastapi_import_validation,
+        "file_apply_validation": {
+            "ok": True,
+            "verified_count": len(result),
+            "focused_recoveries": patch_apply_recoveries,
+            "recovery_count": len(patch_apply_recoveries),
+            "replacement_strategies": [
+                {
+                    "path": row.get("path"),
+                    "strategies": row.get("replacement_strategies") or [],
+                }
+                for row in result
+                if row.get("replacement_strategies")
+            ],
+        },
+        "status": "CODE_GENERATED",
+    }
+
+
+
+def route_after_code_generation(
+    state: AgentState,
+) -> Literal["settings_generator", "end"]:
+    return (
+        "settings_generator"
+        if state.get("status") == "CODE_GENERATED"
+        else "end"
+    )
+
+
+async def settings_generator_node(state: AgentState):
+    try:
+        result = await generate_settings_artifacts(
+            project_root=state["project_root"],
+            request=state["request"],
+            settings_plan=state.get("settings_plan") or {},
+            file_plan=state.get("file_plan") or {},
+            provider=state.get("provider"),
+        )
+    except Exception as exc:
+        return {
+            "settings_generation_result": {
+                "enabled": bool((state.get("settings_plan") or {}).get("enabled")),
+                "changes": [],
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+            "status": "SETTINGS_GENERATION_FAILED",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    existing_changes = list(state.get("patch_result") or [])
+    settings_changes = list(result.get("changes") or [])
+
+    return {
+        "settings_generation_result": result,
+        "patch_result": existing_changes + settings_changes,
+        "status": "SETTINGS_GENERATED",
+    }
+
+
+def route_after_settings_generator(
+    state: AgentState,
+) -> Literal["settings_validation", "end"]:
+    return (
+        "settings_validation"
+        if state.get("status") == "SETTINGS_GENERATED"
+        else "end"
+    )
+
+
+async def settings_validation_node(state: AgentState):
+    result = await validate_settings_artifacts(
+        project_root=state["project_root"],
+        settings_plan=state.get("settings_plan") or {},
+    )
+
+    return {
+        "settings_validation_result": result,
+        "status": (
+            "SETTINGS_VALIDATED"
+            if result.get("ok")
+            else "SETTINGS_VALIDATION_FAILED"
+        ),
+    }
+
+
+def route_after_settings_validation(
+    state: AgentState,
+) -> Literal["environment_configuration", "debug"]:
+    return (
+        "environment_configuration"
+        if state.get("status") == "SETTINGS_VALIDATED"
+        else "debug"
+    )
+
+
+def _planned_required_paths(
+    project_root: str,
+    file_plan: dict,
+) -> list[Path]:
+    root = Path(project_root).resolve()
+    result = []
+
+    for item in file_plan.get("new_files") or []:
+        if isinstance(item, str):
+            relative = item
+            required = True
+        elif isinstance(item, dict):
+            relative = str(item.get("path") or "")
+            required = bool(item.get("required", True))
+        else:
+            continue
+
+        if not required or not relative.strip():
+            continue
+
+        target = (root / relative).resolve()
+        if root != target and root not in target.parents:
+            continue
+        result.append(target)
+
+    return result
+
+
+def _placeholder_findings(content: str, suffix: str = "") -> list[dict]:
+    """
+    실제 미구현 흔적만 Placeholder로 판정합니다.
+
+    v5.168까지는 소스 어디에든 ``placeholder``라는 단어가 있으면 실패했기 때문에
+    React의 ``<input placeholder="..." />`` 같은 정상 UI 속성도 미완성 코드로
+    오인했습니다. 이제는 주석/미구현 예외/빈 함수처럼 실행 의미가 있는 흔적과
+    명시적인 구현 대기 문구만 검출합니다.
+    """
+    text = str(content or "")
+    ext = str(suffix or "").casefold()
+    findings: list[dict] = []
+    seen: set[tuple[int, str]] = set()
+
+    def add(line_no: int, reason: str, snippet: str) -> None:
+        key = (int(line_no), reason)
+        if key in seen:
+            return
+        seen.add(key)
+        findings.append({
+            "line": int(line_no),
+            "reason": reason,
+            "snippet": str(snippet).strip()[:240],
+        })
+
+    # 언어와 관계없이 명시적인 구현 대기 주석/문구를 찾습니다.
+    comment_patterns = (
+        (re.compile(r"\bTODO\s*:", re.IGNORECASE), "TODO marker"),
+        (re.compile(r"\bFIXME\s*:", re.IGNORECASE), "FIXME marker"),
+        (re.compile(r"여기에\s*구현|구현\s*예정|추후\s*구현", re.IGNORECASE), "implementation pending marker"),
+        (re.compile(r"implement(?:ation)?\b.{0,40}\bhere\b", re.IGNORECASE), "implementation pending marker"),
+        (re.compile(r"placeholder\s+(?:for|implementation|logic|code|actual)", re.IGNORECASE), "placeholder implementation marker"),
+        (re.compile(r"summary of the file content", re.IGNORECASE), "stub summary marker"),
+    )
+
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        lowered = stripped.casefold()
+
+        # JSX/HTML의 placeholder= 속성은 정상 UI 입력 힌트이므로 제외합니다.
+        if re.search(r"\bplaceholder\s*=", stripped, flags=re.IGNORECASE):
+            # 같은 줄에 TODO/FIXME 같은 별도 미구현 주석이 있으면 아래에서 다시 잡힙니다.
+            ui_placeholder_only = True
+        else:
+            ui_placeholder_only = False
+
+        for pattern, reason in comment_patterns:
+            if ui_placeholder_only and reason == "placeholder implementation marker":
+                continue
+            if pattern.search(stripped):
+                add(line_no, reason, stripped)
+
+        if "notimplementederror" in lowered:
+            add(line_no, "NotImplementedError", stripped)
+
+    # Python은 AST로 함수/메서드 본문 자체가 pass 또는 ...뿐인 진짜 stub도 검출합니다.
+    if ext == ".py":
+        try:
+            import ast
+
+            tree = ast.parse(text)
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                body = list(node.body or [])
+                if len(body) != 1:
+                    continue
+                stmt = body[0]
+                is_stub = isinstance(stmt, ast.Pass)
+                if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+                    is_stub = is_stub or stmt.value.value is Ellipsis
+                if is_stub:
+                    add(
+                        int(getattr(stmt, "lineno", getattr(node, "lineno", 1))),
+                        "empty function body",
+                        f"def {getattr(node, 'name', '<function>')}(...): <stub>",
+                    )
+        except (SyntaxError, ValueError, TypeError):
+            # 문법 오류는 이후 compile/test 단계에서 정확히 진단합니다.
+            pass
+
+    return findings
+
+
+def _looks_like_placeholder(content: str, suffix: str = "") -> bool:
+    return bool(_placeholder_findings(content, suffix))
+
+
+async def build_artifact_validation_node(state: AgentState):
+    # v5.174: Settings Generator까지 끝난 최종 backend/app 코드도 다시 정규화합니다.
+    fastapi_import_validation = _normalize_generated_fastapi_imports(state["project_root"])
+    existing_patch_rows = list(state.get("patch_result") or [])
+    seen_patch_keys = {
+        (str(row.get("path") or "").casefold(), str(row.get("reason") or ""))
+        for row in existing_patch_rows
+        if isinstance(row, dict)
+    }
+    for row in fastapi_import_validation.get("patch_rows") or []:
+        key = (str(row.get("path") or "").casefold(), str(row.get("reason") or ""))
+        if key not in seen_patch_keys:
+            existing_patch_rows.append(row)
+            seen_patch_keys.add(key)
+
+    file_plan = state.get("file_plan") or {}
+    required_paths = _planned_required_paths(
+        state["project_root"],
+        file_plan,
+    )
+
+    missing = []
+    placeholder_files = []
+    placeholder_details = []
+    style_failures = []
+    style_warnings = []
+    checked = []
+
+    for path in required_paths:
+        if not path.is_file():
+            missing.append(str(path))
+            continue
+
+        suffix = path.suffix.casefold()
+        if suffix not in {
+            ".py", ".js", ".jsx", ".ts", ".tsx",
+            ".md", ".json", ".txt", ".html", ".css", ".yml", ".yaml",
+        }:
+            continue
+
+        try:
+            content = path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError:
+            continue
+
+        checked.append(str(path))
+
+        if suffix in {".py", ".js", ".jsx", ".ts", ".tsx"}:
+            placeholder_findings = _placeholder_findings(content, suffix)
+            if placeholder_findings:
+                placeholder_files.append(str(path))
+                placeholder_details.append({
+                    "path": str(path),
+                    "findings": placeholder_findings,
+                })
+
+            validation = validate_code_style(
+                code=content,
+                request=state["request"],
+                path=str(path),
+                project_scope=True,
+            )
+
+            for item in validation.get("violations") or []:
+                row = {
+                    **item,
+                    "path": str(path),
+                }
+                if str(item.get("severity") or "").casefold() == "error":
+                    style_failures.append(row)
+                else:
+                    style_warnings.append(row)
+
+    architecture_errors = []
+    for violation in fastapi_import_validation.get("violations") or []:
+        architecture_errors.append({
+            "path": str(Path(state["project_root"]) / str(violation.get("path") or "")),
+            "message": (
+                "FastAPI 내부 import 경로가 Generated SYSTEM_ADMIN 실행 계약과 일치하지 않습니다: "
+                + str(violation.get("snippet") or "")
+            ),
+            "line": violation.get("line"),
+        })
+    contracts = _requirement_contracts(state)
+    root = Path(state["project_root"]).resolve()
+
+    source_suffixes = {
+        ".py", ".js", ".jsx", ".ts", ".tsx",
+        ".json", ".md", ".txt", ".html", ".css",
+    }
+
+    actual_source_files = []
+    if root.exists():
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                relative = path.relative_to(root)
+            except ValueError:
+                continue
+            if relative.parts and relative.parts[0].casefold() in {
+                "reports", "debug", "logs", "venv", ".venv",
+                "node_modules", ".git",
+            }:
+                continue
+            if path.suffix.casefold() in source_suffixes:
+                actual_source_files.append(path)
+
+    if contracts["stdio"]:
+        stdio_forbidden = [
+            "from flask",
+            "import flask",
+            "requests.post",
+            "requests.get",
+            "localhost:5000",
+            "127.0.0.1:5000",
+            "app.run(",
+        ]
+
+        for path in actual_source_files:
+            relative = path.relative_to(root).as_posix().casefold()
+            if not (
+                "mcp" in relative
+                or relative.endswith("server.py")
+            ):
+                continue
+
+            text = path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).casefold()
+
+            found = [
+                token
+                for token in stdio_forbidden
+                if token in text
+            ]
+
+            if found:
+                architecture_errors.append({
+                    "path": str(path),
+                    "message": (
+                        "MCP stdio 요구인데 HTTP/Flask 구현이 감지되었습니다: "
+                        + ", ".join(found)
+                    ),
+                })
+
+    if contracts["gpt_4o_mini"]:
+        hardcoded_gpt4_patterns = [
+            "model_name='gpt-4'",
+            'model_name="gpt-4"',
+            "model='gpt-4'",
+            'model="gpt-4"',
+        ]
+
+        for path in actual_source_files:
+            if path.suffix.casefold() != ".py":
+                continue
+
+            text = path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).casefold()
+
+            found = [
+                pattern
+                for pattern in hardcoded_gpt4_patterns
+                if pattern in text
+            ]
+
+            if found:
+                architecture_errors.append({
+                    "path": str(path),
+                    "message": (
+                        "확정 기본 모델은 gpt-4o-mini이고 Provider/Model은 설정값이어야 합니다. "
+                        "gpt-4 직접 하드코딩이 감지되었습니다."
+                    ),
+                })
+
+    if contracts["fastapi"]:
+        fastapi_required = [
+            root / "backend/app/main.py",
+            root / "backend/app/routers/summary.py",
+            root / "backend/app/schemas/summary.py",
+            root / "backend/app/services/summary_service.py",
+            root / "backend/app/services/llm_service.py",
+            root / "backend/app/core/config.py",
+        ]
+
+        for path in fastapi_required:
+            if not path.is_file() and str(path) not in missing:
+                missing.append(str(path))
+
+    if contracts["react"]:
+        react_required = [
+            root / "frontend/package.json",
+            root / "frontend/index.html",
+            root / "frontend/src/main.jsx",
+            root / "frontend/src/App.jsx",
+            root / "frontend/src/pages/SummaryPage.jsx",
+            root / "frontend/src/services/api.js",
+        ]
+
+        for path in react_required:
+            if not path.is_file() and str(path) not in missing:
+                missing.append(str(path))
+
+
+    ok = (
+        not missing
+        and not placeholder_files
+        and not style_failures
+        and not architecture_errors
+    )
+
+    result = {
+        "ok": ok,
+        "required_count": len(required_paths),
+        "checked_files": checked,
+        "missing_files": missing,
+        "placeholder_files": placeholder_files,
+        "placeholder_details": placeholder_details,
+        "coding_style_errors": style_failures,
+        "coding_style_warnings": style_warnings,
+        "architecture_errors": architecture_errors,
+        "fastapi_import_validation": fastapi_import_validation,
+        "selected_rule_ids": [
+            rule.get("id")
+            for rule in (
+                state.get("coding_style_context", {}).get("rules") or []
+            )
+        ],
+    }
+
+    if ok:
+        return {
+            "build_artifact_validation": result,
+            "fastapi_import_validation": fastapi_import_validation,
+            "patch_result": existing_patch_rows,
+            "status": "BUILD_ARTIFACTS_VALIDATED",
+        }
+
+    iteration = int(state.get("debug_iteration") or 0) + 1
+    history = list(state.get("debug_history") or [])
+    history.append({
+        "type": "build_artifact_validation",
+        "diagnosis": "계획된 Agent 산출물 또는 Coding Style 검증이 완료되지 않았습니다.",
+        "missing_files": missing,
+        "placeholder_files": placeholder_files,
+        "placeholder_details": placeholder_details,
+        "coding_style_errors": style_failures,
+        "coding_style_warnings": style_warnings,
+        "architecture_errors": architecture_errors,
+        "should_retry": True,
+    })
+
+    def _signature(row: dict) -> str:
+        return json.dumps(
+            {
+                "missing_files": sorted(row.get("missing_files") or []),
+                "placeholder_files": sorted(row.get("placeholder_files") or []),
+                "placeholder_details": row.get("placeholder_details") or [],
+                "coding_style_errors": [
+                    {
+                        "path": item.get("path"),
+                        "rule_id": item.get("rule_id"),
+                        "message": item.get("message"),
+                    }
+                    for item in row.get("coding_style_errors") or []
+                ],
+                "architecture_errors": [
+                    {
+                        "path": item.get("path"),
+                        "message": item.get("message"),
+                    }
+                    for item in row.get("architecture_errors") or []
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    current_signature = _signature(history[-1])
+    previous_same = sum(
+        1
+        for row in history[:-1]
+        if isinstance(row, dict)
+        and row.get("type") == "build_artifact_validation"
+        and _signature(row) == current_signature
+    )
+
+    # v5.169: 정확한 줄 근거를 전달하는 focused repair를 최대 2회 허용합니다.
+    # 같은 실패가 3번째 검증까지 유지될 때만 stall로 중단합니다.
+    if previous_same >= 2:
+        return {
+            "build_artifact_validation": result,
+            "fastapi_import_validation": fastapi_import_validation,
+            "patch_result": existing_patch_rows,
+            "debug_iteration": iteration,
+            "debug_history": history,
+            "status": "BUILD_ARTIFACT_STALLED",
+            "error": (
+                "동일한 산출물 검증 실패가 반복되었습니다. "
+                "동일 Repair를 무한 반복하지 않고 중단합니다. "
+                "실패 진단의 placeholder_details에서 실제 미구현 줄을 확인하십시오."
+            ),
+        }
+
+    return {
+        "build_artifact_validation": result,
+        "fastapi_import_validation": fastapi_import_validation,
+        "patch_result": existing_patch_rows,
+        "debug_iteration": iteration,
+        "debug_history": history,
+        "status": "DEBUG_PATCH_READY",
+    }
+
+
+def route_after_build_artifact_validation(
+    state: AgentState,
+) -> Literal["environment_configuration", "code_generation", "end"]:
+    if state.get("status") == "BUILD_ARTIFACTS_VALIDATED":
+        return "environment_configuration"
+
+    if (
+        state.get("status") == "DEBUG_PATCH_READY"
+        and int(state.get("debug_iteration") or 0)
+        <= get_settings().max_debug_iterations
+    ):
+        return "code_generation"
+
+    return "end"
+
+
+async def environment_configuration_node(state: AgentState):
+    """
+    환경 파일 자체의 생성/수정은 code_generation에서 file_plan에 따라 처리합니다.
+    이 Node는 생성 대상 Agent의 환경 요구가 State에 명시적으로 남았는지 확인합니다.
+    """
+    environment = (
+        _bundle(state).get("environment_plan")
+        or state.get("environment_plan")
+        or {}
+    )
+
+    return {
+        "environment_plan": environment,
+        "status": "ENVIRONMENT_CONFIGURED",
+    }
+
+
+async def test_node(state: AgentState):
+    environment = state.get("environment_plan") or {}
+
+    commands = list(environment.get("validation_commands") or [])
+    cmd = state.get("test_command")
+
+    if not cmd and commands:
+        cmd = str(commands[0])
+
+    cmd = cmd or "python -m compileall ."
+
+    result = await run_command(
+        cmd,
+        state["project_root"],
+    )
+
+    return {
+        "test_result": result,
+        "status": (
+            "TEST_PASSED"
+            if result.get("returncode") == 0
+            else "TEST_FAILED"
+        ),
+    }
+
+
+def route_after_test(
+    state: AgentState,
+) -> Literal["package_completion", "debug", "end"]:
+    if state.get("status") == "TEST_PASSED":
+        return "package_completion"
+
+    # Build Artifact Repair 횟수와 실제 Test Debug 횟수를 분리합니다.
+    # 이전 Placeholder 복구가 debug_iteration을 소비해도 테스트 수정 기회는 별도로 보장합니다.
+    test_debug_count = _debug_history_count(state, "test_failure")
+
+    if test_debug_count < get_settings().max_debug_iterations:
+        return "debug"
+
+    return "end"
+
+
+async def debug_node(state: AgentState):
+    iteration = int(state.get("debug_iteration") or 0) + 1
+    source_status = str(state.get("status") or "")
+    debug_type = (
+        "test_failure"
+        if source_status == "TEST_FAILED"
+        else "settings_validation_failure"
+        if source_status == "SETTINGS_VALIDATION_FAILED"
+        else "workflow_failure"
+    )
+    source_iteration = _debug_history_count(state, debug_type) + 1
+
+    try:
+        analysis = await analyze_failure(
+            original_request=state["request"],
+            test_output=(
+                state.get("test_result") or {}
+            ).get("output", ""),
+            previous_patch=state.get("plan") or {},
+            iteration=source_iteration,
+            provider=state.get("provider"),
+        )
+        analysis["type"] = debug_type
+        analysis["source_status"] = source_status
+        analysis["repair_attempt"] = source_iteration
+    except Exception as exc:
+        return {
+            "debug_iteration": iteration,
+            "status": "DEBUG_ANALYSIS_FAILED",
+            "error": (
+                f"{type(exc).__name__}: {exc}. "
+                "로컬 로그 분석/Ollama 연결 실패가 원래 검증 실패를 WORKFLOW_EXCEPTION으로 덮어쓰지 않도록 중단했습니다."
+            ),
+        }
+
+    history = list(state.get("debug_history") or [])
+    history.append(analysis)
+
+    if not analysis.get("should_retry", True):
+        return {
+            "debug_iteration": iteration,
+            "debug_history": history,
+            "status": "DEBUG_STOPPED",
+            "error": analysis.get(
+                "diagnosis",
+                "디버그 에이전트가 중단을 결정했습니다.",
+            ),
+        }
+
+    return {
+        "debug_iteration": iteration,
+        "debug_history": history,
+        "status": "DEBUG_PATCH_READY",
+    }
+
+
+def route_after_debug(
+    state: AgentState,
+) -> Literal["code_generation", "end"]:
+    return (
+        "code_generation"
+        if state.get("status") == "DEBUG_PATCH_READY"
+        else "end"
+    )
+
+
+def _generated_system_admin_cmd() -> str:
+    return '@echo off\nsetlocal EnableExtensions\nchcp 65001 >nul\ntitle THEANOVA Generated Agent - System Manager\n\ncd /d "%~dp0"\n\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0SYSTEM_ADMIN.ps1"\nset "EXITCODE=%ERRORLEVEL%"\n\necho.\necho ============================================================\nif "%EXITCODE%"=="0" (\n    echo [COMPLETED] Agent program started successfully.\n) else (\n    echo [FAILED] SYSTEM_ADMIN failed. ExitCode=%EXITCODE%\n)\necho ============================================================\necho.\necho This window will remain open.\necho.\npause\n\nendlocal\nexit /b %EXITCODE%\n'
+
+
+def _generated_system_admin_ps1() -> str:
+    return r'''$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+$ErrorActionPreference = "Stop"
+
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RuntimeRoot = Join-Path $Root ".agentstudio"
+$RuntimeDir = Join-Path $RuntimeRoot "runtime"
+$LogDir = Join-Path $RuntimeRoot "logs"
+$BackendDir = Join-Path $Root "backend"
+$FrontendDir = Join-Path $Root "frontend"
+$VenvDir = Join-Path $Root ".venv"
+$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+$BackendPidFile = Join-Path $RuntimeDir "backend.pid"
+$FrontendPidFile = Join-Path $RuntimeDir "frontend.pid"
+$SystemLog = Join-Path $LogDir "system_admin.log"
+$BackendOut = Join-Path $LogDir "backend.out.log"
+$BackendErr = Join-Path $LogDir "backend.err.log"
+$BackendImportOut = Join-Path $LogDir "backend_import.out.log"
+$BackendImportErr = Join-Path $LogDir "backend_import.err.log"
+$FrontendOut = Join-Path $LogDir "frontend.out.log"
+$FrontendErr = Join-Path $LogDir "frontend.err.log"
+
+New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+function Write-Log {
+    param([string]$Message)
+    $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"), $Message
+    Add-Content -Path $SystemLog -Value $line -Encoding UTF8
+}
+
+function Write-Step {
+    param([string]$Message)
+    Write-Host "[진행] $Message"
+    Write-Log "진행: $Message"
+}
+
+function Write-Ok {
+    param([string]$Message)
+    Write-Host "[완료] $Message" -ForegroundColor Green
+    Write-Log "완료: $Message"
+}
+
+function Stop-PidFileProcess {
+    param([string]$PidFile)
+    if (-not (Test-Path $PidFile)) { return }
+    try {
+        $SavedPid = [int](Get-Content $PidFile -ErrorAction Stop | Select-Object -First 1)
+        if ($SavedPid -gt 0) {
+            & taskkill.exe /PID $SavedPid /T /F 2>$null | Out-Null
+        }
+    }
+    catch { }
+    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+}
+
+function Test-Port {
+    param([int]$Port)
+    try {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $iar = $client.BeginConnect("127.0.0.1", $Port, $null, $null)
+        $ok = $iar.AsyncWaitHandle.WaitOne(700, $false)
+        if ($ok -and $client.Connected) {
+            $client.EndConnect($iar)
+            $client.Close()
+            return $true
+        }
+        $client.Close()
+    }
+    catch { }
+    return $false
+}
+
+function Wait-Port {
+    param([int]$Port, [int]$Retry = 40)
+    for ($i = 0; $i -lt $Retry; $i++) {
+        if (Test-Port $Port) { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+function Ensure-Python312 {
+    if (Test-Path $VenvPython) { return }
+
+    Write-Step "Python 3.12 가상환경(.venv) 생성"
+    $py = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($py) {
+        & $py.Source -3.12 -c "import sys; assert sys.version_info[:2] == (3, 12)"
+        if ($LASTEXITCODE -eq 0) {
+            & $py.Source -3.12 -m venv $VenvDir
+            if ($LASTEXITCODE -eq 0) { return }
+        }
+    }
+
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($python) {
+        & $python.Source -c "import sys; assert sys.version_info[:2] == (3, 12)"
+        if ($LASTEXITCODE -eq 0) {
+            & $python.Source -m venv $VenvDir
+            if ($LASTEXITCODE -eq 0) { return }
+        }
+    }
+
+    throw "Python 3.12를 찾을 수 없습니다. Python 3.12 설치 후 다시 실행하세요."
+}
+
+function Ensure-BackendDependencies {
+    $Req = Join-Path $BackendDir "requirements.txt"
+    if (-not (Test-Path $Req)) { $Req = Join-Path $Root "requirements.txt" }
+    if (-not (Test-Path $Req)) { return }
+
+    $hash = (Get-FileHash $Req -Algorithm SHA256).Hash
+    $marker = Join-Path $RuntimeDir "backend_requirements.sha256"
+    $old = if (Test-Path $marker) { Get-Content $marker -ErrorAction SilentlyContinue | Select-Object -First 1 } else { "" }
+    if ($old -eq $hash) {
+        Write-Ok "Backend 패키지 확인"
+        return
+    }
+
+    Write-Step "Backend 패키지 설치"
+    & $VenvPython -m pip install -r $Req
+    if ($LASTEXITCODE -ne 0) { throw "Backend 패키지 설치 실패" }
+    Set-Content -Path $marker -Value $hash -Encoding ASCII
+    Write-Ok "Backend 패키지 설치"
+}
+
+function Ensure-FrontendDependencies {
+    $PackageJson = Join-Path $FrontendDir "package.json"
+    if (-not (Test-Path $PackageJson)) { return }
+    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $npm) { throw "Node.js/npm을 찾을 수 없습니다." }
+
+    $hash = (Get-FileHash $PackageJson -Algorithm SHA256).Hash
+    $marker = Join-Path $RuntimeDir "frontend_package.sha256"
+    $old = if (Test-Path $marker) { Get-Content $marker -ErrorAction SilentlyContinue | Select-Object -First 1 } else { "" }
+    $modules = Join-Path $FrontendDir "node_modules"
+    if ((Test-Path $modules) -and $old -eq $hash) {
+        Write-Ok "Frontend 패키지 확인"
+        return
+    }
+
+    Write-Step "Frontend 패키지 설치"
+    $p = Start-Process -FilePath $npm.Source -ArgumentList @("install") -WorkingDirectory $FrontendDir -Wait -PassThru -NoNewWindow
+    if ($p.ExitCode -ne 0) { throw "Frontend npm install 실패" }
+    Set-Content -Path $marker -Value $hash -Encoding ASCII
+    Write-Ok "Frontend 패키지 설치"
+}
+
+function Test-BackendImport {
+    $Main = Join-Path $BackendDir "app\main.py"
+    if (-not (Test-Path $Main)) { return }
+
+    Write-Step "FastAPI import 경로 사전 검증 (app.main:app)"
+    Remove-Item $BackendImportOut, $BackendImportErr -Force -ErrorAction SilentlyContinue
+    $probe = Start-Process -FilePath $VenvPython -ArgumentList @(
+        "-c",
+        "import importlib; m=importlib.import_module('app.main'); assert hasattr(m, 'app'), 'FastAPI app instance missing'"
+    ) -WorkingDirectory $BackendDir -Wait -PassThru -NoNewWindow -RedirectStandardOutput $BackendImportOut -RedirectStandardError $BackendImportErr
+    if ($probe.ExitCode -ne 0) {
+        throw "FastAPI import 검증 실패(app.main:app). 생성 코드의 app.* import를 확인하세요. 로그: $BackendImportErr"
+    }
+    Write-Ok "FastAPI import 경로 검증"
+}
+
+function Start-Backend {
+    $Main = Join-Path $BackendDir "app\main.py"
+    if (-not (Test-Path $Main)) { return $false }
+
+    Stop-PidFileProcess $BackendPidFile
+    $BackendPort = 8000
+    Write-Step "FastAPI Backend 시작 (127.0.0.1:$BackendPort)"
+    $p = Start-Process -FilePath $VenvPython -ArgumentList @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$BackendPort") -WorkingDirectory $BackendDir -RedirectStandardOutput $BackendOut -RedirectStandardError $BackendErr -PassThru
+    Set-Content -Path $BackendPidFile -Value $p.Id -Encoding ASCII
+    if (-not (Wait-Port $BackendPort 40)) { throw "Backend가 시작되지 않았습니다. 로그: $BackendErr" }
+    Write-Ok "FastAPI Backend 시작"
+    return $true
+}
+
+function Test-McpReady {
+    $McpServer = Join-Path $Root "mcp_server\server.py"
+    if (-not (Test-Path $McpServer)) { return }
+    Write-Step "MCP stdio Server 준비 상태 확인"
+    & $VenvPython -m py_compile $McpServer
+    if ($LASTEXITCODE -ne 0) { throw "MCP Server 문법 검증 실패: $McpServer" }
+    Write-Ok "MCP stdio Server 준비 완료 (필요할 때 Agent가 stdio로 실행)"
+}
+
+function Start-Frontend {
+    $PackageJson = Join-Path $FrontendDir "package.json"
+    if (-not (Test-Path $PackageJson)) { return $false }
+    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $npm) { throw "Node.js/npm을 찾을 수 없습니다." }
+
+    Stop-PidFileProcess $FrontendPidFile
+    $FrontendPort = 5173
+    Write-Step "React/Vite Frontend 시작 (127.0.0.1:$FrontendPort)"
+    $p = Start-Process -FilePath $npm.Source -ArgumentList @("run", "dev", "--", "--host", "127.0.0.1", "--port", "$FrontendPort") -WorkingDirectory $FrontendDir -RedirectStandardOutput $FrontendOut -RedirectStandardError $FrontendErr -PassThru
+    Set-Content -Path $FrontendPidFile -Value $p.Id -Encoding ASCII
+    if (-not (Wait-Port $FrontendPort 60)) { throw "Frontend가 시작되지 않았습니다. 로그: $FrontendErr" }
+    Write-Ok "React/Vite Frontend 시작"
+    return $true
+}
+
+try {
+    Write-Host ""
+    Write-Host "============================================================"
+    Write-Host "THEANOVA Generated Agent 시작"
+    Write-Host "============================================================"
+    Write-Host "프로젝트: $Root"
+    Write-Host ""
+    Write-Log "SYSTEM_ADMIN 시작"
+
+    Ensure-Python312
+    Ensure-BackendDependencies
+    Ensure-FrontendDependencies
+    Test-BackendImport
+    Test-McpReady
+
+    $backendStarted = Start-Backend
+    $frontendStarted = Start-Frontend
+
+    if (-not $backendStarted -and -not $frontendStarted) {
+        throw "실행 가능한 Backend 또는 Frontend entrypoint를 찾지 못했습니다."
+    }
+
+    if ($frontendStarted) {
+        Start-Process "http://127.0.0.1:5173"
+        Write-Host "[URL] http://127.0.0.1:5173" -ForegroundColor Cyan
+    }
+    elseif ($backendStarted) {
+        Start-Process "http://127.0.0.1:8000/docs"
+        Write-Host "[URL] http://127.0.0.1:8000/docs" -ForegroundColor Cyan
+    }
+
+    Write-Host ""
+    Write-Host "[COMPLETED] 전체 프로그램 실행이 완료되었습니다." -ForegroundColor Green
+    Write-Host "로그 폴더: $LogDir"
+    Write-Log "SYSTEM_ADMIN 완료"
+    exit 0
+}
+catch {
+    Write-Host ""
+    Write-Host "[FAILED] $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "로그 폴더: $LogDir"
+    Write-Log "실패: $($_.Exception.ToString())"
+    exit 1
+}
+'''
+
+def _ensure_generated_system_admin(project_root: str) -> dict:
+    root = Path(project_root).resolve()
+    cmd_path = root / "SYSTEM_ADMIN.cmd"
+    ps1_path = root / "SYSTEM_ADMIN.ps1"
+    cmd_existed = cmd_path.exists()
+    ps1_existed = ps1_path.exists()
+
+    cmd_path.write_text(
+        _generated_system_admin_cmd(),
+        encoding="utf-8",
+        newline="\r\n",
+    )
+    ps1_path.write_text(
+        _generated_system_admin_ps1(),
+        encoding="utf-8-sig",
+        newline="\r\n",
+    )
+
+    cmd_check = cmd_path.read_text(encoding="utf-8", errors="replace")
+    ps1_check = ps1_path.read_text(encoding="utf-8-sig", errors="replace")
+    checks = {
+        "cmd_exists": cmd_path.is_file(),
+        "ps1_exists": ps1_path.is_file(),
+        "utf8_codepage": "chcp 65001" in cmd_check.casefold(),
+        "cmd_calls_ps1": "SYSTEM_ADMIN.ps1" in cmd_check,
+        "ps1_utf8_bom": ps1_path.read_bytes().startswith(b"\xef\xbb\xbf"),
+        "venv_dot_name": '".venv"' in ps1_check,
+        "backend_start": "uvicorn" in ps1_check.casefold(),
+        "backend_import_preflight": "FastAPI import 경로 사전 검증" in ps1_check and "importlib.import_module('app.main')" in ps1_check,
+        "backend_working_directory": '-WorkingDirectory $BackendDir' in ps1_check and '"app.main:app"' in ps1_check,
+        "frontend_start": "npm" in ps1_check.casefold(),
+        "mcp_ready_check": "MCP stdio Server" in ps1_check,
+        "browser_open": 'Start-Process "http://127.0.0.1:' in ps1_check,
+    }
+    return {
+        "ok": all(checks.values()),
+        "files": [str(cmd_path), str(ps1_path)],
+        "checks": checks,
+        "primary_entrypoint": str(cmd_path),
+        "patch_rows": [
+            {
+                "path": str(cmd_path),
+                "changed": True,
+                "created": not cmd_existed,
+                "verified": True,
+                "reason": "AgentStudio 표준 단일 실행 진입점 생성",
+            },
+            {
+                "path": str(ps1_path),
+                "changed": True,
+                "created": not ps1_existed,
+                "verified": True,
+                "reason": "SYSTEM_ADMIN Windows 실행 관리자 생성",
+            },
+        ],
+    }
+
+
+async def package_completion_node(state: AgentState):
+    changes = list(state.get("patch_result") or [])
+
+    try:
+        launcher_result = _ensure_generated_system_admin(state["project_root"])
+    except Exception as exc:
+        return {
+            "launcher_generation_result": {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+            "status": "LAUNCHER_GENERATION_FAILED",
+            "error": f"SYSTEM_ADMIN 생성 실패: {type(exc).__name__}: {exc}",
+        }
+
+    if not launcher_result.get("ok"):
+        return {
+            "launcher_generation_result": launcher_result,
+            "status": "LAUNCHER_GENERATION_FAILED",
+            "error": "SYSTEM_ADMIN 실행 계약 검증에 실패했습니다.",
+        }
+
+    changes.extend(launcher_result.get("patch_rows") or [])
+
+    created = [
+        row.get("path")
+        for row in changes
+        if row.get("created")
+    ]
+
+    modified = [
+        row.get("path")
+        for row in changes
+        if row.get("changed") and not row.get("created")
+    ]
+
+    package_result = {
+        "ok": True,
+        "created_files": created,
+        "modified_files": modified,
+        "test_command": (
+            state.get("test_command")
+            or "python -m compileall ."
+        ),
+        "test_returncode": (
+            state.get("test_result") or {}
+        ).get("returncode"),
+        "target_agent_workflow": state.get(
+            "target_agent_workflow",
+            {},
+        ),
+        "environment_plan": state.get(
+            "environment_plan",
+            {},
+        ),
+        "settings_plan": state.get(
+            "settings_plan",
+            {},
+        ),
+        "settings_validation": state.get(
+            "settings_validation_result",
+            {},
+        ),
+        "build_artifact_validation": state.get(
+            "build_artifact_validation",
+            {},
+        ),
+        "launcher_generation": launcher_result,
+        "fastapi_import_validation": state.get("fastapi_import_validation", {}),
+        "coding_style": {
+            "selected_rule_ids": [
+                rule.get("id")
+                for rule in (
+                    state.get("coding_style_context", {}).get("rules") or []
+                )
+            ],
+            "validation": state.get(
+                "build_artifact_validation",
+                {},
+            ),
+        },
+    }
+
+    return {
+        "package_result": package_result,
+        "launcher_generation_result": launcher_result,
+        "patch_result": changes,
+        "status": "PACKAGE_COMPLETED",
+    }
+
+
+async def review_node(state: AgentState):
+    artifact = state.get("build_artifact_validation") or {}
+    launcher = state.get("launcher_generation_result") or {}
+
+    if not launcher.get("ok"):
+        return {
+            "review": "SYSTEM_ADMIN.cmd 자동 실행 진입점 생성/검증이 완료되지 않았습니다.",
+            "status": "INCOMPLETE",
+            "error": "SYSTEM_ADMIN 실행 진입점 검증 미완료",
+        }
+
+    import_contract = state.get("fastapi_import_validation") or {}
+    if _requirement_contracts(state).get("fastapi") and not import_contract.get("ok", False):
+        return {
+            "review": "FastAPI 내부 import 경로 검증이 완료되지 않았습니다.",
+            "status": "INCOMPLETE",
+            "error": "FastAPI app.* import 실행 계약 검증 미완료",
+        }
+
+    if not artifact.get("ok"):
+        return {
+            "review": (
+                "Agent Factory 산출물 검증이 완료되지 않아 "
+                "COMPLETED 처리하지 않습니다."
+            ),
+            "status": "INCOMPLETE",
+            "error": "계획 파일/Coding Style 검증 미완료",
+        }
+
+    return {
+        "review": (
+            "Agent Factory 제작 Workflow가 완료되었습니다. "
+            f"생성/수정 파일 {len(state.get('patch_result') or [])}개, "
+            f"필수 산출물 {artifact.get('required_count', 0)}개 검증, "
+            "SYSTEM_ADMIN.cmd 단일 실행 진입점 생성 완료, "
+            f"디버그 반복 {int(state.get('debug_iteration') or 0)}회입니다."
+        ),
+        "status": "COMPLETED",
+    }
+
+
+def build_workflow(checkpointer=None):
+    graph = StateGraph(AgentState)
+
+    # AgentStudio 제작 Workflow
+    graph.add_node(
+        "requirement_analysis",
+        requirement_analysis_node,
+    )
+    graph.add_node(
+        "analyze_project",
+        analyze_project_node,
+    )
+    graph.add_node(
+        "capability_design",
+        capability_design_node,
+    )
+    graph.add_node(
+        "tool_mcp_decision",
+        tool_mcp_decision_node,
+    )
+    graph.add_node(
+        "agent_architecture",
+        agent_architecture_node,
+    )
+    graph.add_node(
+        "target_workflow_design",
+        target_workflow_design_node,
+    )
+    graph.add_node(
+        "project_file_plan",
+        project_file_plan_node,
+    )
+    graph.add_node(
+        "requirement_coverage_gate",
+        requirement_coverage_gate_node,
+    )
+    graph.add_node(
+        "settings_requirement_analysis",
+        settings_requirement_analysis_node,
+    )
+    graph.add_node(
+        "settings_schema_design",
+        settings_schema_design_node,
+    )
+    graph.add_node(
+        "settings_ui_design",
+        settings_ui_design_node,
+    )
+    graph.add_node(
+        "checkpoint",
+        checkpoint_node,
+    )
+    graph.add_node(
+        "approval",
+        approval_node,
+    )
+    graph.add_node(
+        "code_generation",
+        code_generation_node,
+    )
+    graph.add_node(
+        "settings_generator",
+        settings_generator_node,
+    )
+    graph.add_node(
+        "settings_validation",
+        settings_validation_node,
+    )
+    graph.add_node(
+        "build_artifact_validation",
+        build_artifact_validation_node,
+    )
+    graph.add_node(
+        "environment_configuration",
+        environment_configuration_node,
+    )
+    graph.add_node(
+        "test",
+        test_node,
+    )
+    graph.add_node(
+        "debug",
+        debug_node,
+    )
+    graph.add_node(
+        "package_completion",
+        package_completion_node,
+    )
+    graph.add_node(
+        "review",
+        review_node,
+    )
+
+    graph.add_edge(
+        START,
+        "requirement_analysis",
+    )
+    graph.add_edge(
+        "requirement_analysis",
+        "analyze_project",
+    )
+    graph.add_edge(
+        "analyze_project",
+        "capability_design",
+    )
+    graph.add_edge(
+        "capability_design",
+        "tool_mcp_decision",
+    )
+    graph.add_edge(
+        "tool_mcp_decision",
+        "agent_architecture",
+    )
+    graph.add_edge(
+        "agent_architecture",
+        "target_workflow_design",
+    )
+    graph.add_edge(
+        "target_workflow_design",
+        "project_file_plan",
+    )
+    graph.add_edge(
+        "project_file_plan",
+        "requirement_coverage_gate",
+    )
+    graph.add_conditional_edges(
+        "requirement_coverage_gate",
+        route_after_requirement_coverage,
+        {
+            "settings_requirement_analysis": "settings_requirement_analysis",
+            "end": END,
+        },
+    )
+    graph.add_edge(
+        "settings_requirement_analysis",
+        "settings_schema_design",
+    )
+    graph.add_edge(
+        "settings_schema_design",
+        "settings_ui_design",
+    )
+    graph.add_edge(
+        "settings_ui_design",
+        "checkpoint",
+    )
+    graph.add_edge(
+        "checkpoint",
+        "approval",
+    )
+
+    graph.add_conditional_edges(
+        "approval",
+        route_after_approval,
+        {
+            "code_generation": "code_generation",
+            "end": END,
+        },
+    )
+
+    graph.add_conditional_edges(
+        "code_generation",
+        route_after_code_generation,
+        {
+            "settings_generator": "settings_generator",
+            "end": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "settings_generator",
+        route_after_settings_generator,
+        {
+            "settings_validation": "settings_validation",
+            "end": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "settings_validation",
+        route_after_settings_validation,
+        {
+            "environment_configuration": "build_artifact_validation",
+            "debug": "debug",
+        },
+    )
+    graph.add_conditional_edges(
+        "build_artifact_validation",
+        route_after_build_artifact_validation,
+        {
+            "environment_configuration": "environment_configuration",
+            "code_generation": "code_generation",
+            "end": END,
+        },
+    )
+    graph.add_edge(
+        "environment_configuration",
+        "test",
+    )
+
+    graph.add_conditional_edges(
+        "test",
+        route_after_test,
+        {
+            "package_completion": "package_completion",
+            "debug": "debug",
+            "end": END,
+        },
+    )
+
+    graph.add_conditional_edges(
+        "debug",
+        route_after_debug,
+        {
+            "code_generation": "code_generation",
+            "end": END,
+        },
+    )
+
+    graph.add_edge(
+        "package_completion",
+        "review",
+    )
+    graph.add_edge(
+        "review",
+        END,
+    )
+
+    return graph.compile(
+        checkpointer=checkpointer,
+    )

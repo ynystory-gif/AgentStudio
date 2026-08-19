@@ -1,0 +1,12 @@
+{
+  "version": "1.0",
+  "id": "STREAMING_DEPLOYMENT_POLICY",
+  "purpose": "SSE 배포 환경에서 버퍼링/연결 제한/HTTP 버전 문제를 검토",
+  "rules": [
+    "SSE 응답은 Cache-Control 정책을 검토한다.",
+    "nginx 환경에서는 X-Accel-Buffering: no를 조건부 적용한다.",
+    "CDN/기업 프록시는 별도 buffering/timeout 정책을 확인한다.",
+    "동시 스트림 수가 많으면 HTTP/2 및 connection limit을 검토한다.",
+    "Last-Event-ID resume은 실제 replay/resume 전략이 있을 때만 적용한다."
+  ]
+}

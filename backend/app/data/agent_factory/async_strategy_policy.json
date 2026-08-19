@@ -1,0 +1,34 @@
+{
+  "version": "1.0",
+  "id": "ASYNC_STRATEGY_POLICY",
+  "purpose": "AgentStudio가 생성 대상 Agent의 I/O 실행 전략을 결정하기 위한 정책",
+  "decision_flow": [
+    {
+      "question": "외부 I/O 대기가 존재하는가?",
+      "yes": "async_candidate",
+      "no": "sync_or_cpu_path"
+    },
+    {
+      "question": "독립 작업을 동시에 처리할 수 있는가?",
+      "yes": "gather_or_abatch",
+      "no": "sequential_await"
+    },
+    {
+      "question": "호출량이 많거나 Rate Limit 위험이 있는가?",
+      "yes": "semaphore_or_max_concurrency",
+      "no": "normal_async"
+    },
+    {
+      "question": "재시도 가능한 일시적 실패인가?",
+      "yes": "bounded_exponential_backoff",
+      "no": "fail_fast_or_business_fallback"
+    }
+  ],
+  "rules": [
+    "FastAPI async endpoint에서는 blocking invoke/time.sleep/asyncio.run 중첩을 피한다.",
+    "LLM/API/DB 같은 I/O Bound는 async 우선 검토한다.",
+    "CPU Bound는 worker/process/GPU 등 별도 실행 전략을 검토한다.",
+    "gather는 독립 작업에 사용하고 실패 정책을 명시한다.",
+    "동시성 값은 Provider/트래픽에 맞게 설정 가능하게 한다."
+  ]
+}

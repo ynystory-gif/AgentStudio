@@ -1,0 +1,22 @@
+{
+  "/tmp/tmpl8rkvxkg": {
+    "db_type": "sqlite3",
+    "host": "",
+    "port": 0,
+    "database": "data/test.db",
+    "username": "",
+    "driver": "Python sqlite3 (stdlib)",
+    "service_name": "",
+    "trust_server_certificate": true
+  },
+  "c:\\ai\\lgcns_mcp\\my_llm_service": {
+    "db_type": "sqlite3",
+    "host": "",
+    "port": 0,
+    "database": "data/app.db",
+    "username": "",
+    "driver": "Python sqlite3 (stdlib)",
+    "service_name": "",
+    "trust_server_certificate": true
+  }
+}

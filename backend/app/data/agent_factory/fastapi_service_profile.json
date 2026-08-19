@@ -1,0 +1,46 @@
+{
+  "version": "1.0",
+  "id": "FASTAPI_SERVICE_PROFILE",
+  "name": "FastAPI Agent Service Profile",
+  "trigger_tags": [
+    "fastapi",
+    "api",
+    "web service",
+    "backend"
+  ],
+  "design_steps": [
+    "HTTP/API 요구사항 분석",
+    "Path/Query/Body 분류",
+    "Router 목록 결정",
+    "Service 책임 결정",
+    "Request/Response Schema 결정",
+    "Settings/Secret 관리 결정",
+    "Async I/O 여부 결정",
+    "CORS/Middleware 필요성 판단",
+    "Health/Docs 검증 계획",
+    "실행/테스트 계획"
+  ],
+  "default_structure": [
+    "app/main.py",
+    "app/routers/",
+    "app/services/",
+    "app/schemas/",
+    "app/core/settings.py",
+    ".env.example",
+    ".gitignore",
+    "requirements.txt"
+  ],
+  "optional_structure": [
+    "app/dependencies.py",
+    "tests/",
+    ".devcontainer/devcontainer.json"
+  ],
+  "validation": [
+    "uvicorn import target valid",
+    "startup complete",
+    "GET /health returns 200",
+    "/docs renders",
+    "Pydantic invalid input returns 422",
+    "async endpoint has no blocking invoke/time.sleep"
+  ]
+}

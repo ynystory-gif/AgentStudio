@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "id": "SETTINGS_TEST_POLICY",
+  "purpose": "생성된 Settings API/UI의 조회·수정·저장·보안 계약 검증",
+  "minimum_cases": [
+    "GET settings returns non-secret values",
+    "secret value is masked/not exposed",
+    "valid settings update succeeds",
+    "invalid settings update is rejected",
+    "saved value can be read back",
+    "generated settings files exist",
+    ".env.example contains keys but no real secrets"
+  ]
+}

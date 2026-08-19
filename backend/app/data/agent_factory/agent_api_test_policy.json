@@ -1,0 +1,67 @@
+{
+  "version": "1.1",
+  "id": "AGENT_API_TEST_POLICY",
+  "purpose": "코드 생성 완료가 아니라 실행/검증/수정 루프를 완성하기 위한 테스트 정책",
+  "minimum_cases": [
+    {
+      "case": "happy_path",
+      "expected": "2xx"
+    },
+    {
+      "case": "required_field_missing",
+      "expected": "422"
+    },
+    {
+      "case": "wrong_type",
+      "expected": "422"
+    },
+    {
+      "case": "boundary_violation",
+      "expected": "422"
+    },
+    {
+      "case": "dependency_mock",
+      "expected": "외부 API 비용 없이 endpoint 동작"
+    },
+    {
+      "case": "integration_failure",
+      "expected": "안전한 오류 응답"
+    },
+    {
+      "case": "unknown_error",
+      "expected": "500 + 내부 정보 비노출"
+    },
+    {
+      "case": "stream_message_event",
+      "expected": "첫 message event 수신"
+    },
+    {
+      "case": "stream_done_event",
+      "expected": "정상 done event 수신"
+    },
+    {
+      "case": "stream_disconnect",
+      "expected": "generator/upstream 취소 또는 정리"
+    },
+    {
+      "case": "stream_buffering",
+      "expected": "점진적 청크 도착"
+    }
+  ],
+  "runtime_checks": [
+    "uvicorn import target valid",
+    "Application startup complete",
+    "/health 200",
+    "/docs or /openapi.json available in development",
+    "async endpoint blocking pattern absent"
+  ],
+  "repair_loop": [
+    "generate",
+    "static_validate",
+    "run",
+    "test",
+    "diagnose",
+    "repair",
+    "retest"
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "version": "1.0",
+  "id": "STREAMING_EVENT_CONTRACT",
+  "purpose": "Streaming client/server 사이의 이벤트 타입과 payload 계약 정의",
+  "events": {
+    "message": {
+      "required_fields": [
+        "content"
+      ],
+      "description": "점진적으로 전달되는 실제 응답 조각"
+    },
+    "done": {
+      "required_fields": [],
+      "optional_fields": [
+        "status",
+        "usage",
+        "ttft_ms",
+        "latency_ms",
+        "metadata"
+      ],
+      "description": "정상 완료 이벤트"
+    },
+    "error": {
+      "required_fields": [
+        "message"
+      ],
+      "optional_fields": [
+        "code",
+        "retryable"
+      ],
+      "description": "클라이언트에 안전한 오류 이벤트"
+    }
+  },
+  "rules": [
+    "SSE payload는 가능하면 JSON으로 직렬화한다.",
+    "연결 종료만으로 정상 완료를 판단하지 않고 done event를 명시한다.",
+    "[DONE] 문자열 자체는 구현 세부사항이며 필수 표준으로 고정하지 않는다.",
+    "error event에 내부 exception 원문/stack trace를 넣지 않는다."
+  ]
+}

@@ -1,0 +1,2160 @@
+{
+  "version": "1.8",
+  "description": "THEANOVA AgentStudio 에이전트 프로그램 생성용 코딩 스타일 규칙 저장소",
+  "source_policy": {
+    "raw_source_is_rule": false,
+    "classification": [
+      "required",
+      "recommended",
+      "conditional",
+      "template_candidate",
+      "reference_only"
+    ],
+    "note": "교육 자료 전체를 무조건 프롬프트에 넣지 않고 구조화된 규칙만 작업 문맥에 맞게 선택합니다."
+  },
+  "rules": [
+    {
+      "id": "CS-001",
+      "category": "llm",
+      "name": "LangChain 기본 LLM 인터페이스",
+      "level": "recommended",
+      "applies_to": [
+        "agent",
+        "llm_app",
+        "langchain"
+      ],
+      "rule": "에이전트 프로그램에서 LLM 호출 공통 인터페이스로 LangChain ChatModel을 우선 사용한다.",
+      "rationale": "OpenAI, Anthropic 등 여러 벤더를 유사한 invoke 인터페이스로 다룰 수 있다.",
+      "source": "module_1_6_1_7"
+    },
+    {
+      "id": "CS-002",
+      "category": "prompt",
+      "name": "SystemMessage와 HumanMessage 역할 분리",
+      "level": "required",
+      "applies_to": [
+        "agent",
+        "llm_app",
+        "langchain"
+      ],
+      "rule": "에이전트 역할·행동지침은 SystemMessage에, 사용자의 실제 업무 요청은 HumanMessage에 분리한다.",
+      "rationale": "역할과 업무 입력을 분리하면 재사용성과 응답 집중도가 높아진다.",
+      "source": "module_1_6_1_7"
+    },
+    {
+      "id": "CS-003",
+      "category": "environment",
+      "name": "dotenv 기반 환경변수 로딩",
+      "level": "recommended",
+      "applies_to": [
+        "python",
+        "agent",
+        "llm_app"
+      ],
+      "rule": "로컬 Python 프로젝트에서는 python-dotenv의 load_dotenv()를 이용해 .env 환경변수를 로딩한다.",
+      "rationale": "로컬 개발환경에서 API Key와 설정값을 소스와 분리한다.",
+      "source": "module_1_6_1_7"
+    },
+    {
+      "id": "CS-004",
+      "category": "security",
+      "name": "API Key 하드코딩 금지",
+      "level": "required",
+      "applies_to": [
+        "all"
+      ],
+      "rule": "OPENAI_API_KEY, ANTHROPIC_API_KEY 등 비밀값을 소스코드에 직접 작성하지 않는다.",
+      "rationale": "Git 이력에 비밀키가 남는 것을 방지한다.",
+      "source": "module_1_6_1_7"
+    },
+    {
+      "id": "CS-005",
+      "category": "security",
+      "name": ".env Git 제외",
+      "level": "required",
+      "applies_to": [
+        "all"
+      ],
+      "rule": ".env 파일은 .gitignore에 포함한다.",
+      "rationale": "환경변수와 비밀정보가 원격 저장소에 커밋되는 것을 방지한다.",
+      "source": "module_1_6_1_7"
+    },
+    {
+      "id": "CS-006",
+      "category": "llm",
+      "name": "응답 본문은 content 사용",
+      "level": "recommended",
+      "applies_to": [
+        "langchain",
+        "llm_app"
+      ],
+      "rule": "LangChain ChatModel 응답의 실제 텍스트는 AIMessage.content를 사용한다.",
+      "rationale": "메시지 객체 전체와 실제 사용자 출력 텍스트를 구분한다.",
+      "source": "module_1_6_1_7"
+    },
+    {
+      "id": "CS-007",
+      "category": "observability",
+      "name": "토큰 사용량 확인 지원",
+      "level": "conditional",
+      "applies_to": [
+        "llm_app",
+        "production"
+      ],
+      "rule": "비용/사용량 관찰이 필요한 경우 response.usage_metadata를 기록하거나 표시할 수 있도록 설계한다.",
+      "rationale": "LLM 비용과 입력·출력 토큰을 추적할 수 있다.",
+      "source": "module_1_6_1_7"
+    },
+    {
+      "id": "CS-008",
+      "category": "observability",
+      "name": "LangSmith 추적 가능 구조",
+      "level": "conditional",
+      "applies_to": [
+        "langchain",
+        "agent",
+        "development"
+      ],
+      "rule": "LangSmith를 사용할 경우 코드 변경 없이 환경변수 설정으로 Trace가 활성화될 수 있는 구조를 유지한다.",
+      "rationale": "System/Human 입력, 응답, 지연시간, 비용을 추적하기 쉽다.",
+      "source": "module_1_6_1_7"
+    },
+    {
+      "id": "CS-009",
+      "category": "architecture",
+      "name": "필요한 LangChain 구성요소만 사용",
+      "level": "recommended",
+      "applies_to": [
+        "langchain",
+        "agent"
+      ],
+      "rule": "Model, Prompt, Parser, Chain, Tool 등 LangChain 구성요소는 필요한 범위만 사용하고 불필요한 추상화는 추가하지 않는다.",
+      "rationale": "프레임워크 구성요소가 많아질수록 복잡도와 유지보수 비용이 증가한다.",
+      "source": "module_1_6_1_7"
+    },
+    {
+      "id": "CS-010",
+      "category": "portability",
+      "name": "Colab 전용 코드를 로컬 실행 코드로 변환",
+      "level": "conditional",
+      "applies_to": [
+        "python",
+        "migration",
+        "local"
+      ],
+      "rule": "Colab 코드를 로컬 프로젝트로 이식할 때 google.colab userdata, !pip, display, files.upload 의존성을 제거하고 dotenv, 터미널 설치, print, 로컬 경로 방식으로 변환한다.",
+      "rationale": "AgentStudio가 생성하는 프로젝트는 로컬에서 직접 실행 가능해야 한다.",
+      "source": "module_1_6_1_7"
+    },
+    {
+      "id": "CS-011",
+      "category": "version_control",
+      "name": "실제 프로젝트는 역할별 파일과 Git 이력 사용",
+      "level": "recommended",
+      "applies_to": [
+        "production",
+        "agentstudio"
+      ],
+      "rule": "교육용 v1/v2/v3 파일 복제 방식은 학습 자료에 한정하고 실제 AgentStudio 프로젝트는 역할별 파일 구조를 유지하며 Git으로 변경 이력을 관리한다.",
+      "rationale": "유사 파일 난립을 막고 실제 프로젝트 유지보수를 쉽게 한다.",
+      "source": "agentstudio_interpretation"
+    },
+    {
+      "id": "CS-012",
+      "category": "model",
+      "name": "모델명 고정 금지",
+      "level": "recommended",
+      "applies_to": [
+        "agent",
+        "llm_app"
+      ],
+      "rule": "gpt-4o-mini 등 교육 예시 모델명을 코딩 스타일에 하드코딩하지 않고 설정 또는 모델 라우터에서 선택한다.",
+      "rationale": "모델 변경과 OpenAI/Ollama/Anthropic 등 다중 Provider 지원을 가능하게 한다.",
+      "source": "agentstudio_interpretation"
+    },
+    {
+      "id": "CS-013",
+      "category": "prompt",
+      "name": "RCIF 기반 프롬프트 구조화",
+      "level": "recommended",
+      "applies_to": [
+        "agent",
+        "llm_app",
+        "langchain"
+      ],
+      "rule": "복합 LLM 업무 프롬프트는 Role, Context, Instruction, Format(RCIF)을 명확히 구분해 설계한다.",
+      "rationale": "역할·상황·업무·출력 계약을 분리하면 결과의 일관성과 재사용성이 높아진다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-014",
+      "category": "prompt",
+      "name": "Role 구체화",
+      "level": "recommended",
+      "applies_to": [
+        "agent",
+        "llm_app"
+      ],
+      "rule": "Role은 단순히 '전문가'라고 쓰지 말고 필요한 분야·책임·관점을 구체적으로 정의한다.",
+      "rationale": "추상적 역할로 인한 모델의 임의 추측을 줄인다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-015",
+      "category": "prompt",
+      "name": "Instruction은 명확한 행동으로 작성",
+      "level": "required",
+      "applies_to": [
+        "agent",
+        "llm_app"
+      ],
+      "rule": "Instruction은 분석, 추출, 분류, 생성, 검증 등 모델이 수행해야 할 행동과 제약을 명확히 작성한다.",
+      "rationale": "모호한 업무 지시를 줄인다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-016",
+      "category": "prompt",
+      "name": "출력 Format 계약 명시",
+      "level": "recommended",
+      "applies_to": [
+        "agent",
+        "llm_app"
+      ],
+      "rule": "후속 코드나 사용자가 특정 결과 구조를 요구하면 필드, 순서, 길이, 목록/표/JSON 등의 출력 Format을 명시한다.",
+      "rationale": "출력의 구조적 일관성을 높인다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-017",
+      "category": "prompt_strategy",
+      "name": "Zero-shot과 Few-shot 선택",
+      "level": "conditional",
+      "applies_to": [
+        "agent",
+        "llm_app",
+        "classification"
+      ],
+      "rule": "단순하고 일반적인 과제는 Zero-shot을 우선하고, 특수 도메인 기준·복잡한 분류·엄격한 포맷 모방이 필요할 때 Few-shot을 사용한다.",
+      "rationale": "Few-shot을 무조건 사용하지 않고 정확도와 토큰 비용을 함께 고려한다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-018",
+      "category": "prompt_strategy",
+      "name": "Few-shot 예제 출력 형식 일치",
+      "level": "required",
+      "applies_to": [
+        "few_shot",
+        "classification",
+        "llm_app"
+      ],
+      "rule": "Few-shot 예제의 출력 형식은 실제 원하는 최종 출력 형식과 동일하게 작성한다.",
+      "rationale": "예제에 포함된 불필요한 설명까지 모델이 모방하는 것을 방지한다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-019",
+      "category": "prompt",
+      "name": "프롬프트 반복 개선",
+      "level": "recommended",
+      "applies_to": [
+        "agent",
+        "llm_app",
+        "development"
+      ],
+      "rule": "프롬프트는 최소 동작 확인→형식·구조→역할·독자·제약→필요 시 에지 케이스 순으로 반복 개선한다.",
+      "rationale": "한 번에 거대한 프롬프트를 만드는 대신 실패 지점을 관찰하며 개선한다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-020",
+      "category": "testing",
+      "name": "프롬프트 비교 조건 통제",
+      "level": "conditional",
+      "applies_to": [
+        "prompt_evaluation",
+        "development"
+      ],
+      "rule": "프롬프트 버전 비교 실험에서는 가능한 한 모델과 temperature 등 생성 조건을 동일하게 유지한다.",
+      "rationale": "프롬프트 변경 효과와 생성 랜덤성의 영향을 구분하기 위함이다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-021",
+      "category": "prompt",
+      "name": "반복 프롬프트는 ChatPromptTemplate 사용",
+      "level": "recommended",
+      "applies_to": [
+        "langchain",
+        "llm_app",
+        "agent"
+      ],
+      "rule": "동일한 프롬프트 구조를 여러 입력에 재사용하는 경우 ChatPromptTemplate 등 템플릿으로 분리하고 변경되는 값은 변수화한다.",
+      "rationale": "프롬프트 하드코딩 중복을 줄이고 유지보수성을 높인다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-022",
+      "category": "prompt",
+      "name": "LangChain 템플릿 변수 규칙",
+      "level": "required",
+      "applies_to": [
+        "langchain",
+        "llm_app"
+      ],
+      "rule": "LangChain PromptTemplate/ChatPromptTemplate 변수는 단일 중괄호 {variable}를 사용하고 invoke 입력 키와 변수명을 정확히 일치시킨다.",
+      "rationale": "KeyError와 이중 중괄호로 인한 조용한 치환 실패를 방지한다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-023",
+      "category": "prompt",
+      "name": "템플릿 실제 메시지 검증",
+      "level": "conditional",
+      "applies_to": [
+        "langchain",
+        "development"
+      ],
+      "rule": "복잡한 ChatPromptTemplate을 개발·디버깅할 때 format_messages() 등으로 실제 System/Human 메시지 변환 결과를 확인한다.",
+      "rationale": "템플릿 변수 치환과 역할 배치를 눈으로 검증할 수 있다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-024",
+      "category": "testing",
+      "name": "LLM 기능 테스트 케이스",
+      "level": "recommended",
+      "applies_to": [
+        "agent",
+        "llm_app",
+        "development"
+      ],
+      "rule": "LLM 기능은 최소 정상 입력, 엣지 입력, 빈값/무관 입력을 포함한 테스트 케이스로 검증한다.",
+      "rationale": "정상 케이스만으로 발견하기 어려운 실패 패턴을 조기에 확인한다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-025",
+      "category": "prompt",
+      "name": "Few-shot 예제의 위치와 역할 보존",
+      "level": "conditional",
+      "applies_to": [
+        "langchain",
+        "few_shot"
+      ],
+      "rule": "FewShotChatMessagePromptTemplate을 사용할 때 시스템 지침 뒤, 최종 사용자 입력 앞에 예제를 배치하고 human/ai 역할 쌍을 유지한다.",
+      "rationale": "예제가 실제 대화 패턴으로 올바르게 전달되도록 한다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-026",
+      "category": "prompt",
+      "name": "고정 템플릿 값의 사전 바인딩",
+      "level": "conditional",
+      "applies_to": [
+        "langchain",
+        "prompt_template"
+      ],
+      "rule": "여러 호출에서 항상 동일한 프롬프트 변수는 필요 시 partial_variables 등으로 사전 고정하여 호출부 중복을 줄인다.",
+      "rationale": "반복 설정을 줄이고 템플릿 사용 오류를 낮춘다.",
+      "source": "module_2_1_2_5"
+    },
+    {
+      "id": "CS-027",
+      "category": "reasoning",
+      "name": "내부 추론 노출 의존 금지",
+      "level": "required",
+      "applies_to": [
+        "agent",
+        "llm_app"
+      ],
+      "rule": "서비스 구현은 모델의 비공개 내부 추론 과정을 사용자에게 출력하도록 요구하는 방식에 의존하지 않는다. 필요한 경우 결론, 근거 요약, 검증 단계 또는 구조화된 판단 필드만 요청한다.",
+      "rationale": "서비스 출력 계약을 안정적으로 유지하고 내부 추론 노출에 의존하지 않기 위함이다.",
+      "source": "agentstudio_interpretation_module_2"
+    },
+    {
+      "id": "CS-028",
+      "category": "architecture",
+      "name": "LCEL 파이프라인 우선",
+      "level": "recommended",
+      "applies_to": [
+        "langchain",
+        "llm_app",
+        "agent"
+      ],
+      "rule": "프롬프트→모델→파서처럼 순차적인 LLM 처리 단계는 반복 수동 연결보다 LCEL 파이프라인(prompt | llm | parser)으로 구성한다.",
+      "rationale": "단계 연결 코드를 줄이고 invoke/stream/batch/비동기 실행 인터페이스를 일관되게 사용할 수 있다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-029",
+      "category": "architecture",
+      "name": "LCEL 단계별 타입 흐름 명확화",
+      "level": "recommended",
+      "applies_to": [
+        "langchain",
+        "llm_app"
+      ],
+      "rule": "LCEL 체인 설계 시 각 단계의 입력/출력 타입(dict, Message, AIMessage, str, Pydantic 등)을 명확히 이해하고 연결한다.",
+      "rationale": "체인 단계 간 타입 불일치로 인한 오류를 줄인다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-030",
+      "category": "architecture",
+      "name": "StrOutputParser 사용 기준",
+      "level": "conditional",
+      "applies_to": [
+        "langchain",
+        "llm_app"
+      ],
+      "rule": "최종 결과가 문자열이어야 하는 LCEL 체인에서는 StrOutputParser를 사용하고, AIMessage 객체가 필요한 경우에는 생략한다.",
+      "rationale": "출력 타입 계약을 명확하게 유지한다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-031",
+      "category": "performance",
+      "name": "Batch 입력 타입과 동시성 제어",
+      "level": "conditional",
+      "applies_to": [
+        "langchain",
+        "batch",
+        "llm_app"
+      ],
+      "rule": "batch/abatch는 체인이 기대하는 입력 구조의 리스트를 전달하고, 대량 요청 시 max_concurrency를 조절해 Rate Limit을 방어한다.",
+      "rationale": "잘못된 입력 타입과 과도한 병렬 호출을 방지한다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-032",
+      "category": "architecture",
+      "name": "웹 서버에서는 비동기 LCEL 사용",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "async",
+        "langchain",
+        "production"
+      ],
+      "rule": "FastAPI 등 비동기 웹 서버에서는 가능하면 ainvoke/astream/abatch 같은 비동기 Runnable 인터페이스를 사용한다.",
+      "rationale": "블로킹 호출로 이벤트 루프가 막히는 문제를 줄인다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-033",
+      "category": "architecture",
+      "name": "병렬 독립 작업은 RunnableParallel 고려",
+      "level": "conditional",
+      "applies_to": [
+        "langchain",
+        "parallel",
+        "agent"
+      ],
+      "rule": "동일 입력으로 서로 독립적인 요약·분류·검색 준비 등을 동시에 수행할 수 있으면 RunnableParallel을 고려한다.",
+      "rationale": "독립 작업의 응답 지연을 줄이고 파이프라인 의도를 명확히 한다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-034",
+      "category": "architecture",
+      "name": "단순 전처리/후처리는 RunnableLambda",
+      "level": "conditional",
+      "applies_to": [
+        "langchain",
+        "llm_app"
+      ],
+      "rule": "체인 중간의 단순 Python 전처리·후처리는 필요 시 RunnableLambda로 감싸 Runnable 인터페이스 안에서 처리한다.",
+      "rationale": "파이프라인 외부의 임의 glue code를 줄인다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-035",
+      "category": "architecture",
+      "name": "조건 분기는 RunnableBranch 고려",
+      "level": "conditional",
+      "applies_to": [
+        "langchain",
+        "agent",
+        "branching"
+      ],
+      "rule": "입력 길이·종류·조건에 따라 서로 다른 체인이나 스키마를 사용해야 하면 RunnableBranch를 고려한다.",
+      "rationale": "조건문으로 흩어진 분기 로직을 Runnable 구조 안에서 관리할 수 있다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-036",
+      "category": "correctness",
+      "name": "TypedDict와 Pydantic 사용처 분리",
+      "level": "required",
+      "applies_to": [
+        "python",
+        "langgraph",
+        "api",
+        "llm_app"
+      ],
+      "rule": "내부 상태처럼 신뢰 가능한 데이터 모양은 TypedDict를 사용할 수 있지만, 사용자 입력·LLM 출력·API/MCP 경계처럼 검증이 필요한 데이터에는 Pydantic BaseModel을 우선 사용한다.",
+      "rationale": "TypedDict는 런타임 검증을 하지 않으므로 외부 경계 데이터 검증에 부적합하다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-037",
+      "category": "correctness",
+      "name": "Pydantic Field 설명과 제약 사용",
+      "level": "required",
+      "applies_to": [
+        "pydantic",
+        "structured_output",
+        "api",
+        "mcp"
+      ],
+      "rule": "Pydantic 출력/입력 모델은 Field(description=...)를 명확히 작성하고 ge/le/max_length/min_length/Literal/Optional 등 필요한 검증 제약을 스키마에 표현한다.",
+      "rationale": "스키마가 코드 검증과 LLM 출력 지시를 동시에 수행한다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-038",
+      "category": "correctness",
+      "name": "제한된 카테고리는 Literal 사용",
+      "level": "recommended",
+      "applies_to": [
+        "pydantic",
+        "structured_output",
+        "classification"
+      ],
+      "rule": "허용 가능한 값 집합이 정해져 있는 필드는 Literal 또는 동등한 enum 제약을 사용해 모델이 임의의 카테고리를 생성하지 못하게 한다.",
+      "rationale": "분류 결과의 타입 안전성과 일관성을 높인다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-039",
+      "category": "correctness",
+      "name": "분류 스키마에 기타/Unknown 경로 제공",
+      "level": "recommended",
+      "applies_to": [
+        "classification",
+        "structured_output",
+        "pydantic"
+      ],
+      "rule": "닫힌 분류 체계에는 실제로 분류 불가능한 입력을 처리할 수 있는 기타/Unknown 계열 값을 포함하는 것을 기본으로 고려한다.",
+      "rationale": "가장 가까운 범주로 억지 분류하는 오류를 줄인다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-040",
+      "category": "architecture",
+      "name": "LLM 구조화 출력은 with_structured_output 우선",
+      "level": "recommended",
+      "applies_to": [
+        "langchain",
+        "structured_output",
+        "llm_app",
+        "agent"
+      ],
+      "rule": "사용 모델이 구조화 출력/Tool Calling을 지원하면 자유 문자열을 직접 파싱하기보다 Pydantic 스키마와 with_structured_output을 우선 사용한다.",
+      "rationale": "문자열 split/regex 파싱보다 안정적인 필드 접근과 런타임 검증을 제공한다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-041",
+      "category": "architecture",
+      "name": "구조화 출력 체인에서 중복 Parser 제거",
+      "level": "recommended",
+      "applies_to": [
+        "langchain",
+        "structured_output"
+      ],
+      "rule": "with_structured_output으로 이미 Pydantic 결과를 받는 체인에는 불필요한 StrOutputParser를 추가하지 않는다.",
+      "rationale": "출력 타입을 다시 문자열로 변환하거나 체인 의미를 혼동하는 것을 방지한다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-042",
+      "category": "correctness",
+      "name": "구조화 출력 실패 처리",
+      "level": "required",
+      "applies_to": [
+        "structured_output",
+        "production",
+        "llm_app"
+      ],
+      "rule": "중요한 구조화 출력 호출은 try-except로 감싸고 실패 시 원문 텍스트 반환, 명시적 오류 객체, 재시도 등 서비스 요구에 맞는 폴백을 제공한다.",
+      "rationale": "복잡한 스키마나 모델 특성으로 구조화 출력이 실패해도 서비스 전체가 중단되지 않도록 한다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-043",
+      "category": "performance",
+      "name": "OutputFixingParser는 최후 수단",
+      "level": "conditional",
+      "applies_to": [
+        "langchain",
+        "structured_output",
+        "legacy"
+      ],
+      "rule": "OutputFixingParser는 추가 LLM 호출 비용과 지연이 발생하므로, 먼저 스키마/Field 설명과 with_structured_output을 개선하고 레거시 파서 실패 복구가 필요할 때 제한적으로 사용한다.",
+      "rationale": "불필요한 재호출 비용을 줄인다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-044",
+      "category": "architecture",
+      "name": "중첩 도메인은 중첩 Pydantic 모델",
+      "level": "recommended",
+      "applies_to": [
+        "pydantic",
+        "structured_output",
+        "domain_model"
+      ],
+      "rule": "액션아이템·라인아이템처럼 자체 필드 구조가 있는 반복 데이터는 list[str]로 뭉개지 말고 필요 시 별도 BaseModel을 정의해 list[SubModel] 형태로 표현한다.",
+      "rationale": "필드별 접근성과 검증 가능성을 높인다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-045",
+      "category": "correctness",
+      "name": "Pydantic model_dump 사용",
+      "level": "recommended",
+      "applies_to": [
+        "pydantic",
+        "api",
+        "structured_output"
+      ],
+      "rule": "Pydantic 결과를 dict/JSON 전송 형태로 변환할 때 임의 __dict__ 접근보다 model_dump()를 사용한다.",
+      "rationale": "Pydantic의 표준 직렬화 동작을 따른다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-046",
+      "category": "testing",
+      "name": "구조화 출력 유효/무효 테스트",
+      "level": "recommended",
+      "applies_to": [
+        "pydantic",
+        "structured_output",
+        "testing"
+      ],
+      "rule": "Pydantic 스키마는 정상 데이터뿐 아니라 허용 범위를 벗어난 값으로 ValidationError가 실제 발생하는지 테스트한다.",
+      "rationale": "선언한 제약이 런타임에 실제로 작동하는지 확인한다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-047",
+      "category": "correctness",
+      "name": "커스텀 검증은 field/model validator 사용",
+      "level": "conditional",
+      "applies_to": [
+        "pydantic",
+        "domain_validation"
+      ],
+      "rule": "단일 필드 정규화·검증은 field_validator, 여러 필드 간 비즈니스 규칙은 model_validator를 사용해 스키마 내부에 표현한다.",
+      "rationale": "검증 로직을 호출부에 흩어놓지 않고 데이터 모델에 응집한다.",
+      "source": "module_3_1_3_4"
+    },
+    {
+      "id": "CS-048",
+      "category": "security",
+      "name": "AI 결정과 실제 Tool 실행 분리",
+      "level": "required",
+      "applies_to": [
+        "agent",
+        "tool",
+        "function_calling",
+        "mcp"
+      ],
+      "rule": "LLM은 Tool 호출 의도와 인자를 결정하고 실제 DB/API/File/System 실행은 애플리케이션 코드가 검증 후 수행한다.",
+      "rationale": "보안, 입력 검증, 감사 로그, 실행 거부 및 권한 통제를 가능하게 한다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-049",
+      "category": "correctness",
+      "name": "@tool 파라미터 타입 힌트",
+      "level": "required",
+      "applies_to": [
+        "langchain",
+        "tool",
+        "function_calling"
+      ],
+      "rule": "@tool 함수의 입력 파라미터와 반환 타입에 명확한 Python 타입 힌트를 작성하여 ArgsSchema 생성과 입력 검증 품질을 높인다.",
+      "rationale": "LLM에 전달되는 Tool Schema의 정확도를 높인다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-050",
+      "category": "architecture",
+      "name": "Tool docstring을 실행 명세로 작성",
+      "level": "required",
+      "applies_to": [
+        "tool",
+        "function_calling",
+        "mcp"
+      ],
+      "rule": "Tool docstring에는 기능 설명뿐 아니라 사용 시점, 사용하지 말아야 할 조건, Args, Returns를 명확히 작성하고 필요 시 예시 질문을 포함한다.",
+      "rationale": "Tool description 품질이 LLM의 Tool 선택 정확도에 직접 영향을 준다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-051",
+      "category": "architecture",
+      "name": "bind_tools 명시적 등록",
+      "level": "required",
+      "applies_to": [
+        "langchain",
+        "tool",
+        "function_calling"
+      ],
+      "rule": "LLM이 사용할 수 있는 Tool 목록은 bind_tools([...]) 등 명시적인 Tool Registry를 통해 등록한다.",
+      "rationale": "현재 Agent가 접근 가능한 실행 기능의 범위를 명확하게 제한한다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-052",
+      "category": "correctness",
+      "name": "Tool 호출 AIMessage 이력 보존",
+      "level": "required",
+      "applies_to": [
+        "langchain",
+        "tool",
+        "function_calling"
+      ],
+      "rule": "Tool 실행 전에 tool_calls를 생성한 AIMessage를 messages에 추가하여 호출 문맥을 보존한다.",
+      "rationale": "후속 ToolMessage와 최종 응답이 올바른 대화 문맥에 연결되도록 한다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-053",
+      "category": "correctness",
+      "name": "ToolMessage tool_call_id 연결",
+      "level": "required",
+      "applies_to": [
+        "langchain",
+        "tool",
+        "function_calling"
+      ],
+      "rule": "Tool 실행 결과를 ToolMessage로 전달할 때 원래 tool_call의 id를 tool_call_id에 반드시 연결한다.",
+      "rationale": "LLM의 호출 요청과 실제 실행 결과를 정확히 매칭한다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-054",
+      "category": "correctness",
+      "name": "빈 tool_calls 분기 처리",
+      "level": "required",
+      "applies_to": [
+        "langchain",
+        "tool",
+        "function_calling"
+      ],
+      "rule": "ai_msg.tool_calls가 비어 있을 수 있으므로 인덱스로 바로 접근하지 말고 Tool 호출 경로와 직접 답변 경로를 분기 처리한다.",
+      "rationale": "도구가 필요 없는 질문에서 IndexError나 잘못된 실행을 방지한다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-055",
+      "category": "architecture",
+      "name": "다중 Tool 이름 매핑",
+      "level": "recommended",
+      "applies_to": [
+        "tool",
+        "function_calling",
+        "agent"
+      ],
+      "rule": "다중 Tool 실행 루프에서는 Tool 이름에서 실제 Tool 객체를 찾는 Registry 또는 이름→Tool 매핑을 사용한다.",
+      "rationale": "if/elif 체인보다 Tool 추가·제거와 확장이 쉽다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-056",
+      "category": "correctness",
+      "name": "복수 tool_calls 처리",
+      "level": "recommended",
+      "applies_to": [
+        "tool",
+        "function_calling",
+        "agent"
+      ],
+      "rule": "모델이 한 응답에 여러 tool_calls를 반환할 수 있음을 고려하고 업무 정책이 허용하는 경우 모든 호출을 순회 처리한다.",
+      "rationale": "첫 번째 Tool만 처리해 나머지 요청을 누락하는 문제를 방지한다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-057",
+      "category": "correctness",
+      "name": "Tool 실행 예외 격리",
+      "level": "required",
+      "applies_to": [
+        "tool",
+        "function_calling",
+        "agent",
+        "production"
+      ],
+      "rule": "개별 Tool 실행은 try-except로 격리하고 실패 결과를 구조화된 오류 또는 ToolMessage로 반환하여 Agent 전체가 즉시 중단되지 않도록 한다.",
+      "rationale": "도구 실패 시 재시도·대체 경로·사용자 설명이 가능해진다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-058",
+      "category": "testing",
+      "name": "Mock Tool과 실제 Tool 분리",
+      "level": "recommended",
+      "applies_to": [
+        "tool",
+        "testing",
+        "development"
+      ],
+      "rule": "개발 초기 Mock Tool과 실제 외부 API/DB Tool을 구분하고 동일한 입력/출력 계약을 유지하여 단계적으로 교체 가능하게 설계한다.",
+      "rationale": "외부 비용이나 연결 없이 Tool Workflow를 먼저 검증할 수 있다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-059",
+      "category": "architecture",
+      "name": "외부 API Tool 결과 정제",
+      "level": "recommended",
+      "applies_to": [
+        "tool",
+        "api",
+        "web_search",
+        "agent"
+      ],
+      "rule": "외부 API의 원시 응답 전체를 LLM에 그대로 넘기기보다 작업에 필요한 필드와 길이로 정제해 Tool 결과를 반환한다.",
+      "rationale": "불필요한 토큰 사용과 Tool 결과 노이즈를 줄인다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-060",
+      "category": "performance",
+      "name": "외부 Tool Rate Limit 고려",
+      "level": "conditional",
+      "applies_to": [
+        "tool",
+        "api",
+        "production"
+      ],
+      "rule": "유료/제한형 외부 API Tool은 max_results, 호출 횟수, 캐시, 재시도 정책 등을 통해 Rate Limit과 비용을 제어한다.",
+      "rationale": "Agent의 반복 호출로 API 한도와 비용이 급증하는 것을 방지한다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-061",
+      "category": "security",
+      "name": "Tool에서 eval 사용 금지",
+      "level": "required",
+      "applies_to": [
+        "tool",
+        "python",
+        "production"
+      ],
+      "rule": "프로덕션 Agent Tool에서 사용자 또는 LLM 입력을 eval/exec로 실행하지 않는다. 수식 계산 등은 검증된 안전한 파서나 라이브러리를 사용한다.",
+      "rationale": "임의 코드 실행 취약점을 방지한다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-062",
+      "category": "testing",
+      "name": "Tool Routing 테스트",
+      "level": "required",
+      "applies_to": [
+        "tool",
+        "function_calling",
+        "testing"
+      ],
+      "rule": "다중 Tool Agent는 각 Tool이 선택되어야 하는 질문과 Tool 없이 직접 답변해야 하는 질문을 모두 테스트한다.",
+      "rationale": "description과 routing 품질을 실제 질문 단위로 검증한다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-063",
+      "category": "architecture",
+      "name": "tool_choice 강제는 명시적 정책에서만 사용",
+      "level": "conditional",
+      "applies_to": [
+        "tool",
+        "function_calling"
+      ],
+      "rule": "특정 Tool을 강제하는 tool_choice는 업무 규칙상 반드시 해당 Tool을 사용해야 할 때만 적용하고 일반 라우팅에서는 모델의 선택 가능성을 유지한다.",
+      "rationale": "불필요한 Tool 강제로 잘못된 실행이 발생하는 것을 방지한다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-064",
+      "category": "architecture",
+      "name": "MCP Tool에도 동일한 Description 품질 적용",
+      "level": "required",
+      "applies_to": [
+        "mcp",
+        "tool",
+        "agent"
+      ],
+      "rule": "MCP Tool의 name, description, input schema에도 @tool과 동일하게 사용 시점·입력·출력·제약을 명확히 기술한다.",
+      "rationale": "MCP Tool 역시 Agent가 명세를 바탕으로 선택하므로 설명 품질이 routing 정확도를 결정한다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-065",
+      "category": "architecture",
+      "name": "실행 수단 필요성 판단",
+      "level": "recommended",
+      "applies_to": [
+        "agentstudio",
+        "agent",
+        "tool",
+        "mcp",
+        "api"
+      ],
+      "rule": "기능을 무조건 Tool/MCP로 만들지 않고 내부 함수, Tool, API Client, DB Service, MCP 중 실행 경계와 재사용성에 맞는 방식을 선택한다.",
+      "rationale": "불필요한 Agent 추상화를 줄이고 적절한 실행 경계를 만든다.",
+      "source": "agentstudio_interpretation_module_4"
+    },
+    {
+      "id": "CS-066",
+      "category": "correctness",
+      "name": "Tool 입력 스키마 검증",
+      "level": "required",
+      "applies_to": [
+        "tool",
+        "pydantic",
+        "function_calling",
+        "mcp"
+      ],
+      "rule": "Tool 입력은 타입 힌트와 필요한 범위/형식 제약을 사용해 실제 실행 전에 검증하며 신뢰할 수 없는 LLM 인자를 그대로 외부 시스템에 전달하지 않는다.",
+      "rationale": "잘못되거나 위험한 Tool 인자가 실제 시스템으로 전달되는 것을 방지한다.",
+      "source": "module_4_1_4_4"
+    },
+    {
+      "id": "CS-067",
+      "category": "correctness",
+      "name": "async 함수 내부 blocking LLM 호출 금지",
+      "level": "required",
+      "applies_to": [
+        "async",
+        "fastapi",
+        "langchain",
+        "llm_app",
+        "production"
+      ],
+      "rule": "async def 내부에서는 llm.invoke()/chain.invoke() 같은 동기 blocking LLM 호출을 사용하지 않고 가능한 경우 await ...ainvoke()를 사용한다.",
+      "rationale": "동기 호출이 이벤트 루프를 막아 다른 요청 처리까지 지연시키는 것을 방지한다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-068",
+      "category": "correctness",
+      "name": "async 함수 내부 time.sleep 금지",
+      "level": "required",
+      "applies_to": [
+        "async",
+        "fastapi",
+        "production"
+      ],
+      "rule": "async def 내부의 대기에는 time.sleep()을 사용하지 않고 await asyncio.sleep()을 사용한다.",
+      "rationale": "이벤트 루프 전체 정지를 방지한다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-069",
+      "category": "correctness",
+      "name": "await 누락 방지",
+      "level": "required",
+      "applies_to": [
+        "async",
+        "langchain",
+        "llm_app"
+      ],
+      "rule": "ainvoke/astream/abatch 등 coroutine 반환 함수를 호출할 때 결과가 필요하면 반드시 await 또는 async for로 실행한다.",
+      "rationale": "coroutine 객체만 생성되고 실제 실행되지 않는 오류를 방지한다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-070",
+      "category": "architecture",
+      "name": "I/O Bound 작업은 asyncio 우선",
+      "level": "recommended",
+      "applies_to": [
+        "async",
+        "llm_app",
+        "api",
+        "db",
+        "io"
+      ],
+      "rule": "LLM/API/DB/네트워크/비동기 파일 I/O처럼 대기가 병목인 작업은 asyncio 기반 비동기 처리를 우선 고려한다.",
+      "rationale": "대기 시간을 겹쳐 처리해 처리량을 높인다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-071",
+      "category": "architecture",
+      "name": "CPU Bound 작업은 asyncio로 해결하지 않음",
+      "level": "required",
+      "applies_to": [
+        "async",
+        "cpu_bound",
+        "performance"
+      ],
+      "rule": "이미지 처리, 암호화, 대규모 수치 계산 등 CPU Bound 병목을 asyncio로 해결하려 하지 않고 multiprocessing, worker, GPU 등 별도 실행 방식을 고려한다.",
+      "rationale": "asyncio는 CPU 연산 병렬화 도구가 아니다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-072",
+      "category": "architecture",
+      "name": "독립 I/O 병렬 처리는 asyncio.gather",
+      "level": "recommended",
+      "applies_to": [
+        "async",
+        "batch",
+        "parallel",
+        "llm_app"
+      ],
+      "rule": "서로 독립적인 여러 I/O coroutine을 동시에 처리해야 하면 asyncio.gather를 고려한다.",
+      "rationale": "순차 await 반복보다 전체 지연 시간을 줄일 수 있다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-073",
+      "category": "correctness",
+      "name": "gather 오류 정책 명시",
+      "level": "conditional",
+      "applies_to": [
+        "async",
+        "batch",
+        "parallel"
+      ],
+      "rule": "독립 배치에서는 일부 실패를 보존해야 하면 return_exceptions=True를 사용하고, 원자성이 필요한 작업은 실패 전파 정책을 명시한다.",
+      "rationale": "모든 gather에 동일한 오류 정책을 강제하지 않고 업무 요구에 맞게 실패 의미를 정의한다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-074",
+      "category": "performance",
+      "name": "대량 동시 요청 Semaphore 제한",
+      "level": "required",
+      "applies_to": [
+        "async",
+        "batch",
+        "api",
+        "llm_app",
+        "production"
+      ],
+      "rule": "대량 LLM/API 호출은 asyncio.Semaphore 또는 max_concurrency로 동시 실행 수를 제한한다.",
+      "rationale": "Rate Limit, burst, 리소스 고갈을 방지한다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-075",
+      "category": "performance",
+      "name": "동시성 값 하드코딩 최소화",
+      "level": "recommended",
+      "applies_to": [
+        "async",
+        "batch",
+        "production"
+      ],
+      "rule": "Semaphore/max_concurrency 값은 고정 교육 예시를 그대로 사용하지 않고 Provider Rate Limit과 서비스 트래픽에 맞게 설정 또는 환경변수화한다.",
+      "rationale": "계정 Tier와 모델별 제한 변화에 대응한다.",
+      "source": "agentstudio_interpretation_module_6"
+    },
+    {
+      "id": "CS-076",
+      "category": "correctness",
+      "name": "지수 백오프 재시도",
+      "level": "recommended",
+      "applies_to": [
+        "async",
+        "api",
+        "llm_app",
+        "production"
+      ],
+      "rule": "429/일시적 네트워크 오류처럼 재시도 가능한 실패에는 제한된 횟수의 지수 백오프를 적용하고 비동기 코드에서는 await asyncio.sleep()을 사용한다.",
+      "rationale": "일시적 API 실패에서 안정적으로 복구하면서 이벤트 루프를 막지 않는다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-077",
+      "category": "maintainability",
+      "name": "복잡한 재시도는 전용 라이브러리 고려",
+      "level": "conditional",
+      "applies_to": [
+        "async",
+        "retry",
+        "production"
+      ],
+      "rule": "재시도 규칙이 복잡하거나 여러 호출부에서 반복되면 tenacity 등 검증된 재시도 도구를 고려한다.",
+      "rationale": "수동 재시도 코드 중복과 오류를 줄인다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-078",
+      "category": "correctness",
+      "name": "asyncio.run 사용 위치 제한",
+      "level": "required",
+      "applies_to": [
+        "async",
+        "python",
+        "fastapi",
+        "jupyter"
+      ],
+      "rule": "asyncio.run()은 이벤트 루프가 없는 .py 스크립트 최상위 진입점에서만 사용하고 FastAPI/Jupyter/기존 async 함수 내부에서는 await를 사용한다.",
+      "rationale": "이미 실행 중인 이벤트 루프에서 중첩 run 오류를 방지한다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-079",
+      "category": "architecture",
+      "name": "LangChain 비동기 인터페이스 사용",
+      "level": "recommended",
+      "applies_to": [
+        "async",
+        "langchain",
+        "llm_app"
+      ],
+      "rule": "비동기 LangChain 코드에서는 invoke/batch/stream에 대응하는 ainvoke/abatch/astream 인터페이스를 우선 사용한다.",
+      "rationale": "Runnable 계층 전체에서 비동기 실행 방식을 일관되게 유지한다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-080",
+      "category": "testing",
+      "name": "비동기 코드 혼합 검증",
+      "level": "required",
+      "applies_to": [
+        "async",
+        "testing",
+        "fastapi"
+      ],
+      "rule": "async 엔드포인트와 coroutine 함수는 await 누락, 동기 invoke, time.sleep, 중첩 asyncio.run 여부를 정적 또는 테스트 단계에서 검사한다.",
+      "rationale": "단일 사용자 테스트에서는 드러나지 않는 이벤트 루프 blocking 문제를 조기에 찾는다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-081",
+      "category": "architecture",
+      "name": "create_task는 생명주기 관리가 필요할 때만",
+      "level": "conditional",
+      "applies_to": [
+        "async",
+        "background_task"
+      ],
+      "rule": "asyncio.create_task는 즉시 시작 후 나중에 await해야 하는 명확한 생명주기 요구가 있을 때만 사용하고 단순 병렬 일괄 처리에는 gather를 우선 고려한다.",
+      "rationale": "fire-and-forget task 누수와 예외 유실을 방지한다.",
+      "source": "module_6_1_6_4"
+    },
+    {
+      "id": "CS-082",
+      "category": "architecture",
+      "name": "FastAPI main.py 최소 책임",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "api",
+        "production"
+      ],
+      "rule": "FastAPI의 app/main.py는 앱 초기화, 공통 미들웨어, 라우터 등록 등 조립 책임만 맡고 LLM 호출·프롬프트·업무 로직·세부 검증 로직을 직접 포함하지 않는다.",
+      "rationale": "변경 이유가 다른 코드를 분리해 main.py 비대화를 방지한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-083",
+      "category": "architecture",
+      "name": "routers 책임 제한",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "router",
+        "api"
+      ],
+      "rule": "routers 계층은 HTTP method, path, 파라미터 수신, 서비스 호출, 응답 반환에 집중하고 핵심 비즈니스 로직을 직접 구현하지 않는다.",
+      "rationale": "HTTP 계층과 업무 로직을 분리한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-084",
+      "category": "architecture",
+      "name": "services 비즈니스 로직 집중",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "service",
+        "llm_app"
+      ],
+      "rule": "services 계층은 LLM 호출, 프롬프트 조합, 데이터 가공, 외부 API/DB 호출 등 비즈니스 로직을 담당한다.",
+      "rationale": "라우터가 구현 세부사항을 몰라도 되도록 한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-085",
+      "category": "architecture",
+      "name": "schemas 타입 계약 분리",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "schema",
+        "pydantic",
+        "api"
+      ],
+      "rule": "요청/응답 데이터 구조는 Pydantic BaseModel 등 schemas 계층에 정의하고 라우터와 서비스가 공통 타입 계약으로 사용한다.",
+      "rationale": "입출력 구조 변경을 비즈니스 로직과 분리한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-086",
+      "category": "architecture",
+      "name": "단방향 의존성 유지",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "architecture",
+        "python"
+      ],
+      "rule": "의존성 방향은 기본적으로 main → routers → services → 외부 SDK/DB로 흐르게 하고 services가 routers/main을 참조하는 역방향 의존성을 피한다.",
+      "rationale": "순환 import와 계층 간 강결합을 방지한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-087",
+      "category": "maintainability",
+      "name": "변경 이유 기반 파일 분리",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "architecture",
+        "production"
+      ],
+      "rule": "URL 변경, 업무 로직 변경, 데이터 계약 변경처럼 변경 이유가 다른 코드는 서로 다른 계층/파일로 분리한다.",
+      "rationale": "단일 책임 원칙을 유지하고 수정 범위를 최소화한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-088",
+      "category": "architecture",
+      "name": "APIRouter 기반 모듈화",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "router",
+        "api"
+      ],
+      "rule": "기능 단위 FastAPI 엔드포인트는 APIRouter로 분리하고 main.py에서 include_router로 조립한다.",
+      "rationale": "기능 추가 시 기존 코드를 최소 수정하며 확장할 수 있다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-089",
+      "category": "correctness",
+      "name": "prefix 중복 슬래시 방지",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "router",
+        "api"
+      ],
+      "rule": "include_router의 prefix와 router 내부 path를 조합할 때 중복 슬래시가 생기지 않도록 prefix는 일반적으로 끝 슬래시 없이 작성한다.",
+      "rationale": "의도하지 않은 /chat// 등의 URL을 방지한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-090",
+      "category": "architecture",
+      "name": "REST 자원 중심 URL",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "api",
+        "rest"
+      ],
+      "rule": "API URL은 가능한 한 자원/명사 중심으로 설계하고 동작 의미는 GET/POST/PUT/PATCH/DELETE 등 HTTP Method로 표현한다.",
+      "rationale": "URL만 보고 리소스 의미를 이해할 수 있게 한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-091",
+      "category": "correctness",
+      "name": "HTTP Method 의미 준수",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "api",
+        "rest"
+      ],
+      "rule": "조회는 GET, 생성/처리 요청은 POST, 전체 교체는 PUT, 부분 수정은 PATCH, 삭제는 DELETE 의미에 맞게 사용한다.",
+      "rationale": "HTTP 의미론과 API 예측 가능성을 유지한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-092",
+      "category": "correctness",
+      "name": "Path Query Body 용도 분리",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "api",
+        "pydantic"
+      ],
+      "rule": "리소스 식별자는 Path, 필터/정렬/페이지 조건은 Query, 길거나 복잡한 생성·수정 데이터는 Body(Pydantic Model)를 사용한다.",
+      "rationale": "HTTP 요청 구조를 일관되게 유지한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-093",
+      "category": "correctness",
+      "name": "Path 변수명 일치",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "api"
+      ],
+      "rule": "경로 템플릿의 {parameter} 이름과 엔드포인트 함수 인자 이름을 일치시킨다.",
+      "rationale": "FastAPI path parameter binding 오류를 방지한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-094",
+      "category": "correctness",
+      "name": "Query 제약 명시",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "api",
+        "query"
+      ],
+      "rule": "페이지, 크기, 검색어 길이 등 검증 가능한 Query 조건은 Query(ge/le/min_length/max_length/description 등)로 제약을 명시한다.",
+      "rationale": "잘못된 요청을 자동 422로 거부하고 /docs에 계약을 노출한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-095",
+      "category": "architecture",
+      "name": "복잡한 POST 입력은 Pydantic Body",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "api",
+        "pydantic",
+        "llm_app"
+      ],
+      "rule": "채팅 메시지처럼 길거나 복잡한 입력은 Query 문자열보다 Pydantic BaseModel 기반 JSON Body로 받는다.",
+      "rationale": "타입 검증, 복잡한 구조, URL 노출 방지에 유리하다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-096",
+      "category": "correctness",
+      "name": "response_model 사용",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "api",
+        "pydantic"
+      ],
+      "rule": "공개 API 응답 계약이 명확한 경우 response_model 또는 동등한 Pydantic 응답 모델을 사용한다.",
+      "rationale": "응답 형태와 OpenAPI 문서를 일치시킨다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-097",
+      "category": "observability",
+      "name": "health endpoint 제공",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "production",
+        "observability"
+      ],
+      "rule": "서비스 상태 확인을 위해 GET /health 또는 동등한 헬스체크 엔드포인트를 제공한다.",
+      "rationale": "모니터링, 배포 확인, 로드밸런서 헬스체크에 활용할 수 있다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-098",
+      "category": "observability",
+      "name": "HTTP 요청 로깅",
+      "level": "conditional",
+      "applies_to": [
+        "fastapi",
+        "production",
+        "observability"
+      ],
+      "rule": "운영/디버깅이 필요한 서비스에서는 method, path, status code, latency 등을 기록하는 요청 로깅 미들웨어를 고려한다.",
+      "rationale": "API 지연과 오류 추적을 쉽게 한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-099",
+      "category": "security",
+      "name": "CORS 최소 Origin 허용",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "security",
+        "cors"
+      ],
+      "rule": "CORS가 필요한 경우 실제 허용할 프론트엔드 Origin만 명시하고 운영 환경에서 무분별한 allow_origins=['*'] 사용을 피한다.",
+      "rationale": "불필요한 교차 출처 접근을 제한한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-100",
+      "category": "environment",
+      "name": "설정 중앙화",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "production",
+        "environment",
+        "security"
+      ],
+      "rule": "API Key, URL, 포트, Debug, Provider 설정 등 환경값은 중앙 설정 객체 또는 Settings 계층에서 관리하고 서비스 파일마다 분산 로딩하지 않는다.",
+      "rationale": "설정 중복과 환경별 불일치를 줄인다.",
+      "source": "agentstudio_interpretation_module_7"
+    },
+    {
+      "id": "CS-101",
+      "category": "environment",
+      "name": "pydantic-settings 우선 고려",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "pydantic",
+        "environment"
+      ],
+      "rule": "FastAPI 프로젝트의 타입 안전 환경설정은 pydantic-settings의 BaseSettings/SettingsConfigDict 사용을 우선 고려한다.",
+      "rationale": "환경변수 타입 검증과 초기화 실패를 시작 단계에서 확인할 수 있다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-102",
+      "category": "environment",
+      "name": ".env.example 제공",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "environment",
+        "security",
+        "team"
+      ],
+      "rule": "실제 비밀값이 없는 .env.example을 제공하고 .env는 .gitignore에 포함한다.",
+      "rationale": "팀 환경 설정 방법을 공유하면서 비밀값 유출을 방지한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-103",
+      "category": "maintainability",
+      "name": "requirements 의존성 명시",
+      "level": "recommended",
+      "applies_to": [
+        "python",
+        "fastapi",
+        "environment"
+      ],
+      "rule": "FastAPI 프로젝트 실행에 필요한 패키지는 requirements.txt 또는 동등한 의존성 파일에 명시한다.",
+      "rationale": "재현 가능한 설치와 팀 환경 일관성을 높인다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-104",
+      "category": "environment",
+      "name": "devcontainer 재현 환경 지원",
+      "level": "conditional",
+      "applies_to": [
+        "team",
+        "devcontainer",
+        "docker",
+        "fastapi"
+      ],
+      "rule": "팀 프로젝트에서 환경 불일치가 문제라면 .devcontainer/devcontainer.json으로 Python 버전, 설치 명령, VS Code 확장, 포트 등을 표준화한다.",
+      "rationale": "OS/패키지 버전 차이로 인한 재현 문제를 줄인다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-105",
+      "category": "environment",
+      "name": "devcontainer PYTHONPATH 설정",
+      "level": "conditional",
+      "applies_to": [
+        "devcontainer",
+        "python",
+        "fastapi"
+      ],
+      "rule": "devcontainer에서 패키지 import 문제가 예상되면 프로젝트 루트를 PYTHONPATH로 명시하는 방식을 고려한다.",
+      "rationale": "컨테이너 내부에서 app 패키지 import 실패를 방지한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-106",
+      "category": "environment",
+      "name": "devcontainer 포트 포워딩",
+      "level": "conditional",
+      "applies_to": [
+        "devcontainer",
+        "fastapi",
+        "docker"
+      ],
+      "rule": "컨테이너 내부 FastAPI 개발 서버를 호스트에서 사용해야 하면 forwardPorts에 서비스 포트를 명시한다.",
+      "rationale": "브라우저에서 /docs 및 API 접근을 쉽게 한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-107",
+      "category": "correctness",
+      "name": "__init__.py 패키지 구조 일관성",
+      "level": "recommended",
+      "applies_to": [
+        "python",
+        "fastapi",
+        "package"
+      ],
+      "rule": "app/routers/services/schemas 등 패키지 구조는 프로젝트의 Python 패키지 정책에 맞춰 __init__.py 존재 여부를 일관되게 관리한다.",
+      "rationale": "import 해석과 패키지 구조 혼선을 줄인다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-108",
+      "category": "testing",
+      "name": "FastAPI 실행 검증",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "testing",
+        "production"
+      ],
+      "rule": "FastAPI 프로젝트 생성 후 uvicorn 실행, Application startup complete 확인, /health 200, /docs OpenAPI 노출을 최소 검증 항목으로 수행한다.",
+      "rationale": "코드 생성만으로 완료 처리하지 않고 실제 실행 가능성을 확인한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-109",
+      "category": "testing",
+      "name": "422 validation 테스트",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "testing",
+        "pydantic"
+      ],
+      "rule": "Path/Query/Body 검증이 있는 API는 정상 입력뿐 아니라 잘못된 타입/누락/범위 초과 입력으로 422 응답과 detail 구조를 확인한다.",
+      "rationale": "입력 계약이 실제로 작동하는지 검증한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-110",
+      "category": "environment",
+      "name": "uvicorn reload 개발 전용",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "uvicorn",
+        "production"
+      ],
+      "rule": "uvicorn --reload는 개발 환경에서만 사용하고 운영 실행에서는 제거한다.",
+      "rationale": "운영 환경에서 불필요한 reloader 프로세스와 파일 감시를 방지한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-111",
+      "category": "correctness",
+      "name": "uvicorn 모듈 인스턴스 일치",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "uvicorn",
+        "python"
+      ],
+      "rule": "uvicorn 실행 문자열의 모듈 경로와 FastAPI 인스턴스 변수명이 실제 프로젝트 구조와 정확히 일치해야 한다.",
+      "rationale": "Could not import module/attribute 오류를 방지한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-112",
+      "category": "architecture",
+      "name": "기능 확장 시 기존 계층 유지",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "architecture",
+        "agentstudio"
+      ],
+      "rule": "RAG/MCP 등 새 기능을 추가할 때 기존 router/service/schema 책임을 깨지 않고 기능별 모듈을 확장한다.",
+      "rationale": "AgentStudio가 생성하는 프로젝트가 기능 증가에도 구조를 유지하도록 한다.",
+      "source": "module_7_1_7_5"
+    },
+    {
+      "id": "CS-113",
+      "category": "architecture",
+      "name": "AgentStudio FastAPI 파일 계획",
+      "level": "required",
+      "applies_to": [
+        "agentstudio",
+        "fastapi",
+        "project_generation"
+      ],
+      "rule": "AgentStudio가 FastAPI 기반 Agent 프로젝트를 생성할 때 요구 기능을 분석하여 main, routers, services, schemas, settings, tests, env example, dependency files 중 필요한 파일을 계획한 뒤 생성한다.",
+      "rationale": "단일 main.py에 모든 기능을 몰아넣지 않고 처음부터 확장 가능한 골격을 만든다.",
+      "source": "agentstudio_interpretation_module_7"
+    },
+    {
+      "id": "CS-114",
+      "category": "correctness",
+      "name": "Request/Response DTO 분리",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "pydantic",
+        "api"
+      ],
+      "rule": "공개 API의 Request Model과 Response Model을 분리하고 내부/DB 모델을 외부 응답 계약과 동일시하지 않는다.",
+      "rationale": "내부 필드 노출과 계약 결합을 방지한다.",
+      "source": "module_8_1_8_4"
+    },
+    {
+      "id": "CS-115",
+      "category": "correctness",
+      "name": "외부 입력 Trust Boundary 검증",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "pydantic",
+        "api",
+        "mcp",
+        "tool"
+      ],
+      "rule": "HTTP/MCP/Tool 등 외부 입력은 비즈니스 로직 진입 전에 명시적 스키마 검증을 통과시킨다.",
+      "rationale": "신뢰할 수 없는 입력을 LLM/API/DB로 그대로 전달하지 않는다.",
+      "source": "module_8_1_8_4"
+    },
+    {
+      "id": "CS-116",
+      "category": "security",
+      "name": "입력 제약을 비용 보호에 활용",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "pydantic",
+        "llm_app",
+        "security"
+      ],
+      "rule": "LLM 입력 필드의 min/max length와 허용 범위를 서비스 요구와 token budget에 맞게 정의해 빈 입력·비정상 대용량 입력을 차단한다.",
+      "rationale": "검증과 동시에 토큰 비용/남용 위험을 낮춘다.",
+      "source": "module_8_1_8_4"
+    },
+    {
+      "id": "CS-117",
+      "category": "correctness",
+      "name": "Extra Field 정책 결정",
+      "level": "conditional",
+      "applies_to": [
+        "pydantic",
+        "fastapi",
+        "api"
+      ],
+      "rule": "엄격한 외부 계약이 필요한 API는 ConfigDict(extra='forbid') 등 정의되지 않은 필드 정책을 명시적으로 결정한다.",
+      "rationale": "조용히 무시되는 잘못된 입력을 방지할 수 있다.",
+      "source": "module_8_1_8_4"
+    },
+    {
+      "id": "CS-118",
+      "category": "architecture",
+      "name": "공유 Dependency 수명주기 판단",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "dependency",
+        "llm_app"
+      ],
+      "rule": "Depends 대상은 application-shared, request-scoped, cleanup-required 수명주기를 먼저 판단한 뒤 cache/singleton/request/yield 전략을 선택한다.",
+      "rationale": "모든 Dependency에 무조건 lru_cache를 적용하는 오류를 방지한다.",
+      "source": "agentstudio_interpretation_module_8"
+    },
+    {
+      "id": "CS-119",
+      "category": "architecture",
+      "name": "공유 가능한 LLM Client 재사용",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "dependency",
+        "llm_app"
+      ],
+      "rule": "상태 충돌이 없는 LLM client는 Depends factory와 application-level cache/singleton 재사용을 고려한다.",
+      "rationale": "요청마다 불필요한 client 초기화를 반복하지 않는다.",
+      "source": "module_8_1_8_4"
+    },
+    {
+      "id": "CS-120",
+      "category": "correctness",
+      "name": "Request Scoped Dependency 캐시 금지",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "dependency",
+        "security"
+      ],
+      "rule": "사용자/요청별 context, auth 정보 등 request-scoped 상태를 application-level lru_cache/singleton으로 공유하지 않는다.",
+      "rationale": "사용자 간 상태 혼합과 보안 문제를 방지한다.",
+      "source": "agentstudio_interpretation_module_8"
+    },
+    {
+      "id": "CS-121",
+      "category": "architecture",
+      "name": "정리 필요한 자원은 yield Dependency",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "dependency",
+        "db"
+      ],
+      "rule": "DB session/transaction처럼 종료·rollback·close가 필요한 자원은 yield dependency 또는 동등한 lifecycle 관리 패턴을 사용한다.",
+      "rationale": "리소스 누수와 불완전한 정리를 방지한다.",
+      "source": "agentstudio_interpretation_module_8"
+    },
+    {
+      "id": "CS-122",
+      "category": "testing",
+      "name": "Dependency Override 가능 구조",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "dependency",
+        "testing"
+      ],
+      "rule": "외부 LLM/API/DB 의존성은 테스트에서 dependency_overrides 또는 동등한 방식으로 Mock 교체 가능하게 설계한다.",
+      "rationale": "실제 API 비용/네트워크 없이 endpoint를 검증한다.",
+      "source": "module_8_1_8_4"
+    },
+    {
+      "id": "CS-123",
+      "category": "observability",
+      "name": "OpenAPI 메타데이터 품질",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "api",
+        "documentation"
+      ],
+      "rule": "공개 endpoint는 summary/description/responses/docstring/Field description을 사용해 OpenAPI 계약을 사람이 이해할 수 있게 작성한다.",
+      "rationale": "자동 생성 문서의 품질을 실제 API 계약 수준으로 높인다.",
+      "source": "module_8_1_8_4"
+    },
+    {
+      "id": "CS-124",
+      "category": "security",
+      "name": "예외 원문 외부 노출 금지",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "security",
+        "production"
+      ],
+      "rule": "전역/통합 예외 처리에서 str(exc), traceback, 내부 파일 경로, 라이브러리 세부정보를 클라이언트 응답에 직접 노출하지 않는다.",
+      "rationale": "내부 구조 정보 유출을 방지한다.",
+      "source": "module_8_1_8_4"
+    },
+    {
+      "id": "CS-125",
+      "category": "observability",
+      "name": "상세 예외 서버 로그 기록",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "observability",
+        "production"
+      ],
+      "rule": "클라이언트에는 안전한 오류를 반환하되 서버 로그에는 exception과 traceback을 기록한다.",
+      "rationale": "보안과 디버깅 가능성을 동시에 유지한다.",
+      "source": "module_8_1_8_4"
+    },
+    {
+      "id": "CS-126",
+      "category": "correctness",
+      "name": "Known Exception 세분화",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "api",
+        "production"
+      ],
+      "rule": "Validation/Auth/NotFound/RateLimit/Timeout 등 알려진 오류는 가능한 경우 적절한 상태코드와 안전한 메시지로 분리하고, 알 수 없는 오류만 global 500 fallback으로 처리한다.",
+      "rationale": "모든 오류를 동일 500으로 뭉개지 않는다.",
+      "source": "module_8_1_8_4"
+    },
+    {
+      "id": "CS-127",
+      "category": "security",
+      "name": "프로덕션 API Docs 노출 설정화",
+      "level": "conditional",
+      "applies_to": [
+        "fastapi",
+        "security",
+        "production"
+      ],
+      "rule": "운영 환경에서는 /docs, /redoc 노출 여부를 설정으로 제어할 수 있게 한다.",
+      "rationale": "내부 API 구조 공개 정책을 환경별로 결정한다.",
+      "source": "module_8_1_8_4"
+    },
+    {
+      "id": "CS-128",
+      "category": "testing",
+      "name": "FastAPI API 실패 케이스 자동 테스트",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "testing",
+        "agentstudio"
+      ],
+      "rule": "AgentStudio가 생성한 FastAPI API는 정상 2xx뿐 아니라 missing/wrong type/boundary/dependency failure/unknown exception 케이스를 자동 테스트 계획에 포함한다.",
+      "rationale": "실행 성공만으로 완료 처리하지 않는다.",
+      "source": "agentstudio_interpretation_module_8"
+    },
+    {
+      "id": "CS-129",
+      "category": "architecture",
+      "name": "Streaming 필요성 선판단",
+      "level": "required",
+      "applies_to": [
+        "streaming",
+        "agentstudio",
+        "llm_app"
+      ],
+      "rule": "실시간/점진적 출력 요구가 없는 Agent에는 Streaming을 기본 추가하지 않고 UX/업무 요구를 먼저 판단한다.",
+      "rationale": "불필요한 구현 복잡도와 연결 관리 비용을 줄인다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-130",
+      "category": "architecture",
+      "name": "단방향 LLM Streaming은 SSE 우선",
+      "level": "recommended",
+      "applies_to": [
+        "streaming",
+        "sse",
+        "llm_app",
+        "fastapi"
+      ],
+      "rule": "서버→클라이언트 단방향 LLM 토큰 스트리밍은 SSE를 우선 검토하고, 양방향 상호작용이 필요할 때 WebSocket을 검토한다.",
+      "rationale": "통신 방향에 맞는 가장 단순한 프로토콜을 선택한다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-131",
+      "category": "correctness",
+      "name": "FastAPI Streaming은 astream 사용",
+      "level": "required",
+      "applies_to": [
+        "fastapi",
+        "streaming",
+        "langchain",
+        "async"
+      ],
+      "rule": "FastAPI async streaming endpoint에서는 chain.stream()/llm.stream() 같은 동기 스트리밍 대신 async for + astream()을 사용한다.",
+      "rationale": "스트리밍 동안 이벤트 루프가 장시간 블로킹되는 것을 방지한다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-132",
+      "category": "architecture",
+      "name": "Async Generator 기반 Streaming",
+      "level": "recommended",
+      "applies_to": [
+        "streaming",
+        "async",
+        "fastapi"
+      ],
+      "rule": "비동기 I/O 결과를 여러 번 점진적으로 전달해야 하는 경우 async generator(async def + yield)를 사용한다.",
+      "rationale": "LLM 토큰 스트리밍의 비동기+다중 반환 모델과 자연스럽게 대응한다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-133",
+      "category": "architecture",
+      "name": "SSE Event Contract 명시",
+      "level": "required",
+      "applies_to": [
+        "streaming",
+        "sse",
+        "api"
+      ],
+      "rule": "SSE endpoint는 message/done/error 등 이벤트 타입과 payload 구조를 명시적으로 정의하고 JSON payload를 우선 사용한다.",
+      "rationale": "클라이언트가 정상/완료/오류를 안정적으로 구분할 수 있게 한다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-134",
+      "category": "correctness",
+      "name": "Streaming 완료 이벤트 명시",
+      "level": "required",
+      "applies_to": [
+        "streaming",
+        "sse"
+      ],
+      "rule": "Streaming 정상 완료는 연결 close만으로 판단하지 않고 명시적 done event를 제공한다.",
+      "rationale": "정상 완료와 네트워크 단절을 구분한다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-135",
+      "category": "maintainability",
+      "name": "SSE Encoder Utility 분리",
+      "level": "recommended",
+      "applies_to": [
+        "streaming",
+        "sse",
+        "fastapi"
+      ],
+      "rule": "반복되는 SSE event/data 직렬화 로직은 utils/adapter 등 재사용 가능한 함수로 분리한다.",
+      "rationale": "프로토콜 문자열 중복을 줄이고 단위 테스트 가능하게 한다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-136",
+      "category": "security",
+      "name": "Streaming Error 원문 노출 금지",
+      "level": "required",
+      "applies_to": [
+        "streaming",
+        "security",
+        "production"
+      ],
+      "rule": "SSE error event에 str(exc), traceback, 내부 경로 등을 직접 포함하지 않고 상세 오류는 서버 로그에 기록한다.",
+      "rationale": "Day 8 API 예외 보안 정책을 Streaming에도 동일하게 적용한다.",
+      "source": "agentstudio_interpretation_module_9"
+    },
+    {
+      "id": "CS-137",
+      "category": "correctness",
+      "name": "Client Disconnect 취소 처리",
+      "level": "recommended",
+      "applies_to": [
+        "streaming",
+        "async",
+        "production"
+      ],
+      "rule": "클라이언트 연결 종료/CancelledError를 감지하고 가능한 경우 upstream LLM/API 작업을 취소·정리한다.",
+      "rationale": "사용자가 떠난 뒤에도 토큰 생성 비용과 리소스가 소비되는 문제를 줄인다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-138",
+      "category": "correctness",
+      "name": "CancelledError와 일반 오류 분리",
+      "level": "recommended",
+      "applies_to": [
+        "streaming",
+        "async"
+      ],
+      "rule": "asyncio.CancelledError는 일반 Exception error event 처리와 분리해 취소 semantics를 유지한다.",
+      "rationale": "정상 취소를 서버 오류로 잘못 기록하거나 전송하지 않는다.",
+      "source": "agentstudio_interpretation_module_9"
+    },
+    {
+      "id": "CS-139",
+      "category": "performance",
+      "name": "SSE Proxy Buffering 대응",
+      "level": "conditional",
+      "applies_to": [
+        "streaming",
+        "sse",
+        "nginx",
+        "production"
+      ],
+      "rule": "nginx/reverse proxy 뒤의 SSE는 Cache-Control과 X-Accel-Buffering 등 버퍼링 방지 설정을 배포 환경에 맞게 검토한다.",
+      "rationale": "토큰이 서버에서 생성돼도 프록시 버퍼에서 모여 한 번에 전달되는 문제를 방지한다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-140",
+      "category": "performance",
+      "name": "Streaming Timeout 설정화",
+      "level": "recommended",
+      "applies_to": [
+        "streaming",
+        "client",
+        "production"
+      ],
+      "rule": "Streaming timeout은 고정 교육값을 복사하지 않고 예상 작업 시간, provider, proxy, UX 정책에 맞게 설정 가능하게 한다.",
+      "rationale": "불필요한 조기 종료와 무한 연결을 모두 방지한다.",
+      "source": "agentstudio_interpretation_module_9"
+    },
+    {
+      "id": "CS-141",
+      "category": "observability",
+      "name": "Streaming TTFT 측정",
+      "level": "recommended",
+      "applies_to": [
+        "streaming",
+        "observability",
+        "llm_app"
+      ],
+      "rule": "Streaming Agent는 가능하면 TTFT와 total latency를 측정 가능한 구조로 설계한다.",
+      "rationale": "사용자 체감 응답성과 전체 처리시간을 구분해 관찰할 수 있다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-142",
+      "category": "observability",
+      "name": "Done Event Usage Metadata",
+      "level": "conditional",
+      "applies_to": [
+        "streaming",
+        "observability",
+        "llm_app"
+      ],
+      "rule": "사용량/비용 추적이 필요한 경우 done event에 실제 provider usage metadata를 포함하되 단어 수 근사치를 실제 token count로 오인하지 않는다.",
+      "rationale": "Streaming 완료 시점에 비용 및 사용량 정보를 전달할 수 있다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-143",
+      "category": "testing",
+      "name": "Streaming End-to-End Test",
+      "level": "required",
+      "applies_to": [
+        "streaming",
+        "testing",
+        "fastapi"
+      ],
+      "rule": "Streaming endpoint는 curl -N 또는 async client로 message/done/error 이벤트와 실제 점진 전송 여부를 end-to-end 검증한다.",
+      "rationale": "서버 코드만으로 발견하기 어려운 proxy/client buffering 문제를 검출한다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-144",
+      "category": "testing",
+      "name": "Python Streaming Client는 Async 방식 우선",
+      "level": "recommended",
+      "applies_to": [
+        "streaming",
+        "httpx",
+        "async",
+        "testing"
+      ],
+      "rule": "Python 비동기 Streaming client는 httpx.AsyncClient/client.stream()/aiter_lines() 같은 async 소비 방식을 우선 사용한다.",
+      "rationale": "FastAPI async 서버와 자연스럽게 통합하고 blocking client를 피한다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-145",
+      "category": "architecture",
+      "name": "POST Streaming Browser Client는 Fetch Stream",
+      "level": "conditional",
+      "applies_to": [
+        "streaming",
+        "browser",
+        "frontend"
+      ],
+      "rule": "브라우저 POST streaming은 GET 전용 EventSource 대신 fetch ReadableStream 계열 방식을 사용한다.",
+      "rationale": "HTTP method 제약에 맞는 브라우저 스트리밍 API를 선택한다.",
+      "source": "module_9_1_9_4"
+    },
+    {
+      "id": "CS-146",
+      "category": "architecture",
+      "name": "Streaming File Placement",
+      "level": "recommended",
+      "applies_to": [
+        "streaming",
+        "fastapi",
+        "agentstudio"
+      ],
+      "rule": "Streaming 기능은 규모와 재사용성에 따라 router, service, utils/sse, schema/event contract 책임을 분리해 배치한다.",
+      "rationale": "router에 생성·직렬화·오류·LLM 로직이 모두 몰리는 것을 방지한다.",
+      "source": "agentstudio_interpretation_module_9"
+    },
+    {
+      "id": "CS-147",
+      "category": "architecture",
+      "name": "Agent별 Settings 요구 분석",
+      "level": "required",
+      "applies_to": [
+        "agentstudio",
+        "settings",
+        "agent_factory"
+      ],
+      "rule": "생성 대상 Agent의 런타임 변경값을 분석해 필요한 설정만 Settings Plan에 포함한다.",
+      "rationale": "AgentStudio 설정 전체를 복사하는 과설계를 방지한다.",
+      "source": "agentstudio_settings_generator"
+    },
+    {
+      "id": "CS-148",
+      "category": "security",
+      "name": "Secret 평문 조회 금지",
+      "level": "required",
+      "applies_to": [
+        "settings",
+        "security",
+        "api"
+      ],
+      "rule": "API Key, Password, Token, Secret은 GET Settings API에서 평문으로 반환하지 않고 masked/has_value 형태로 노출한다.",
+      "rationale": "설정 조회 과정의 Secret 유출을 방지한다.",
+      "source": "agentstudio_settings_generator"
+    },
+    {
+      "id": "CS-149",
+      "category": "security",
+      "name": "Frontend Secret 하드코딩 금지",
+      "level": "required",
+      "applies_to": [
+        "settings",
+        "frontend",
+        "security"
+      ],
+      "rule": "Frontend source/bundle에 실제 Secret이나 Secret 기본값을 하드코딩하지 않는다.",
+      "rationale": "브라우저 번들에서 비밀값이 노출되는 것을 방지한다.",
+      "source": "agentstudio_settings_generator"
+    },
+    {
+      "id": "CS-150",
+      "category": "architecture",
+      "name": "Settings Backend 책임 분리",
+      "level": "recommended",
+      "applies_to": [
+        "fastapi",
+        "settings"
+      ],
+      "rule": "Settings Model/Schema/Service/Router 책임을 프로젝트 규모에 맞게 분리한다.",
+      "rationale": "환경변수 로딩, 검증, HTTP 처리를 한 파일에 몰지 않는다.",
+      "source": "agentstudio_settings_generator"
+    },
+    {
+      "id": "CS-151",
+      "category": "correctness",
+      "name": "Settings 입력 검증",
+      "level": "required",
+      "applies_to": [
+        "settings",
+        "pydantic",
+        "api"
+      ],
+      "rule": "설정 변경값은 Backend Schema Validation을 통과한 뒤 저장한다.",
+      "rationale": "잘못된 포트/Provider/경로 값이 런타임에 반영되는 것을 방지한다.",
+      "source": "agentstudio_settings_generator"
+    },
+    {
+      "id": "CS-152",
+      "category": "testing",
+      "name": "Settings Round-trip Test",
+      "level": "required",
+      "applies_to": [
+        "settings",
+        "testing"
+      ],
+      "rule": "설정 조회→수정→저장→재조회 Round-trip과 Secret 마스킹을 테스트한다.",
+      "rationale": "설정 UI가 보이기만 하고 실제 저장되지 않는 문제를 방지한다.",
+      "source": "agentstudio_settings_generator"
+    },
+    {
+      "id": "CS-153",
+      "category": "security",
+      "name": ".env.example 실제 Secret 금지",
+      "level": "required",
+      "applies_to": [
+        "settings",
+        "security",
+        "env"
+      ],
+      "rule": ".env.example에는 Key 이름과 안전한 placeholder만 두고 실제 API Key/Password/Token을 저장하지 않는다.",
+      "rationale": "예제 환경파일의 Secret 커밋을 방지한다.",
+      "source": "agentstudio_settings_generator"
+    }
+  ]
+}

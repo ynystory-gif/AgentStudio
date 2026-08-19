@@ -1,0 +1,357 @@
+{
+  "version": "1.8",
+  "templates": [
+    {
+      "id": "TPL-LANGCHAIN-BASIC",
+      "name": "LangChain 기본 역할 분리 호출",
+      "tags": [
+        "python",
+        "langchain",
+        "llm_app"
+      ],
+      "description": "SystemMessage와 HumanMessage를 분리한 기본 LLM 호출 골격",
+      "template": "from dotenv import load_dotenv\nfrom langchain_openai import ChatOpenAI\nfrom langchain_core.messages import SystemMessage, HumanMessage\n\nload_dotenv()\n\nllm = ChatOpenAI(\n    model=\"{model}\",\n    temperature={temperature},\n)\n\nresponse = llm.invoke([\n    SystemMessage(content=system_prompt),\n    HumanMessage(content=user_input),\n])\n\nprint(response.content)\n"
+    },
+    {
+      "id": "TPL-ENV-PYTHON",
+      "name": "Python 환경변수 기본 구조",
+      "tags": [
+        "python",
+        "environment",
+        "security"
+      ],
+      "description": ".env + dotenv 기반 환경설정 골격",
+      "template": "from dotenv import load_dotenv\nimport os\n\nload_dotenv()\n\napi_key = os.getenv(\"OPENAI_API_KEY\")\n"
+    },
+    {
+      "id": "TPL-RCIF-CHAT",
+      "name": "RCIF ChatPromptTemplate",
+      "tags": [
+        "python",
+        "langchain",
+        "llm_app",
+        "agent",
+        "prompt_template"
+      ],
+      "description": "Role/Context/Instruction/Format을 분리한 재사용 가능 ChatPromptTemplate",
+      "template": "from langchain_core.prompts import ChatPromptTemplate\n\nsystem_prompt = \"\"\"[R] {role}\n[C] {context}\n[I] {instruction}\n[F] {output_format}\n\"\"\"\n\ntemplate = ChatPromptTemplate.from_messages([\n    (\"system\", system_prompt),\n    (\"human\", \"{user_input}\"),\n])\n"
+    },
+    {
+      "id": "TPL-FEWSHOT-CHAT",
+      "name": "Few-shot Chat Prompt",
+      "tags": [
+        "python",
+        "langchain",
+        "few_shot",
+        "classification"
+      ],
+      "description": "System → Few-shot human/ai 예제 → 최종 Human 입력 순서의 템플릿",
+      "template": "from langchain_core.prompts import (\n    ChatPromptTemplate,\n    FewShotChatMessagePromptTemplate,\n)\n\nexample_prompt = ChatPromptTemplate.from_messages([\n    (\"human\", \"{input}\"),\n    (\"ai\", \"{output}\"),\n])\n\nfew_shot = FewShotChatMessagePromptTemplate(\n    examples=examples,\n    example_prompt=example_prompt,\n)\n\ntemplate = ChatPromptTemplate.from_messages([\n    (\"system\", system_prompt),\n    few_shot,\n    (\"human\", \"{query}\"),\n])\n"
+    },
+    {
+      "id": "TPL-LCEL-TEXT",
+      "name": "LCEL Text Pipeline",
+      "tags": [
+        "python",
+        "langchain",
+        "llm_app",
+        "lcel"
+      ],
+      "description": "ChatPromptTemplate | llm | StrOutputParser 기본 문자열 체인",
+      "template": "from langchain_core.prompts import ChatPromptTemplate\nfrom langchain_core.output_parsers import StrOutputParser\n\nprompt = ChatPromptTemplate.from_messages([\n    (\"system\", system_prompt),\n    (\"human\", \"{user_input}\"),\n])\n\nchain = prompt | llm | StrOutputParser()\nresult = chain.invoke({\"user_input\": user_input})\n"
+    },
+    {
+      "id": "TPL-PYDANTIC-STRUCTURED-OUTPUT",
+      "name": "Pydantic Structured Output",
+      "tags": [
+        "python",
+        "langchain",
+        "pydantic",
+        "structured_output"
+      ],
+      "description": "Pydantic BaseModel + with_structured_output 기본 패턴",
+      "template": "from pydantic import BaseModel, Field\nfrom langchain_core.prompts import ChatPromptTemplate\n\nclass ResultModel(BaseModel):\n    summary: str = Field(description=\"결과 핵심 요약\")\n\nstructured_llm = llm.with_structured_output(ResultModel)\n\nprompt = ChatPromptTemplate.from_messages([\n    (\"system\", system_prompt),\n    (\"human\", \"{user_input}\"),\n])\n\nchain = prompt | structured_llm\n\ntry:\n    result = chain.invoke({\"user_input\": user_input})\n    data = result.model_dump()\nexcept Exception as e:\n    data = {\n        \"error\": str(e),\n    }\n"
+    },
+    {
+      "id": "TPL-RUNNABLE-PARALLEL",
+      "name": "RunnableParallel",
+      "tags": [
+        "python",
+        "langchain",
+        "parallel",
+        "lcel"
+      ],
+      "description": "동일 입력에 독립 체인을 병렬 실행하는 패턴",
+      "template": "from langchain_core.runnables import RunnableParallel\n\nparallel = RunnableParallel(\n    first=first_chain,\n    second=second_chain,\n)\n\nresult = parallel.invoke(input_data)\n"
+    },
+    {
+      "id": "TPL-RUNNABLE-BRANCH",
+      "name": "RunnableBranch",
+      "tags": [
+        "python",
+        "langchain",
+        "branching",
+        "lcel"
+      ],
+      "description": "입력 조건에 따라 다른 체인을 선택하는 패턴",
+      "template": "from langchain_core.runnables import RunnableBranch\n\nbranch = RunnableBranch(\n    (condition_a, chain_a),\n    (condition_b, chain_b),\n    default_chain,\n)\n\nresult = branch.invoke(input_data)\n"
+    },
+    {
+      "id": "TPL-TOOL-DEFINITION",
+      "name": "LangChain Tool Definition",
+      "tags": [
+        "python",
+        "langchain",
+        "tool",
+        "function_calling"
+      ],
+      "description": "타입 힌트와 실행 명세 docstring을 포함한 안전한 @tool 기본 골격",
+      "template": "from langchain_core.tools import tool\n\n@tool\ndef tool_name(value: str) -> dict:\n    \"\"\"\n    도구가 수행하는 기능을 설명합니다.\n\n    사용 시점:\n        이 도구를 사용해야 하는 조건을 구체적으로 작성합니다.\n\n    사용하지 말 것:\n        다른 도구 또는 직접 답변이 적절한 조건을 작성합니다.\n\n    Args:\n        value: 입력값의 의미와 허용 형식\n\n    Returns:\n        반환 데이터의 구조와 의미\n    \"\"\"\n    # 실제 실행 전 입력을 검증합니다.\n    return {\"result\": value}\n"
+    },
+    {
+      "id": "TPL-TOOL-CALLING-LOOP",
+      "name": "Function Calling Tool Loop",
+      "tags": [
+        "python",
+        "langchain",
+        "tool",
+        "function_calling"
+      ],
+      "description": "AIMessage→Tool 실행→ToolMessage→최종 응답의 안전한 기본 루프",
+      "template": "from langchain_core.messages import HumanMessage, ToolMessage\n\ntools = [first_tool, second_tool]\ntool_map = {tool.name: tool for tool in tools}\nllm_with_tools = llm.bind_tools(tools)\n\nmessages = [HumanMessage(content=user_input)]\nai_msg = llm_with_tools.invoke(messages)\nmessages.append(ai_msg)\n\nif ai_msg.tool_calls:\n    for tool_call in ai_msg.tool_calls:\n        tool = tool_map.get(tool_call[\"name\"])\n\n        if tool is None:\n            result = {\n                \"error\": f\"등록되지 않은 도구: {tool_call['name']}\"\n            }\n        else:\n            try:\n                result = tool.invoke(tool_call[\"args\"])\n            except Exception as e:\n                result = {\n                    \"error\": str(e),\n                    \"tool\": tool_call[\"name\"],\n                }\n\n        messages.append(\n            ToolMessage(\n                content=str(result),\n                tool_call_id=tool_call[\"id\"],\n            )\n        )\n\n    final = llm_with_tools.invoke(messages)\n    answer = final.content\nelse:\n    answer = ai_msg.content\n"
+    },
+    {
+      "id": "TPL-EXTERNAL-API-TOOL",
+      "name": "External API Tool",
+      "tags": [
+        "python",
+        "tool",
+        "api",
+        "production"
+      ],
+      "description": "외부 API 호출 결과를 정제하고 오류를 격리하는 Tool 골격",
+      "template": "from langchain_core.tools import tool\n\n@tool\ndef external_lookup(query: str, max_results: int = 5) -> str:\n    \"\"\"\n    외부 서비스에서 정보를 조회합니다.\n\n    사용 시점:\n        외부 최신 데이터 또는 사내 시스템 조회가 필요할 때.\n\n    사용하지 말 것:\n        모델 자체 지식만으로 충분한 일반 질문.\n\n    Args:\n        query: 조회 조건\n        max_results: 최대 결과 수\n\n    Returns:\n        LLM이 사용하기 좋게 정제된 문자열\n    \"\"\"\n    try:\n        raw = client.search(\n            query=query,\n            max_results=max_results,\n        )\n        return format_for_llm(raw)\n    except Exception as e:\n        return f\"외부 API 조회 실패: {e}\"\n"
+    },
+    {
+      "id": "TPL-ASYNC-LLM-CALL",
+      "name": "Async LLM Call",
+      "tags": [
+        "python",
+        "async",
+        "langchain",
+        "llm_app"
+      ],
+      "description": "async def + await ainvoke 기본 패턴",
+      "template": "async def generate_answer(user_input: str) -> str:\n    result = await llm.ainvoke(user_input)\n    return result.content\n"
+    },
+    {
+      "id": "TPL-ASYNC-GATHER-BATCH",
+      "name": "Async Gather Batch",
+      "tags": [
+        "python",
+        "async",
+        "batch",
+        "parallel"
+      ],
+      "description": "독립 I/O 작업을 gather로 병렬 처리하는 기본 패턴",
+      "template": "async def process_batch(items: list[str]) -> list:\n    tasks = [\n        process_one(item)\n        for item in items\n    ]\n\n    return await asyncio.gather(\n        *tasks,\n        return_exceptions=True,\n    )\n"
+    },
+    {
+      "id": "TPL-ASYNC-SEMAPHORE-RETRY",
+      "name": "Semaphore + Retry",
+      "tags": [
+        "python",
+        "async",
+        "batch",
+        "retry",
+        "production"
+      ],
+      "description": "동시성 제한과 지수 백오프를 포함한 안전한 비동기 API 호출 패턴",
+      "template": "semaphore = asyncio.Semaphore(max_concurrency)\n\nasync def safe_call(\n    payload: str,\n    max_retries: int = 3,\n) -> str:\n    async with semaphore:\n        for attempt in range(max_retries):\n            try:\n                result = await llm.ainvoke(payload)\n                return result.content\n            except Exception:\n                if attempt == max_retries - 1:\n                    raise\n\n                await asyncio.sleep(2 ** attempt)\n"
+    },
+    {
+      "id": "TPL-FASTAPI-STANDARD-SKELETON",
+      "name": "FastAPI Standard Skeleton",
+      "tags": [
+        "python",
+        "fastapi",
+        "api",
+        "project_generation"
+      ],
+      "description": "main / routers / services / schemas 분리형 FastAPI 프로젝트 골격",
+      "template": "app/\n├── __init__.py\n├── main.py\n├── routers/\n│   ├── __init__.py\n│   ├── health.py\n│   └── chat.py\n├── services/\n│   ├── __init__.py\n│   └── llm_service.py\n├── schemas/\n│   ├── __init__.py\n│   └── chat.py\n└── core/\n    └── settings.py\n"
+    },
+    {
+      "id": "TPL-FASTAPI-MAIN",
+      "name": "FastAPI main.py",
+      "tags": [
+        "python",
+        "fastapi",
+        "api"
+      ],
+      "description": "앱 초기화와 라우터 등록만 담당하는 main.py",
+      "template": "from fastapi import FastAPI\nfrom app.routers import health, chat\n\napp = FastAPI(\n    title=\"{title}\",\n    version=\"{version}\",\n)\n\napp.include_router(health.router)\napp.include_router(\n    chat.router,\n    prefix=\"/chat\",\n    tags=[\"Chat\"],\n)\n"
+    },
+    {
+      "id": "TPL-FASTAPI-ROUTER-SERVICE-SCHEMA",
+      "name": "FastAPI Router Service Schema",
+      "tags": [
+        "python",
+        "fastapi",
+        "pydantic",
+        "llm_app"
+      ],
+      "description": "Pydantic Body → Router → Async Service 호출 패턴",
+      "template": "# app/schemas/chat.py\nfrom pydantic import BaseModel, Field\n\nclass ChatRequest(BaseModel):\n    message: str = Field(min_length=1, description=\"사용자 메시지\")\n\nclass ChatResponse(BaseModel):\n    message: str = Field(description=\"AI 응답\")\n\n\n# app/services/llm_service.py\nasync def get_chat_response(message: str) -> str:\n    result = await llm.ainvoke(message)\n    return result.content\n\n\n# app/routers/chat.py\nfrom fastapi import APIRouter\nfrom app.schemas.chat import ChatRequest, ChatResponse\nfrom app.services.llm_service import get_chat_response\n\nrouter = APIRouter()\n\n@router.post(\"/\", response_model=ChatResponse)\nasync def chat_endpoint(request: ChatRequest) -> ChatResponse:\n    answer = await get_chat_response(request.message)\n    return ChatResponse(message=answer)\n"
+    },
+    {
+      "id": "TPL-FASTAPI-SETTINGS",
+      "name": "Pydantic Settings",
+      "tags": [
+        "python",
+        "fastapi",
+        "environment",
+        "pydantic"
+      ],
+      "description": "pydantic-settings 기반 중앙 설정",
+      "template": "from pydantic_settings import BaseSettings, SettingsConfigDict\n\nclass Settings(BaseSettings):\n    openai_api_key: str\n    debug: bool = False\n\n    model_config = SettingsConfigDict(\n        env_file=\".env\",\n        extra=\"ignore\",\n    )\n\nsettings = Settings()\n"
+    },
+    {
+      "id": "TPL-DEVCONTAINER-FASTAPI",
+      "name": "FastAPI Devcontainer",
+      "tags": [
+        "devcontainer",
+        "docker",
+        "fastapi",
+        "team"
+      ],
+      "description": "Python 버전/패키지/포트/PYTHONPATH를 고정하는 devcontainer 예시",
+      "template": "{\n  \"name\": \"{project_name}\",\n  \"image\": \"mcr.microsoft.com/devcontainers/python:{python_version}\",\n  \"postCreateCommand\": \"pip install -r requirements.txt\",\n  \"forwardPorts\": [8000],\n  \"remoteEnv\": {\n    \"PYTHONPATH\": \"${containerWorkspaceFolder}\"\n  }\n}\n"
+    },
+    {
+      "id": "TPL-FASTAPI-DEPENDENCIES",
+      "name": "FastAPI Dependency Lifecycle",
+      "tags": [
+        "fastapi",
+        "dependency",
+        "llm_app"
+      ],
+      "description": "공유 가능한 LLM client를 Depends로 주입하는 기본 패턴",
+      "template": "from functools import lru_cache\nfrom fastapi import Depends\nfrom langchain_openai import ChatOpenAI\n\n@lru_cache()\ndef get_llm() -> ChatOpenAI:\n    return ChatOpenAI()\n\n# router:\n# llm: ChatOpenAI = Depends(get_llm)\n"
+    },
+    {
+      "id": "TPL-FASTAPI-YIELD-DEPENDENCY",
+      "name": "Yield Dependency",
+      "tags": [
+        "fastapi",
+        "dependency",
+        "db"
+      ],
+      "description": "정리가 필요한 request-scoped resource 패턴",
+      "template": "async def get_resource():\n    resource = await create_resource()\n    try:\n        yield resource\n    finally:\n        await resource.close()\n"
+    },
+    {
+      "id": "TPL-FASTAPI-SAFE-ERROR-HANDLER",
+      "name": "Safe Global Error Handler",
+      "tags": [
+        "fastapi",
+        "security",
+        "production"
+      ],
+      "description": "상세 오류는 로그에, 클라이언트에는 안전한 메시지를 반환",
+      "template": "import logging\nfrom fastapi import Request\nfrom fastapi.responses import JSONResponse\n\nlogger = logging.getLogger(__name__)\n\n@app.exception_handler(Exception)\nasync def global_exception_handler(\n    request: Request,\n    exc: Exception,\n):\n    logger.exception(\n        \"Unhandled exception: %s %s\",\n        request.method,\n        request.url.path,\n    )\n\n    return JSONResponse(\n        status_code=500,\n        content={\n            \"detail\": \"서버 오류가 발생했습니다. 잠시 후 다시 시도해주세요.\"\n        },\n    )\n"
+    },
+    {
+      "id": "TPL-FASTAPI-DEPENDENCY-OVERRIDE-TEST",
+      "name": "Dependency Override Test",
+      "tags": [
+        "fastapi",
+        "dependency",
+        "testing"
+      ],
+      "description": "실제 외부 LLM 없이 endpoint를 테스트하는 패턴",
+      "template": "from unittest.mock import AsyncMock\n\ndef get_mock_llm():\n    mock = AsyncMock()\n    mock.ainvoke.return_value.content = \"테스트 응답\"\n    return mock\n\napp.dependency_overrides[get_llm] = get_mock_llm\n"
+    },
+    {
+      "id": "TPL-SSE-EVENT-ENCODER",
+      "name": "SSE Event Encoder",
+      "tags": [
+        "python",
+        "sse",
+        "streaming"
+      ],
+      "description": "message/done/error payload를 JSON SSE 형식으로 직렬화",
+      "template": "import json\n\ndef sse_event(\n    payload: dict,\n    event: str = \"message\",\n) -> str:\n    data = json.dumps(\n        payload,\n        ensure_ascii=False,\n    )\n    return (\n        f\"event: {event}\\n\"\n        f\"data: {data}\\n\\n\"\n    )\n"
+    },
+    {
+      "id": "TPL-FASTAPI-SSE-STREAM",
+      "name": "FastAPI SSE Stream",
+      "tags": [
+        "python",
+        "fastapi",
+        "sse",
+        "streaming",
+        "langchain"
+      ],
+      "description": "astream + async generator + safe event contract 기본 패턴",
+      "template": "import asyncio\nimport logging\n\nfrom fastapi.responses import StreamingResponse\n\nlogger = logging.getLogger(__name__)\n\n@router.post(\"/stream\")\nasync def stream_endpoint(\n    request: ChatRequest,\n    llm = Depends(get_llm),\n):\n    chain = build_chain(llm)\n\n    async def token_generator():\n        try:\n            async for token in chain.astream({\n                \"message\": request.message,\n            }):\n                yield sse_event(\n                    {\"content\": token},\n                    event=\"message\",\n                )\n\n            yield sse_event(\n                {\"status\": \"completed\"},\n                event=\"done\",\n            )\n\n        except asyncio.CancelledError:\n            logger.info(\"stream cancelled by client\")\n            raise\n\n        except Exception:\n            logger.exception(\"stream failed\")\n            yield sse_event(\n                {\n                    \"message\": \"스트리밍 처리 중 오류가 발생했습니다.\",\n                    \"retryable\": False,\n                },\n                event=\"error\",\n            )\n\n    return StreamingResponse(\n        token_generator(),\n        media_type=\"text/event-stream\",\n        headers={\n            \"Cache-Control\": \"no-cache\",\n        },\n    )\n"
+    },
+    {
+      "id": "TPL-HTTPX-SSE-CLIENT",
+      "name": "HTTPX SSE Client",
+      "tags": [
+        "python",
+        "httpx",
+        "sse",
+        "streaming",
+        "testing"
+      ],
+      "description": "비동기 SSE endpoint를 테스트하는 httpx client 기본 패턴",
+      "template": "import json\nimport httpx\n\nasync def consume_stream(\n    url: str,\n    payload: dict,\n):\n    async with httpx.AsyncClient() as client:\n        async with client.stream(\n            \"POST\",\n            url,\n            json=payload,\n            timeout=stream_timeout,\n        ) as response:\n            async for line in response.aiter_lines():\n                if line.startswith(\"data:\"):\n                    data = json.loads(\n                        line[5:].strip()\n                    )\n                    yield data\n"
+    },
+    {
+      "id": "TPL-BROWSER-POST-STREAM",
+      "name": "Browser POST Stream",
+      "tags": [
+        "javascript",
+        "frontend",
+        "streaming",
+        "fetch"
+      ],
+      "description": "POST streaming을 Fetch ReadableStream으로 소비하는 기본 패턴",
+      "template": "const response = await fetch(streamUrl, {\n  method: \"POST\",\n  headers: {\n    \"Content-Type\": \"application/json\",\n  },\n  body: JSON.stringify(payload),\n});\n\nconst reader = response.body.getReader();\nconst decoder = new TextDecoder();\n\nwhile (true) {\n  const {done, value} = await reader.read();\n  if (done) break;\n\n  const text = decoder.decode(value, {\n    stream: true,\n  });\n\n  // SSE parser/adapter로 전달\n  handleSseChunk(text);\n}\n"
+    },
+    {
+      "id": "TPL-AGENT-SETTINGS-SCHEMA",
+      "name": "Agent Settings Schema",
+      "tags": [
+        "settings",
+        "fastapi",
+        "pydantic"
+      ],
+      "description": "생성 Agent 설정 요청/응답과 Secret masking 계약",
+      "template": "from pydantic import BaseModel, Field\n\nclass SettingsUpdate(BaseModel):\n    provider: str\n    model: str\n    service_port: int = Field(ge=1, le=65535)\n\nclass SettingsView(BaseModel):\n    provider: str\n    model: str\n    service_port: int\n    api_key_configured: bool\n"
+    },
+    {
+      "id": "TPL-AGENT-SETTINGS-ROUTER",
+      "name": "Agent Settings Router",
+      "tags": [
+        "settings",
+        "fastapi"
+      ],
+      "description": "Settings GET/PUT API 기본 구조",
+      "template": "@router.get(\"/settings\", response_model=SettingsView)\nasync def get_settings_view(\n    service: SettingsService = Depends(get_settings_service),\n):\n    return await service.get_masked_view()\n\n@router.put(\"/settings\", response_model=SettingsView)\nasync def update_settings(\n    request: SettingsUpdate,\n    service: SettingsService = Depends(get_settings_service),\n):\n    await service.update(request)\n    return await service.get_masked_view()\n"
+    },
+    {
+      "id": "TPL-AGENT-SETTINGS-REACT",
+      "name": "Agent React Settings Page",
+      "tags": [
+        "settings",
+        "react",
+        "frontend"
+      ],
+      "description": "설정 조회/수정/저장 상태를 표시하는 React 페이지",
+      "template": "function SettingsPage(){\n  // GET settings\n  // controlled inputs by generated schema\n  // PUT settings\n  // secret values display only configured/masked state\n  // show save success/failure\n}\n"
+    }
+  ]
+}

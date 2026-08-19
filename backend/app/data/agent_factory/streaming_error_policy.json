@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "id": "STREAMING_ERROR_POLICY",
+  "purpose": "스트리밍 도중 오류, 취소, 연결 종료를 구분하고 안전하게 처리",
+  "branches": [
+    {
+      "type": "client_disconnect",
+      "signal": "asyncio.CancelledError 또는 framework disconnect signal",
+      "strategy": "upstream_cancel_and_cleanup"
+    },
+    {
+      "type": "known_stream_error",
+      "strategy": "log_detail_and_safe_error_event"
+    },
+    {
+      "type": "unknown_stream_error",
+      "strategy": "log_traceback_and_safe_error_event"
+    }
+  ],
+  "rules": [
+    "CancelledError는 일반 Exception과 동일하게 처리하지 않는다.",
+    "클라이언트가 끊기면 가능한 경우 upstream LLM/API 생성도 중단한다.",
+    "상세 오류는 서버 로그에 기록하고 client event에는 안전한 메시지만 전달한다."
+  ]
+}

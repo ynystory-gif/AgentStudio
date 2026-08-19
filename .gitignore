@@ -1,0 +1,74 @@
+@'
+# ==============================
+# THEANOVA AgentStudio .gitignore
+# ==============================
+
+# 환경변수 / 비밀정보
+.env
+.env.*
+!.env.example
+
+# Python 가상환경
+.venv/
+venv/
+env/
+
+# Python 캐시
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / React
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+build/
+
+# 로그
+logs/
+*.log
+*.err.log
+*.out.log
+
+# 캐시 / 임시 파일
+cache/
+tmp/
+temp/
+*.tmp
+*.temp
+
+# AgentStudio 로컬 임시 데이터
+.agentstudio/sql_scratch/
+.agentstudio/cache/
+.agentstudio/tmp/
+
+# 로컬 데이터베이스
+*.db
+*.sqlite
+*.sqlite3
+
+# Jupyter 임시 파일
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Python coverage
+.coverage
+htmlcov/
+
+# 기타
+*.bak
+*.swp
+*.swo
+'@ | Set-Content -Path ".gitignore" -Encoding UTF8

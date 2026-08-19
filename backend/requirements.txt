@@ -1,0 +1,24 @@
+fastapi>=0.115
+uvicorn[standard]>=0.34
+sqlalchemy[asyncio]>=2.0
+pydantic>=2.10
+pydantic-settings>=2.7
+python-dotenv>=1.0
+langchain>=0.3
+langchain-openai>=0.3
+langchain-ollama>=0.2
+langsmith>=0.2
+tavily-python>=0.5
+mcp>=1.0
+httpx>=0.28
+aiofiles>=24.1
+
+langgraph>=0.6
+langgraph-checkpoint-postgres>=2.0
+psycopg[binary,pool]>=3.2
+pgvector>=0.4.0
+openai>=1.100
+
+# SQL Workspace external database drivers
+pyodbc>=5.2
+oracledb>=2.5

@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: theanova_agentstudio
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - theanova_agentstudio_pgdata:/var/lib/postgresql/data
+
+volumes:
+  theanova_agentstudio_pgdata:

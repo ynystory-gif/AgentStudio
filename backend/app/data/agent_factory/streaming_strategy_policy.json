@@ -1,0 +1,28 @@
+{
+  "version": "1.0",
+  "id": "STREAMING_STRATEGY_POLICY",
+  "purpose": "실시간 응답 요구를 분석하고 HTTP/SSE/WebSocket/Polling 중 적절한 전달 방식을 선택",
+  "decision_flow": [
+    {
+      "question": "실시간/점진적 결과 표시가 필요한가?",
+      "yes": "realtime_required",
+      "no": "normal_http_response"
+    },
+    {
+      "question": "스트리밍 중 클라이언트→서버 양방향 통신이 필요한가?",
+      "yes": "websocket_candidate",
+      "no": "server_to_client_candidate"
+    },
+    {
+      "question": "서버→클라이언트 단방향 연속 이벤트인가?",
+      "yes": "sse_candidate",
+      "no": "polling_or_normal_http"
+    }
+  ],
+  "principles": [
+    "LLM 토큰처럼 서버→클라이언트 단방향 스트림은 SSE를 우선 검토한다.",
+    "양방향 실시간 상태 교환이 핵심이면 WebSocket을 검토한다.",
+    "저빈도 상태 확인에는 Polling도 가능하지만 토큰 스트리밍에는 사용하지 않는다.",
+    "모든 Agent에 Streaming을 기본 적용하지 않는다."
+  ]
+}

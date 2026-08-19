@@ -1,0 +1,36 @@
+{
+  "version": "1.0",
+  "id": "API_ERROR_SECURITY_POLICY",
+  "purpose": "프로덕션 API 오류 응답과 내부 로그 분리",
+  "layers": [
+    {
+      "type": "known_client_error",
+      "examples": [
+        "validation",
+        "not found",
+        "permission"
+      ],
+      "strategy": "specific_status_and_safe_message"
+    },
+    {
+      "type": "known_integration_error",
+      "examples": [
+        "rate limit",
+        "authentication failure",
+        "timeout",
+        "external API failure"
+      ],
+      "strategy": "mapped_status_or_service_error"
+    },
+    {
+      "type": "unknown_exception",
+      "strategy": "global_500_fallback"
+    }
+  ],
+  "security_rules": [
+    "클라이언트 응답에 stack trace를 노출하지 않는다.",
+    "content/detail에 str(exc)를 그대로 넣지 않는다.",
+    "상세 exception과 traceback은 서버 로그에 기록한다.",
+    "운영 환경에서는 docs/redoc 공개 여부를 설정으로 제어 가능하게 한다."
+  ]
+}

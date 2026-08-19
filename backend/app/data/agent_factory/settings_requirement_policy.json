@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "id": "SETTINGS_REQUIREMENT_POLICY",
+  "purpose": "생성 대상 Agent에서 사용자/운영자가 변경해야 할 런타임 설정만 추출",
+  "decision_rules": [
+    "코드 내부에 고정할 값과 런타임 변경 설정을 구분한다.",
+    "사용자가 자주 바꾸는 비민감 값은 Settings UI 후보로 분류한다.",
+    "API Key/Password/Token 등 민감정보는 Secret으로 분류한다.",
+    "사용하지 않는 DB/MCP/Provider 설정은 생성하지 않는다.",
+    "향후 확장 가능성만 있다는 이유로 현재 사용하지 않는 설정 UI를 과도하게 생성하지 않는다."
+  ],
+  "categories": [
+    "llm_provider",
+    "mcp_transport",
+    "file_access",
+    "service_runtime",
+    "database",
+    "external_api",
+    "output",
+    "feature_flags"
+  ]
+}

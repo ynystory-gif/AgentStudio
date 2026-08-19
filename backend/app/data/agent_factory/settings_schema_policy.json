@@ -1,0 +1,23 @@
+{
+  "version": "1.0",
+  "id": "SETTINGS_SCHEMA_POLICY",
+  "purpose": "설정 항목의 타입/기본값/비밀정보/검증/저장소 계약을 설계",
+  "field_contract": [
+    "key",
+    "label",
+    "type",
+    "default",
+    "required",
+    "secret",
+    "description",
+    "options",
+    "validation",
+    "storage"
+  ],
+  "security_rules": [
+    "Secret 원문을 GET API Response로 반환하지 않는다.",
+    "Secret은 masked/has_value 형태로 조회한다.",
+    ".env.example에는 실제 Secret 값을 넣지 않는다.",
+    "Frontend bundle에 Secret 기본값을 하드코딩하지 않는다."
+  ]
+}

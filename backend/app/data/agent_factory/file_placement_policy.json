@@ -1,0 +1,61 @@
+{
+  "version": "1.1",
+  "id": "FILE_PLACEMENT_POLICY",
+  "purpose": "AgentStudio가 변경 요청을 어느 파일/계층에 배치할지 판단",
+  "mapping": [
+    {
+      "change_reason": "HTTP URL/method/parameter",
+      "target": "routers"
+    },
+    {
+      "change_reason": "business logic/LLM/API/DB orchestration",
+      "target": "services"
+    },
+    {
+      "change_reason": "request/response data contract",
+      "target": "schemas"
+    },
+    {
+      "change_reason": "shared dependency lifecycle",
+      "target": "dependencies_or_core"
+    },
+    {
+      "change_reason": "settings/secrets/provider config",
+      "target": "core/settings"
+    },
+    {
+      "change_reason": "app assembly/middleware/router registration",
+      "target": "main"
+    },
+    {
+      "change_reason": "automated validation",
+      "target": "tests"
+    },
+    {
+      "change_reason": "SSE endpoint URL/method/StreamingResponse",
+      "target": "routers"
+    },
+    {
+      "change_reason": "LLM token generation/astream orchestration",
+      "target": "services"
+    },
+    {
+      "change_reason": "SSE event serialization",
+      "target": "utils_or_adapter"
+    },
+    {
+      "change_reason": "stream event/request contract",
+      "target": "schemas_or_contract"
+    },
+    {
+      "change_reason": "streaming end-to-end validation",
+      "target": "tests"
+    }
+  ],
+  "anti_patterns": [
+    "main.py에 모든 기능 몰아넣기",
+    "router 내부에서 직접 ChatOpenAI 생성/복잡한 LLM chain 조립",
+    "service가 router/main을 import하는 역방향 의존성",
+    "DB model을 그대로 API response로 반환"
+  ]
+}
