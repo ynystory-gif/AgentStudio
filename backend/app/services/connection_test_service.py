@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import text
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import get_settings
 from app.services.ollama_installer import detect_ollama_exe
@@ -43,26 +45,138 @@ def _ollama_recommendation(*, exe: Path | None, port_open: bool, error: Exceptio
     return "Ollama URL, 실행 상태, 방화벽/보안 프로그램 및 로그의 상세 예외를 확인하세요."
 
 
-async def test_postgresql() -> dict:
+def _safe_database_target(database_url: str) -> dict:
     try:
-        from app.core.database import engine
-        async with engine.connect() as conn:
+        url = make_url(database_url)
+        return {
+            "host": url.host or "127.0.0.1",
+            "port": int(url.port or 5432),
+            "database": url.database or "postgres",
+            "user": url.username or "",
+        }
+    except Exception:
+        return {"host": "127.0.0.1", "port": 5432, "database": "", "user": ""}
+
+
+def _database_sqlstate(error: Exception) -> str:
+    candidates = [error, getattr(error, "orig", None)]
+    orig = getattr(error, "orig", None)
+    if orig is not None:
+        candidates.extend([getattr(orig, "__cause__", None), getattr(orig, "__context__", None)])
+    for item in candidates:
+        if item is None:
+            continue
+        for attr in ("sqlstate", "pgcode"):
+            value = getattr(item, attr, None)
+            if value:
+                return str(value)
+    return ""
+
+
+def _friendly_database_failure(error: Exception, target: dict, *, prefix: str) -> dict:
+    code = _database_sqlstate(error)
+    label = f"{target.get('user') or '?'}@{target.get('host')}:{target.get('port')}/{target.get('database') or '?'}"
+    if code == "28P01":
+        message = f"{prefix} 실패 - {label} 비밀번호 인증에 실패했습니다."
+        recommendation = "현재 테스트는 화면의 임시 관리자 비밀번호가 아니라 표시된 연결 대상 계정의 비밀번호를 사용합니다. DATABASE_URL 또는 관리자 계정 테스트 대상을 확인하세요."
+    elif code == "3D000":
+        message = f"{prefix} 실패 - 데이터베이스가 없습니다: {target.get('database') or '?'}"
+        recommendation = "AgentStudio 전용 DB 생성 여부와 DATABASE_URL의 데이터베이스 이름을 확인하세요."
+    elif code.startswith("08"):
+        message = f"{prefix} 실패 - PostgreSQL 서버 연결이 끊겼습니다: {target.get('host')}:{target.get('port')}"
+        recommendation = "PostgreSQL 서비스 실행 상태와 포트, 서버 로그를 확인한 뒤 다시 테스트하세요."
+    else:
+        message = f"{prefix} 실패 - {label} 연결을 확인하세요."
+        recommendation = "호스트/포트/사용자/비밀번호/데이터베이스를 확인하세요."
+    return {
+        "ok": False,
+        "message": message,
+        "sqlstate": code,
+        "target": target,
+        "detail": str(error),
+        "recommendation": recommendation,
+    }
+
+
+async def _with_database(database_url: str, callback):
+    # 화면에 입력된 DATABASE_URL을 즉시 테스트할 수 있도록 요청값을 우선 사용합니다.
+    # 실제 SQLAlchemy 연결은 Windows SelectorEventLoop 안정성을 위해 psycopg async로 정규화합니다.
+    from app.core.database import normalize_async_database_url
+    url = normalize_async_database_url(database_url)
+    temp_engine = create_async_engine(url, pool_pre_ping=True)
+    try:
+        async with temp_engine.connect() as conn:
+            return await callback(conn)
+    finally:
+        await temp_engine.dispose()
+
+
+async def test_postgresql(database_url: str | None = None) -> dict:
+    effective_url = (database_url or get_settings().database_url or "").strip()
+    target = _safe_database_target(effective_url)
+    try:
+        async def _probe(conn):
+            return await conn.scalar(text("SELECT 1"))
+        value = await _with_database(effective_url, _probe)
+        return {
+            "ok": value == 1,
+            "message": f"AgentStudio DB 연결 성공 ({target['user']}@{target['host']}:{target['port']}/{target['database']})",
+            "target": target,
+        }
+    except Exception as e:
+        return _friendly_database_failure(e, target, prefix="AgentStudio DB 연결")
+
+
+async def test_postgresql_admin(*, admin_user: str, admin_password: str) -> dict:
+    current = _safe_database_target(get_settings().database_url)
+    target = {
+        "host": current["host"],
+        "port": current["port"],
+        "database": "postgres",
+        "user": (admin_user or "postgres").strip() or "postgres",
+    }
+    if not admin_password:
+        return {
+            "ok": False,
+            "message": "PostgreSQL 관리자 비밀번호를 입력하세요.",
+            "target": target,
+            "recommendation": "이 비밀번호는 저장하지 않으며 관리자 계정 연결 확인에만 사용합니다.",
+        }
+    url = URL.create(
+        "postgresql+psycopg",
+        username=target["user"],
+        password=admin_password,
+        host=target["host"],
+        port=target["port"],
+        database="postgres",
+    )
+    temp_engine = create_async_engine(url, pool_pre_ping=True)
+    try:
+        async with temp_engine.connect() as conn:
             value = await conn.scalar(text("SELECT 1"))
-        return {"ok": value == 1, "message": "PostgreSQL 연결 성공"}
+        return {
+            "ok": value == 1,
+            "message": f"PostgreSQL 관리자 계정 연결 성공 ({target['user']}@{target['host']}:{target['port']}/postgres)",
+            "target": target,
+        }
     except Exception as e:
-        return {"ok": False, "message": f"PostgreSQL 연결 실패: {e}"}
+        return _friendly_database_failure(e, target, prefix="PostgreSQL 관리자 계정 연결")
+    finally:
+        await temp_engine.dispose()
 
 
-async def test_pgvector() -> dict:
+async def test_pgvector(database_url: str | None = None) -> dict:
+    effective_url = (database_url or get_settings().database_url or "").strip()
+    target = _safe_database_target(effective_url)
     try:
-        from app.core.database import engine
-        async with engine.connect() as conn:
-            version = await conn.scalar(text("SELECT extversion FROM pg_extension WHERE extname='vector'"))
+        async def _probe(conn):
+            return await conn.scalar(text("SELECT extversion FROM pg_extension WHERE extname='vector'"))
+        version = await _with_database(effective_url, _probe)
         if version:
-            return {"ok": True, "message": f"pgvector 사용 가능 ({version})"}
-        return {"ok": False, "message": "pgvector extension이 설치되지 않았습니다."}
+            return {"ok": True, "message": f"AgentStudio DB pgvector 사용 가능 ({version})", "target": target}
+        return {"ok": False, "message": "AgentStudio DB에 pgvector extension이 설치되지 않았습니다.", "target": target}
     except Exception as e:
-        return {"ok": False, "message": f"pgvector 확인 실패: {e}"}
+        return _friendly_database_failure(e, target, prefix="AgentStudio DB pgvector 확인")
 
 
 async def test_ollama() -> dict:

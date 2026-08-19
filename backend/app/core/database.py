@@ -29,6 +29,41 @@ SessionLocal = async_sessionmaker(
 )
 
 
+async def rebind_database(new_database_url: str) -> dict:
+    """
+    저장된 DATABASE_URL을 현재 Backend 프로세스에 즉시 적용합니다.
+
+    새 Engine으로 SELECT 1 연결 검증에 성공한 경우에만 전역 engine과
+    기존 SessionLocal async_sessionmaker의 bind를 교체합니다. 따라서
+    settings_service 등에서 이미 import한 SessionLocal 참조도 새 DB를 사용합니다.
+    """
+    global engine, database_url
+
+    normalized = normalize_async_database_url(new_database_url)
+    candidate = create_async_engine(normalized, pool_pre_ping=True)
+    try:
+        async with candidate.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception:
+        await candidate.dispose()
+        raise
+
+    old_engine = engine
+    engine = candidate
+    database_url = normalized
+    SessionLocal.configure(bind=candidate)
+    try:
+        await old_engine.dispose()
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "database_url": new_database_url,
+        "runtime_database_url": normalized,
+    }
+
+
 class Base(DeclarativeBase):
     pass
 

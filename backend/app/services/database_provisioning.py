@@ -89,20 +89,31 @@ def _run_psql(
         "-c", sql,
     ]
 
+    env["PGCLIENTENCODING"] = "UTF8"
+
     proc = subprocess.run(
         args,
         env=env,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        text=False,
         timeout=timeout,
     )
 
+    def _decode(data: bytes | None) -> str:
+        raw = data or b""
+        if not raw:
+            return ""
+        for encoding in ("utf-8", "cp949"):
+            try:
+                return raw.decode(encoding).strip()
+            except UnicodeDecodeError:
+                pass
+        return raw.decode("utf-8", errors="replace").strip()
+
     return {
         "returncode": proc.returncode,
-        "stdout": (proc.stdout or "").strip(),
-        "stderr": (proc.stderr or "").strip(),
+        "stdout": _decode(proc.stdout),
+        "stderr": _decode(proc.stderr),
     }
 
 
@@ -111,8 +122,11 @@ async def _create_agentstudio_tables(database_url: str) -> dict:
     새 AgentStudio DB에 SQLAlchemy 모델 테이블을 생성합니다.
     현재 실행 중인 기존 engine을 사용하지 않고 새 URL로 임시 engine을 만듭니다.
     """
+    # 사용자/환경설정에는 기존 호환 형식(postgresql+asyncpg)을 유지하되
+    # AgentStudio 내부 연결은 Windows SelectorEventLoop에서 안정적인 psycopg async를 사용합니다.
+    runtime_database_url = database_url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
     new_engine = create_async_engine(
-        database_url,
+        runtime_database_url,
         pool_pre_ping=True,
     )
 
@@ -301,12 +315,12 @@ async def provision_agentstudio_database(
     )
 
     if admin_check["returncode"] != 0:
+        detail = admin_check["stderr"] or admin_check["stdout"]
         raise RuntimeError(
-            "PostgreSQL 관리자 계정 접속 실패: "
-            + (
-                admin_check["stderr"]
-                or admin_check["stdout"]
-            )
+            f"PostgreSQL 관리자 계정 접속 실패 ({admin_user}@{host}:{port}/postgres). "
+            "입력한 관리자 비밀번호가 이 PostgreSQL 인스턴스의 계정과 일치하는지 확인하고 "
+            "[관리자 계정 테스트]를 먼저 실행하세요."
+            + (f" 상세: {detail}" if detail else "")
         )
 
     # --------------------------------------------------
@@ -526,7 +540,7 @@ async def provision_agentstudio_database(
     )
 
     database_url = (
-        f"postgresql+psycopg://"
+        f"postgresql+asyncpg://"
         f"{encoded_user}:{encoded_password}"
         f"@{host}:{port}/{database_name}"
     )

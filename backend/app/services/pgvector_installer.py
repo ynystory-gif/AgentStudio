@@ -16,7 +16,7 @@ import httpx
 from sqlalchemy import text
 
 from app.core.config import get_settings
-from app.core.database import engine
+import app.core.database as database_core
 
 
 GITHUB_OWNER = "andreiramani"
@@ -648,7 +648,7 @@ async def _activate_extension_with_admin(
 
 async def _extension_status() -> dict:
     try:
-        async with engine.connect() as conn:
+        async with database_core.engine.connect() as conn:
             version = await conn.scalar(
                 text(
                     "SELECT extversion FROM pg_extension "

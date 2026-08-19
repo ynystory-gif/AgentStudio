@@ -19,9 +19,12 @@ import ast
 import builtins
 import contextlib
 import io
+import importlib
 import json
 import linecache
 import os
+import shlex
+import subprocess
 import sys
 import traceback
 
@@ -33,6 +36,39 @@ namespace = {
     "__builtins__": builtins,
 }
 
+def _agentstudio_notebook_pip(arguments):
+    """Run %pip with the exact interpreter backing the Notebook session."""
+    args = shlex.split(str(arguments or ""), posix=True)
+    completed = subprocess.run([sys.executable, "-m", "pip", *args], check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(f"%pip 명령이 실패했습니다. 종료 코드: {completed.returncode}")
+    importlib.invalidate_caches()
+    return None
+
+def _preprocess_notebook_code(source):
+    """Translate a small, safe subset of Jupyter line magics to Python.
+
+    Keep one output line for every input line so traceback line numbers remain
+    aligned with the cell shown in AgentStudio.  %pip is intentionally executed
+    with sys.executable so packages are installed into the same project venv as
+    the persistent Notebook worker.
+    """
+    translated = []
+    for raw_line in str(source or "").splitlines(True):
+        newline = "\n" if raw_line.endswith("\n") else ""
+        body = raw_line[:-1] if newline else raw_line
+        stripped = body.lstrip()
+        indent = body[: len(body) - len(stripped)]
+        lower = stripped.casefold()
+        if lower.startswith("%pip") and (len(stripped) == 4 or stripped[4].isspace()):
+            arguments = stripped[4:].strip()
+            translated.append(f"{indent}_agentstudio_notebook_pip({arguments!r}){newline}")
+            continue
+        translated.append(raw_line)
+    return "".join(translated)
+
+namespace["_agentstudio_notebook_pip"] = _agentstudio_notebook_pip
+
 for raw in sys.stdin:
     try:
         request = json.loads(raw)
@@ -41,12 +77,16 @@ for raw in sys.stdin:
         root = str(request.get("root") or os.getcwd())
         reset = bool(request.get("reset"))
         capture_last_expression = bool(request.get("capture_last_expression"))
+        notebook_mode = bool(request.get("notebook_mode"))
+        if notebook_mode:
+            code = _preprocess_notebook_code(code)
 
         if reset:
             namespace = {
                 "__name__": "__main__",
                 "__package__": None,
                 "__builtins__": builtins,
+                "_agentstudio_notebook_pip": _agentstudio_notebook_pip,
             }
 
         namespace["__file__"] = filename
@@ -332,6 +372,8 @@ class PythonExecutionManager:
         session_id: str | None = None,
         reset: bool = False,
         capture_last_expression: bool = False,
+        notebook_mode: bool = False,
+        cell_index: int | None = None,
     ) -> dict[str, Any]:
         project_root = Path(root).expanduser().resolve()
         if not project_root.exists() or not project_root.is_dir():
@@ -345,13 +387,22 @@ class PythonExecutionManager:
             except ValueError as exc:
                 raise ValueError("프로젝트 root 밖의 Python 파일은 실행할 수 없습니다.") from exc
 
+        # A real .ipynb path points at JSON, not at the Python cell being executed.
+        # Use a non-existent cell-specific pseudo filename for compile()/traceback so
+        # SyntaxError never renders notebook JSON such as `"cells": [` as source.
+        execution_filename = str(filename_path)
+        if notebook_mode and relative.lower().endswith(".ipynb"):
+            display_cell = (int(cell_index) + 1) if cell_index is not None else 1
+            execution_filename = f"{filename_path}.cell-{display_cell}.py"
+
         session = self._get_or_create(str(project_root), session_id)
         request = {
             "root": str(project_root),
             "code": str(code or ""),
-            "filename": str(filename_path),
+            "filename": execution_filename,
             "reset": bool(reset),
             "capture_last_expression": bool(capture_last_expression),
+            "notebook_mode": bool(notebook_mode),
         }
 
         with session.lock:
@@ -446,6 +497,8 @@ class PythonExecutionManager:
             "persistent": True,
             "reset": bool(reset),
             "capture_last_expression": bool(capture_last_expression),
+            "notebook_mode": bool(notebook_mode),
+            "cell_index": cell_index,
         })
         return response
 

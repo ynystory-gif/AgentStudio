@@ -68,11 +68,14 @@ pre { margin: 0; padding: 8px 10px; height: 155px; overflow: auto; white-space: 
 
 .router-badge { font-size:12px; padding:6px 9px; border:1px solid #343a46; border-radius:6px; background:#171b22; }
 
-.system-card-wide { max-width: 1180px; }
+.system-card-wide { max-width: 1320px; }
 .system-head { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; margin-bottom:18px; }
 .system-head h1 { margin-bottom:6px; }
 .system-head p { margin:0; color:#9aa3b5; }
 .settings-sections { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+.settings-balanced-columns { grid-column:1 / -1; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:14px; align-items:start; }
+.settings-column { min-width:0; display:flex; flex-direction:column; gap:14px; align-self:start; }
+.settings-column .settings-panel { width:100%; height:auto; align-self:stretch; }
 .settings-panel { border:1px solid #303642; background:#12161c; border-radius:9px; padding:16px; }
 .settings-panel-wide { grid-column:1 / -1; }
 .settings-panel h2 { margin:0 0 13px; font-size:17px; }
@@ -88,7 +91,7 @@ pre { margin: 0; padding: 8px 10px; height: 155px; overflow: auto; white-space: 
 .two-col-fields { display:grid; grid-template-columns:1fr 1fr; gap:0 14px; }
 .status-summary { margin-top:18px; border-top:1px solid #303642; padding-top:16px; }
 @media (max-width: 900px) {
-  .settings-sections, .two-col-fields { grid-template-columns:1fr; }
+  .settings-sections, .settings-balanced-columns, .two-col-fields { grid-template-columns:1fr; }
   .settings-panel-wide { grid-column:auto; }
   .system-head { flex-direction:column; }
 }
@@ -10234,3 +10237,18 @@ display:none은 React DOM을 unmount하지 않습니다.
   .machine-name-edit-row{grid-template-columns:minmax(0,1fr)}
   .machine-name-edit-row button{width:100%}
 }
+
+/* ===== v5.266 Notebook %pip magic execution + cell traceback fix ===== */
+
+/* ===== v5.268 settings offline fallback + DB recovery ===== */
+.settings-db-offline-warning{
+  margin-top:10px;padding:10px 12px;border:1px solid #8a5d17;border-radius:7px;
+  background:#2a210f;color:#f3d28a;display:flex;flex-direction:column;gap:4px;font-size:12px;
+}
+.settings-db-offline-warning strong{color:#ffd978}
+.machine-unique-badge.pending{background:#5b4512;color:#ffd978;border-color:#8a6817}
+.machine-unique-badge.unverified{background:#3b2d16;color:#e7b86b;border-color:#6d5124}
+
+
+/* ===== v5.269 postgres credential scope + admin connection test ===== */
+.credential-scope-hint b{color:#dbeafe;}

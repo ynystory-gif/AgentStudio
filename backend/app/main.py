@@ -15,7 +15,7 @@ from app.core.database import init_db, migrate_agentstudio_schema
 from app.api.routes import router
 from app.services.langgraph_runtime import agent_graph_runtime
 from app.services.mcp_registry import mcp_registry_monitor
-from app.services.settings_service import migrate_env_settings_to_db, load_db_settings_into_runtime, register_current_machine
+from app.services.settings_service import migrate_env_settings_to_db, load_db_settings_into_runtime, register_current_machine, resolve_pending_machine_name
 from app.core.machine_identity import ensure_pc_name_env
 from app.services.project_root_registry import restore_registered_project_roots
 from app.services.llm_usage_service import prune_llm_history
@@ -27,6 +27,9 @@ async def lifespan(app: FastAPI):
         print(f"[완료되었습니다] AgentStudio PC 이름: {machine_env.get('pc_name', '')}")
         await init_db()
         schema_migration = await migrate_agentstudio_schema()
+        pending_result = await resolve_pending_machine_name()
+        if pending_result.get("pending"):
+            print(f"[안내] PC 이름 유니크 검증 대기: {pending_result.get('pending_pc_name', '')} - {pending_result.get('message', '')}")
         machine_db = await register_current_machine()
         print(f"[완료되었습니다] PC 프로필 DB 등록: {machine_db.get('pc_name', '')}")
         print(
@@ -66,7 +69,14 @@ async def lifespan(app: FastAPI):
         except Exception as history_error:
             print(f"[경고] LLM 요청/응답 보관 정리 실패: {history_error}")
     except Exception as e:
-        print(f"[경고] PostgreSQL 초기화 실패: {e}")
+        orig = getattr(e, "orig", None)
+        sqlstate = str(getattr(orig, "sqlstate", "") or getattr(orig, "pgcode", "") or "")
+        if sqlstate == "28P01":
+            print("[경고] PostgreSQL 초기화 실패: 데이터베이스 사용자 비밀번호 인증에 실패했습니다. 시스템 관리의 DATABASE URL을 확인하세요.")
+        elif sqlstate.startswith("08"):
+            print("[경고] PostgreSQL 초기화 실패: PostgreSQL 서버 연결이 끊겼습니다. 서버/포트/서비스 상태를 확인하세요.")
+        else:
+            print(f"[경고] PostgreSQL 초기화 실패: {e}")
 
     await agent_graph_runtime.start()
     await mcp_registry_monitor.start()
@@ -76,7 +86,7 @@ async def lifespan(app: FastAPI):
         await mcp_registry_monitor.stop()
         await agent_graph_runtime.stop()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.265", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.274", lifespan=lifespan)
 
 # Frontend 개발 서버(Vite)와 Backend API 간 CORS 허용
 app.add_middleware(

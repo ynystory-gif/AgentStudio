@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { api, connectJobs, runtimeInfo } from './api'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.265'
+const AGENTSTUDIO_FRONTEND_VERSION='5.274'
 
 const joinWin = (root, file) => `${root}\\${file}`.replaceAll('\\\\', '\\')
 const localIsoDate = () => {
@@ -95,6 +95,72 @@ const isPdfFile=(filePath='')=>String(filePath||'').toLowerCase().endsWith('.pdf
 const notebookSourceToText=(source)=>{
   if(Array.isArray(source)) return source.join('')
   return String(source??'')
+}
+
+// v5.267: Python 커널 Notebook 안에 교육용 raw SQL 셀이 들어 있는 경우
+// Python ast.parse()로 보내지 않고 기존 DB Workspace 실행기로 라우팅합니다.
+// Jupyter의 %%sql 표기도 함께 허용하며, 교재에서 Python 주석 형태로 붙인
+// '# ...' 안내 줄은 SQL 주석 '-- ...'로 바꿔 DB에 전달합니다.
+const normalizeNotebookSqlCode=(source='')=>{
+  const lines=String(source??'').replace(/\r\n|\r/g,'\n').split('\n')
+  let magicRemoved=false
+  const normalized=[]
+  for(const raw of lines){
+    const trimmed=raw.trim()
+    if(!magicRemoved&&/^%%sql(?:\s|$)/i.test(trimmed)){
+      magicRemoved=true
+      const rest=trimmed.replace(/^%%sql(?:\s+)?/i,'')
+      if(rest) normalized.push(rest)
+      continue
+    }
+    const match=raw.match(/^(\s*)#(.*)$/)
+    if(match){
+      normalized.push(`${match[1]}--${match[2]}`)
+    }else{
+      normalized.push(raw)
+    }
+  }
+  return normalized.join('\n')
+}
+
+const looksLikeNotebookSqlCode=(source='')=>{
+  const raw=String(source??'')
+  if(/^\s*%%sql(?:\s|$)/i.test(raw)) return true
+  const normalized=normalizeNotebookSqlCode(raw)
+  const lines=normalized.split('\n')
+  let inBlockComment=false
+  for(const rawLine of lines){
+    let line=rawLine.trim()
+    if(!line) continue
+    if(inBlockComment){
+      if(line.includes('*/')) inBlockComment=false
+      continue
+    }
+    if(line.startsWith('/*')){
+      if(!line.includes('*/')) inBlockComment=true
+      continue
+    }
+    if(line.startsWith('--')) continue
+    return /^(?:BEGIN\s*(?:;|TRANSACTION\b)|START\s+TRANSACTION\b|COMMIT\s*;|ROLLBACK\s*;|SELECT\s+|INSERT\s+INTO\s+|UPDATE\s+[\w"`\[]+\s+SET\s+|DELETE\s+FROM\s+|CREATE\s+(?:TABLE|VIEW|INDEX|SCHEMA|DATABASE|SEQUENCE|FUNCTION|PROCEDURE)\b|ALTER\s+(?:TABLE|VIEW|SCHEMA|DATABASE|SEQUENCE)\b|DROP\s+(?:TABLE|VIEW|INDEX|SCHEMA|DATABASE|SEQUENCE|FUNCTION|PROCEDURE)\b|TRUNCATE\s+(?:TABLE\s+)?|MERGE\s+INTO\s+|GRANT\s+|REVOKE\s+|EXPLAIN\s+|VACUUM(?:\s|;|$)|ANALYZE(?:\s|;|$))/i.test(line)
+  }
+  return false
+}
+
+const formatNotebookSqlResult=(result)=>{
+  const lines=[]
+  if(result?.message) lines.push(String(result.message))
+  const columns=Array.isArray(result?.columns)?result.columns:[]
+  const rows=Array.isArray(result?.rows)?result.rows:[]
+  if(columns.length){
+    const displayRows=rows.slice(0,50)
+    lines.push(columns.join(' | '))
+    lines.push(columns.map(()=> '---').join(' | '))
+    for(const row of displayRows){
+      lines.push((Array.isArray(row)?row:[]).map(value=>value===null?'NULL':String(value)).join(' | '))
+    }
+    if(rows.length>displayRows.length) lines.push(`... Notebook 출력은 ${displayRows.length}행까지만 표시합니다. 전체 조회 ${rows.length}행`)
+  }
+  return (lines.join('\n')||'SQL 실행 완료')+'\n'
 }
 
 const textToNotebookSource=(text='')=>{
@@ -809,11 +875,16 @@ function SystemPage() {
   const [portCheckBusy,setPortCheckBusy]=useState(false)
   const [machineName,setMachineName]=useState('')
   const [machineNameBusy,setMachineNameBusy]=useState(false)
+  const pgAdminPasswordRef=useRef(null)
+  const agentDbPasswordRef=useRef(null)
+
+  const readPgAdminPassword=()=>String(pgAdminPasswordRef.current?.value ?? pgAdminPassword ?? '')
+  const readAgentDbPassword=()=>String(agentDbPasswordRef.current?.value ?? agentDbPassword ?? '')
 
   const refresh=async()=>{
     try{
       const [s,cfg]=await Promise.all([api('/system/status'),api('/settings')])
-      setStatus(s); setSettings(cfg); setMachineName(cfg?._machine?.pc_name||''); setError('')
+      setStatus(s); setSettings(cfg); setMachineName(cfg?._machine?.pending_pc_name||cfg?._machine?.pc_name||''); setError('')
 
       try{
         setOllamaRuntime(await api('/settings/ollama/runtime/status'))
@@ -857,9 +928,39 @@ function SystemPage() {
       keys.forEach(k=>{ values[k]=valueOf(k) })
       const r=await api('/settings',{method:'POST',body:JSON.stringify({values})})
       setSettings(r.settings)
-      setMessage(r.message)
+      if(keys.includes('DATABASE_URL')){
+        const saved=r?.saved_bootstrap?.DATABASE_URL||''
+        const target=(()=>{
+          try{ const u=new URL(saved.replace('postgresql+asyncpg://','http://').replace('postgresql+psycopg://','http://').replace('postgresql://','http://')); return `${u.username}@${u.hostname}:${u.port||5432}${u.pathname}` }catch{return ''}
+        })()
+        setMessage(`${r.message||'DB 설정을 저장했습니다.'}${target?` 저장 확인: ${target}`:''}`)
+      }else{
+        setMessage(r.message)
+      }
     }catch(e){setError(String(e))}
     finally{setBusy(false)}
+  }
+
+  const saveDatabaseEnv=async()=>{
+    setBusy(true); setMessage(''); setError('')
+    try{
+      const payload={
+        database_url:String(valueOf('DATABASE_URL')||'').trim(),
+        langgraph_database_url:String(valueOf('LANGGRAPH_DATABASE_URL')||'').trim(),
+        postgresql_root:String(valueOf('POSTGRESQL18_ROOT')||'').trim()
+      }
+      const r=await api('/settings/database-env',{method:'POST',body:JSON.stringify(payload)})
+      // 응답도 DB가 아니라 backend/.env에서 재읽은 실제 저장값입니다.
+      setSettings(prev=>({
+        ...prev,
+        DATABASE_URL:r?.saved?.DATABASE_URL ?? payload.database_url,
+        LANGGRAPH_DATABASE_URL:r?.saved?.LANGGRAPH_DATABASE_URL ?? payload.langgraph_database_url,
+        POSTGRESQL18_ROOT:r?.saved?.POSTGRESQL18_ROOT ?? payload.postgresql_root
+      }))
+      setMessage(`${r.message||'DB 연결 설정을 .env에 저장했습니다.'} 저장 위치: ${r.env_path||'backend/.env'}`)
+    }catch(e){
+      setError(String(e))
+    }finally{setBusy(false)}
   }
 
   const saveMachineName=async()=>{
@@ -875,7 +976,7 @@ function SystemPage() {
         body:JSON.stringify({pc_name:nextName})
       })
       if(r?.settings) setSettings(r.settings)
-      setMachineName(r?.pc_name||r?.settings?._machine?.pc_name||nextName)
+      setMachineName(r?.pending_pc_name||r?.pc_name||r?.settings?._machine?.pending_pc_name||r?.settings?._machine?.pc_name||nextName)
       setMessage(r?.message||`PC 이름을 ${nextName}(으)로 저장했습니다.`)
     }catch(e){
       setError(String(e))
@@ -962,7 +1063,11 @@ function SystemPage() {
   const testOne=async(name)=>{
     setBusy(true)
     try{
-      const r=await api(`/settings/test/${name}`,{method:'POST'})
+      const options={method:'POST'}
+      if(name==='postgresql' || name==='pgvector'){
+        options.body=JSON.stringify({database_url:String(valueOf('DATABASE_URL')||'').trim()})
+      }
+      const r=await api(`/settings/test/${name}`,options)
       setTests(p=>({...p,[name]:r}))
     }catch(e){
       setTests(p=>({...p,[name]:{ok:false,message:String(e)}}))
@@ -1009,7 +1114,7 @@ function SystemPage() {
         }))
 
         if(['SUCCESS','FAILED','CANCELLED'].includes(j.status)){
-          setPgAdminPassword('')
+          if(j.status==='SUCCESS') setPgAdminPassword('')
           setBusy(false)
           if(j.status==='SUCCESS'){
             setTimeout(()=>testOne('pgvector'),300)
@@ -1039,7 +1144,8 @@ function SystemPage() {
       setPgvectorInstall({status:'FAILED',progress:0,message:'PostgreSQL 관리자 사용자명을 입력하세요.'})
       return
     }
-    if(!pgAdminPassword){
+    const effectiveAdminPassword=readPgAdminPassword()
+    if(!effectiveAdminPassword){
       setPgvectorInstall({status:'FAILED',progress:0,message:'PostgreSQL 관리자 비밀번호를 입력하세요.'})
       return
     }
@@ -1059,7 +1165,7 @@ function SystemPage() {
 
     try{
       // 긴 설치 작업은 Backend Job으로 시작하고 즉시 Job ID를 받습니다.
-      const job=await api('/settings/pgvector/windows18/install',{method:'POST',body:JSON.stringify({postgresql_root:valueOf('POSTGRESQL18_ROOT'),admin_user:pgAdminUser,admin_password:pgAdminPassword})})
+      const job=await api('/settings/pgvector/windows18/install',{method:'POST',body:JSON.stringify({postgresql_root:valueOf('POSTGRESQL18_ROOT'),admin_user:pgAdminUser,admin_password:effectiveAdminPassword})})
       setPgvectorInstall({
         status:job.status,
         progress:job.progress||0,
@@ -1082,7 +1188,7 @@ function SystemPage() {
     try{
       const r=await api('/settings/pgvector/windows18/validate-path',{
         method:'POST',
-        body:JSON.stringify({postgresql_root:valueOf('POSTGRESQL18_ROOT'),admin_user:pgAdminUser,admin_password:pgAdminPassword})
+        body:JSON.stringify({postgresql_root:valueOf('POSTGRESQL18_ROOT'),admin_user:pgAdminUser,admin_password:readPgAdminPassword()})
       })
       setPgPathCheck(r)
     }catch(e){
@@ -1090,14 +1196,36 @@ function SystemPage() {
     }
   }
 
+  const testPostgresqlAdmin=async()=>{
+    const effectiveAdminPassword=readPgAdminPassword()
+    setBusy(true)
+    try{
+      const r=await api('/settings/test/postgresql-admin',{
+        method:'POST',
+        body:JSON.stringify({admin_user:pgAdminUser,admin_password:effectiveAdminPassword})
+      })
+      setTests(p=>({...p,postgresqlAdmin:r}))
+    }catch(e){
+      setTests(p=>({...p,postgresqlAdmin:{ok:false,message:String(e)}}))
+    }finally{
+      setBusy(false)
+    }
+  }
+
 
   const provisionAgentstudioDb=async()=>{
-    if(!pgAdminUser.trim() || !pgAdminPassword){
+    const effectiveAdminPassword=readPgAdminPassword()
+    const effectiveAppPassword=readAgentDbPassword()
+    if(!pgAdminUser.trim() || !effectiveAdminPassword){
       setDbProvision({ok:false,message:'PostgreSQL 관리자 사용자/비밀번호를 입력하세요.'})
       return
     }
-    if(!agentDbName.trim() || !agentDbUser.trim() || !agentDbPassword){
-      setDbProvision({ok:false,message:'AgentStudio DB 이름, 앱 사용자, 앱 비밀번호를 모두 입력하세요.'})
+    const missing=[]
+    if(!agentDbName.trim()) missing.push('DB 이름')
+    if(!agentDbUser.trim()) missing.push('앱 사용자')
+    if(!effectiveAppPassword) missing.push('앱 비밀번호')
+    if(missing.length){
+      setDbProvision({ok:false,message:`입력되지 않은 항목: ${missing.join(', ')}`})
       return
     }
 
@@ -1115,16 +1243,18 @@ function SystemPage() {
         body:JSON.stringify({
           postgresql_root:valueOf('POSTGRESQL18_ROOT'),
           admin_user:pgAdminUser,
-          admin_password:pgAdminPassword,
+          admin_password:effectiveAdminPassword,
           app_user:agentDbUser,
-          app_password:agentDbPassword,
+          app_password:effectiveAppPassword,
           database_name:agentDbName
         })
       })
       setDbProvision(r)
-      setAgentDbPassword('')
-      setPgAdminPassword('')
-      await refresh()
+      if(r?.ok){
+        setAgentDbPassword('')
+        setPgAdminPassword('')
+        await refresh()
+      }
     }catch(e){
       setDbProvision({ok:false,message:String(e)})
     }finally{
@@ -1290,7 +1420,11 @@ function SystemPage() {
     setBusy(true); setMessage(''); setError('')
     try{
       const r=await api('/settings/migrate-to-db',{method:'POST'})
-      setMessage(`설정 DB 이관 완료: ${r.migrated||0}개`)
+      if(r?.ok===false){
+        setMessage(r?.message||'공용 DB 연결 복구 후 다시 동기화하세요.')
+      }else{
+        setMessage(r?.message||`설정 DB 동기화 완료: 신규 ${r.migrated||0}개 / 수정 ${r.updated||0}개`)
+      }
       await refresh()
     }catch(e){
       setError('설정 DB 이관 실패: '+String(e))
@@ -1314,6 +1448,8 @@ function SystemPage() {
     if(!r) return null
     return <div className={r.ok?'test-result okbox':'test-result badbox'}>
       <div>{r.message}</div>
+      {r.target&&<div><b>연결 대상:</b> {`${r.target.user||'?'}@${r.target.host||'?'}:${r.target.port||'?'} / ${r.target.database||'?'}`}</div>}
+      {!r.ok&&r.sqlstate&&<div><b>PostgreSQL 코드:</b> {r.sqlstate}</div>}
       {!r.ok&&r.error_type&&<div><b>오류 유형:</b> {r.error_type}</div>}
       {!r.ok&&r.url&&<div><b>연결 URL:</b> {r.url}</div>}
       {!r.ok&&r.port_open!==undefined&&<div><b>포트 상태:</b> {r.port_open?'열림':'연결 안 됨'}</div>}
@@ -1351,9 +1487,13 @@ function SystemPage() {
       <div><h1>THEANOVA AgentStudio - 시스템 관리</h1>
       <p>설정 입력 → 저장 → 연결 테스트 순서로 관리합니다.</p>
       <div className="hint-box settings-storage-note">
-        일반 설정은 PostgreSQL <b>app_settings</b> 테이블에 <b>사용자 지정 PC 이름 + 설정 Key</b> 기준으로 저장합니다. PC 이름은 공용 DB에서 유니크해야 합니다.
-        DATABASE_URL / LangGraph DB URL / PostgreSQL 설치 경로 / AgentStudio 서비스 포트 / Ollama 자동 시작 여부는 시작 전에 필요하므로 각 PC의 .env bootstrap 설정으로도 유지합니다.
+        일반 PC별 설정은 공용 PostgreSQL <b>app_settings</b>를 사용하고 각 PC의 <b>.env</b>를 fallback cache로 유지합니다.
+        단, <b>DATABASE URL / LangGraph DB URL은 DB 연결 자체에 필요한 bootstrap 정보이므로 예외적으로 backend/.env에만 저장</b>하며 app_settings에는 저장하지 않습니다.
       </div>
+      {settings?._storage?.db_connected===false&&<div className="settings-db-offline-warning">
+        <strong>공용 DB 연결 안 됨 · 현재 .env fallback 모드</strong>
+        <span>DATABASE URL의 호스트/포트/사용자/비밀번호를 확인하고 [DB 설정 .env 저장] → [AgentStudio DB 연결 테스트] 순서로 복구하세요.</span>
+      </div>}
       <div className="machine-scope-info machine-scope-editable">
         <div className="machine-scope-title">
           <span>AgentStudio PC 이름</span>
@@ -1375,9 +1515,12 @@ function SystemPage() {
         <div className="machine-scope-meta">
           <span>Windows PC 이름</span>
           <strong>{settings?._machine?.system_host_name||'확인 중...'}</strong>
-          <span className="machine-unique-badge">UNIQUE</span>
+          <span className={`machine-unique-badge ${settings?._machine?.pending_pc_name?'pending':settings?._machine?.unique_verified?'':'unverified'}`}>
+            {settings?._machine?.pending_pc_name?'검증 대기':settings?._machine?.unique_verified?'UNIQUE':'DB 확인 필요'}
+          </span>
         </div>
-        <small>환경 설정 기준: PC_NAME + 설정 Key · .env: AGENTSTUDIO_PC_NAME · 중복 이름은 저장되지 않습니다.</small>
+        {settings?._machine?.pending_pc_name&&<small>요청 PC 이름: <b>{settings._machine.pending_pc_name}</b> · 공용 DB 연결 후 중복 검증이 완료되면 자동 적용됩니다.</small>}
+        {!settings?._machine?.pending_pc_name&&<small>환경 설정 기준: PC_NAME + 설정 Key · .env: AGENTSTUDIO_PC_NAME · 중복 이름은 저장되지 않습니다.</small>}
       </div>
       <div className="runtime-port-info">
         API: {runtimeInfo().apiBase} · Frontend: {window.location.origin}
@@ -1486,6 +1629,8 @@ function SystemPage() {
         </div>
       </section>
 
+      <div className="settings-balanced-columns">
+        <div className="settings-column settings-column-left">
       <section className="settings-panel">
         <h2>PostgreSQL / LangGraph</h2>
         {renderField("DATABASE URL","DATABASE_URL","text","")}
@@ -1497,8 +1642,17 @@ function SystemPage() {
         </label>
         <label className="setting-field">
           <span>PostgreSQL 관리자 비밀번호 (저장하지 않음)</span>
-          <input type="password" value={pgAdminPassword} onChange={e=>setPgAdminPassword(e.target.value)} placeholder="이번 pgvector 활성화에만 사용"/>
+          <input ref={pgAdminPasswordRef} type="password" value={pgAdminPassword} onInput={e=>setPgAdminPassword(e.currentTarget.value)} onChange={e=>setPgAdminPassword(e.target.value)} autoComplete="new-password" placeholder="DB 생성/pgvector 관리자 작업에만 사용"/>
         </label>
+        <div className="hint-box credential-scope-hint">
+          <b>비밀번호 사용 범위:</b> [관리자 계정 테스트/전용 DB 생성/pgvector 설치]는 위 관리자 비밀번호를 사용합니다.
+          [AgentStudio DB 연결 테스트/AgentStudio DB pgvector 테스트]는 <b>화면에 현재 입력되어 있는 DATABASE URL</b>의 사용자/비밀번호를 즉시 사용합니다.
+          DB 설정 저장을 먼저 누르지 않아도 현재 입력값으로 테스트합니다. 두 비밀번호는 서로 다를 수 있습니다.
+        </div>
+        <div className="panel-actions">
+          <button disabled={busy} onClick={testPostgresqlAdmin}>관리자 계정 테스트</button>
+        </div>
+        {renderTestResult('postgresqlAdmin')}
         <div className="provision-box">
           <h3>AgentStudio 전용 DB 생성</h3>
           <label className="setting-field">
@@ -1511,7 +1665,7 @@ function SystemPage() {
           </label>
           <label className="setting-field">
             <span>AgentStudio 앱 비밀번호 (저장하지 않음)</span>
-            <input type="password" value={agentDbPassword} onChange={e=>setAgentDbPassword(e.target.value)}/>
+            <input ref={agentDbPasswordRef} type="password" value={agentDbPassword} onInput={e=>setAgentDbPassword(e.currentTarget.value)} onChange={e=>setAgentDbPassword(e.target.value)} autoComplete="new-password"/>
           </label>
           <button className="primary-install" disabled={busy} onClick={provisionAgentstudioDb}>
             theanova_agentstudio DB 생성 + pgvector 설치 + 권한 + 테이블 초기화
@@ -1537,13 +1691,15 @@ function SystemPage() {
         </div>
 
         <div className="hint-box">
-          PostgreSQL 관리자 비밀번호는 저장하지 않으며 pgvector DB 활성화 작업에만 사용합니다.
+          <b>저장 위치:</b> DATABASE URL과 LangGraph DB URL은 DB 연결 이전에 필요한 bootstrap 설정이므로 <b>backend/.env에만 저장</b>합니다.
+          PostgreSQL app_settings에는 저장하지 않습니다. PostgreSQL이 연결되지 않은 상태에서도 저장할 수 있습니다.
+          PostgreSQL 관리자 비밀번호와 AgentStudio 앱 비밀번호는 저장하지 않습니다.
         </div>
         <div className="panel-actions">
-          <button disabled={busy} onClick={()=>saveGroup(['DATABASE_URL','LANGGRAPH_DATABASE_URL','POSTGRESQL18_ROOT'])}>DB 설정 저장</button>
-          <button onClick={()=>testOne('postgresql')}>PostgreSQL 테스트</button>
+          <button disabled={busy} onClick={saveDatabaseEnv}>DB 설정 .env 저장</button>
+          <button onClick={()=>testOne('postgresql')}>AgentStudio DB 연결 테스트</button>
           <button type="button" onClick={checkRuntimeLoop}>Event Loop 확인</button>
-          <button onClick={()=>testOne('pgvector')}>pgvector 테스트</button>
+          <button onClick={()=>testOne('pgvector')}>AgentStudio DB pgvector 테스트</button>
           {runtimeLoopStatus&&<div className="runtime-loop-status">
             Event Loop: {runtimeLoopStatus.event_loop||runtimeLoopStatus.message}
             {runtimeLoopStatus.is_selector===true&&' · Selector 정상'}
@@ -1585,6 +1741,20 @@ function SystemPage() {
         </div>}
       </section>
 
+      <section className="settings-panel">
+        <h2>LangSmith</h2>
+        {renderField("LangSmith API Key","LANGSMITH_API_KEY","password","")}
+        {renderField("Project","LANGSMITH_PROJECT","text","")}
+        {renderField("Tracing (true/false)","LANGSMITH_TRACING","text","")}
+        <div className="panel-actions">
+          <button disabled={busy} onClick={()=>saveGroup(['LANGSMITH_API_KEY','LANGSMITH_PROJECT','LANGSMITH_TRACING'])}>LangSmith 설정 저장</button>
+          <button onClick={()=>testOne('langsmith')}>LangSmith 연결 테스트</button>
+        </div>
+        {renderTestResult("langsmith")}
+      </section>
+        </div>
+
+        <div className="settings-column settings-column-right">
       <section className="settings-panel">
         <h2>OpenAI</h2>
         {renderField("OpenAI API Key","OPENAI_API_KEY","password","")}
@@ -1673,18 +1843,6 @@ function SystemPage() {
       </section>
 
       <section className="settings-panel">
-        <h2>LangSmith</h2>
-        {renderField("LangSmith API Key","LANGSMITH_API_KEY","password","")}
-        {renderField("Project","LANGSMITH_PROJECT","text","")}
-        {renderField("Tracing (true/false)","LANGSMITH_TRACING","text","")}
-        <div className="panel-actions">
-          <button disabled={busy} onClick={()=>saveGroup(['LANGSMITH_API_KEY','LANGSMITH_PROJECT','LANGSMITH_TRACING'])}>LangSmith 설정 저장</button>
-          <button onClick={()=>testOne('langsmith')}>LangSmith 연결 테스트</button>
-        </div>
-        {renderTestResult("langsmith")}
-      </section>
-
-      <section className="settings-panel">
         <h2>AI 모델 라우팅</h2>
         {renderField("로컬 작업 Provider","LOCAL_LLM_PROVIDER","text","")}
         {renderField("코딩 Provider","CODING_LLM_PROVIDER","text","")}
@@ -1694,6 +1852,8 @@ function SystemPage() {
           <button disabled={busy} onClick={()=>saveGroup(['LOCAL_LLM_PROVIDER','CODING_LLM_PROVIDER','REQUIREMENTS_LLM_PROVIDER'])}>라우팅 설정 저장</button>
         </div>
       </section>
+        </div>
+      </div>
 
       <section className="settings-panel settings-panel-wide">
         <h2>로컬 프로젝트 / 실행 정책</h2>
@@ -1729,6 +1889,11 @@ function SystemPage() {
           <span><StatusDot ok={ok}/>{n}</span><strong>{ok?'정상/설정됨':'확인 필요'}</strong>
         </div>)}
       </div>
+      {!status.langgraph_persistent && status.langgraph_persistent_message && (
+        <div className="hint-box" style={{marginTop:12}}>
+          LangGraph 영속화 진단: {String(status.langgraph_persistent_message)}
+        </div>
+      )}
     </section>
   </div></div>
 }
@@ -3107,7 +3272,7 @@ function IDE() {
   const [sqlConnectionBusy,setSqlConnectionBusy]=useState(false)
   const [sqlQueryBusy,setSqlQueryBusy]=useState(false)
   const sqlStopRequestedRef=useRef(false)
-  const [pythonExecutionState,setPythonExecutionState]=useState({busy:false,root:'',sessionId:'',label:''})
+  const [pythonExecutionState,setPythonExecutionState]=useState({busy:false,root:'',sessionId:'',label:'',kind:''})
   const pythonStopRequestedRef=useRef(false)
   const [cmdExecution,setCmdExecution]=useState({busy:false,executionId:'',path:'',pid:null})
   const [activeWorkflowJobId,setActiveWorkflowJobId]=useState('')
@@ -9558,6 +9723,16 @@ function IDE() {
     if(!state.busy||!state.root||!state.sessionId) return null
     pythonStopRequestedRef.current=true
     try{
+      if(state.kind==='sql'){
+        sqlStopRequestedRef.current=true
+        const result=await api('/sql/cancel',{
+          method:'POST',
+          body:JSON.stringify({root:state.root,connection_id:sqlProfile.connection_id||''})
+        })
+        const term=xtermInstancesRef.current[state.sessionId]
+        term?.write?.('\r\n\x1b[33m[실행 정지] Notebook SQL 실행 중지 요청을 보냈습니다.\x1b[0m\r\n')
+        return result
+      }
       const result=await api('/python/stop',{
         method:'POST',
         body:JSON.stringify({root:state.root,session_id:state.sessionId})
@@ -9566,7 +9741,7 @@ function IDE() {
       term?.write?.('\r\n\x1b[33m[실행 정지] Python/Notebook 실행 중지 요청을 보냈습니다. 다음 실행은 새 Python 세션에서 시작됩니다.\x1b[0m\r\n')
       return result
     }catch(e){
-      console.error('Python 실행 중지 실패',e)
+      console.error('Notebook/Python 실행 중지 실패',e)
       return null
     }
   }
@@ -9713,9 +9888,12 @@ function IDE() {
       return null
     }
     if(!String(pythonCode||'').trim()){
-      window.alert('실행할 Notebook Python 코드가 없습니다.')
+      window.alert('실행할 Notebook 코드가 없습니다.')
       return null
     }
+
+    const sqlMode=looksLikeNotebookSqlCode(pythonCode)
+    const executableCode=sqlMode?normalizeNotebookSqlCode(pythonCode):String(pythonCode||'')
 
     let targetId=activeTerminalId
     let target=terminalSessions.find(t=>t.id===targetId)
@@ -9732,28 +9910,68 @@ function IDE() {
     }
 
     const terminalSessionId=targetId||'python-default'
-    const sourceLabel=`Notebook ${selectionOnly?'선택':'셀'} 실행 · ${normalizedPath} · Cell ${Number(cellIndex)+1}`
+    const sourceLabel=`Notebook ${sqlMode?'SQL':(selectionOnly?'선택':'셀')} 실행 · ${normalizedPath} · Cell ${Number(cellIndex)+1}`
     pythonStopRequestedRef.current=false
-    setPythonExecutionState({busy:true,root:workspaceRoot,sessionId:terminalSessionId,label:sourceLabel})
+    setPythonExecutionState({busy:true,root:workspaceRoot,sessionId:terminalSessionId,label:sourceLabel,kind:sqlMode?'sql':'python'})
 
     try{
       term.write(`\r\n\x1b[36m[${sourceLabel}]\x1b[0m\r\n`)
-      if(selectionOnly){
-        term.write(String(pythonCode).replace(/\r\n|\r|\n/g,'\r\n'))
+      if(selectionOnly||sqlMode){
+        term.write(String(executableCode).replace(/\r\n|\r|\n/g,'\r\n'))
         term.write('\r\n')
       }
       term.write('\x1b[90m실행 중...\x1b[0m\r\n')
       term.scrollToBottom()
+
+      if(sqlMode){
+        if(!sqlConnectionStatus?.connected){
+          const message='Notebook SQL 셀을 실행하려면 우측 DB 연결 영역에서 데이터베이스를 먼저 연결해야 합니다.'
+          term.write('\x1b[31m'+message+'\x1b[0m\r\n')
+          return {ok:false,stdout:'',stderr:'',error_type:'DatabaseNotConnected',error_message:message,traceback:''}
+        }
+        try{
+          const sqlResult=await api('/sql/execute',{
+            method:'POST',
+            body:JSON.stringify({root:workspaceRoot,sql:executableCode,max_rows:1000})
+          })
+          const stdout=formatNotebookSqlResult(sqlResult)
+          setSqlQueryResult(sqlResult)
+          setSqlResultTab(sqlResult?.columns?.length?'DATA':'MESSAGES')
+          setSqlMessages(prev=>[{
+            type:'success',
+            text:`Notebook SQL 셀 실행 완료 · ${sqlResult?.message||''} · ${sqlResult?.elapsed_ms||0}ms`,
+            time:new Date().toLocaleTimeString()
+          },...prev].slice(0,100))
+          term.write('\x1b[32m'+stdout.replace(/\r\n|\r|\n/g,'\r\n')+'\x1b[0m')
+          term.write(`\x1b[90mDB: ${String(sqlConnectionStatus?.profile?.name||sqlProfile?.name||sqlConnectionStatus?.db_type||sqlProfile?.db_type||'연결된 DB')} · Notebook SQL 자동 감지\x1b[0m\r\n`)
+          term.scrollToBottom()
+          setActiveTerminalId(targetId)
+          setTerminal(prev=>(prev||'')+`\n[${sourceLabel}] 완료\n`)
+          return {ok:true,stdout,stderr:'',traceback:'',error_type:'',error_message:'',sql_result:sqlResult,execution_kind:'sql'}
+        }catch(e){
+          if(sqlStopRequestedRef.current){
+            const message='사용자가 Notebook SQL 실행을 중지했습니다.'
+            term.write('\x1b[33m[실행 취소] '+message+'\x1b[0m\r\n')
+            return {ok:false,cancelled:true,error_type:'ExecutionCancelled',error_message:message,stdout:'',stderr:'',traceback:''}
+          }
+          const message=`Notebook SQL 실행 실패: ${e}`
+          term.write('\x1b[31m'+message.replace(/\r\n|\r|\n/g,'\r\n')+'\x1b[0m\r\n')
+          term.scrollToBottom()
+          return {ok:false,stdout:'',stderr:'',error_type:'SqlExecutionError',error_message:String(e),traceback:message,execution_kind:'sql'}
+        }
+      }
 
       const result=await api('/python/execute',{
         method:'POST',
         body:JSON.stringify({
           root:workspaceRoot,
           relative_path:normalizedPath,
-          code:pythonCode,
+          code:executableCode,
           mode:mode==='full'?'full':'selection',
           session_id:terminalSessionId,
           capture_last_expression:true,
+          notebook_mode:true,
+          cell_index:Number(cellIndex),
         })
       })
 
@@ -9803,7 +10021,7 @@ function IDE() {
       term.scrollToBottom()
       throw e
     }finally{
-      setPythonExecutionState(prev=>prev.sessionId===terminalSessionId?{busy:false,root:'',sessionId:'',label:''}:prev)
+      setPythonExecutionState(prev=>prev.sessionId===terminalSessionId?{busy:false,root:'',sessionId:'',label:'',kind:''}:prev)
       pythonStopRequestedRef.current=false
     }
   }

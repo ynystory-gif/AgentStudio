@@ -9,8 +9,10 @@ from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = BACKEND_ROOT / ".env"
+ENV_EXAMPLE_PATH = BACKEND_ROOT / ".env.example"
 PC_NAME_KEY = "AGENTSTUDIO_PC_NAME"
 SYSTEM_HOST_KEY = "AGENTSTUDIO_SYSTEM_HOST_NAME"
+PENDING_PC_NAME_KEY = "AGENTSTUDIO_PC_NAME_PENDING"
 PC_NAME_PATTERN = re.compile(r"^[0-9A-Za-z가-힣._-]{2,64}$")
 
 
@@ -34,17 +36,34 @@ def detect_pc_name() -> str:
     return detect_system_pc_name()
 
 
-def _read_env_values() -> dict[str, str]:
+def _parse_env_file(path: Path) -> dict[str, str]:
     result: dict[str, str] = {}
-    if not ENV_PATH.exists():
+    if not path.exists():
         return result
-    for line in ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         result[key.strip().upper()] = value.strip()
     return result
+
+
+def _read_env_values() -> dict[str, str]:
+    # .env.example은 신규 PC의 기본 템플릿이고 실제 .env가 우선합니다.
+    result = _parse_env_file(ENV_EXAMPLE_PATH)
+    result.update(_parse_env_file(ENV_PATH))
+    return result
+
+
+def _base_env_lines() -> list[str]:
+    # 신규 clone 직후 .env가 없을 때 PC 이름만 들어간 빈 .env를 만들지 않고
+    # .env.example 전체를 복사한 뒤 장치 식별 정보를 덮어씁니다.
+    if ENV_PATH.exists():
+        return ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    if ENV_EXAMPLE_PATH.exists():
+        return ENV_EXAMPLE_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    return []
 
 
 def validate_pc_name(value: str) -> str:
@@ -74,9 +93,7 @@ def current_pc_name() -> str:
 
 
 def _write_identity_env(pc_name: str, system_host_name: str) -> dict:
-    lines: list[str] = []
-    if ENV_PATH.exists():
-        lines = ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    lines: list[str] = _base_env_lines()
 
     replacements = {
         PC_NAME_KEY: pc_name,
@@ -123,6 +140,41 @@ def _write_identity_env(pc_name: str, system_host_name: str) -> dict:
         "previous_pc_name": previous.get(PC_NAME_KEY, ""),
         "previous_system_host_name": previous.get(SYSTEM_HOST_KEY, ""),
     }
+
+
+def pending_pc_name() -> str:
+    return str(_parse_env_file(ENV_PATH).get(PENDING_PC_NAME_KEY, "") or "").strip()
+
+
+def _write_single_env_value(key: str, value: str) -> None:
+    lines = _base_env_lines()
+    output: list[str] = []
+    seen = False
+    for line in lines:
+        if "=" in line and not line.lstrip().startswith("#"):
+            left = line.split("=", 1)[0].strip().upper()
+            if left == key.upper():
+                if value:
+                    output.append(f"{key}={value}")
+                seen = True
+                continue
+        output.append(line)
+    if value and not seen:
+        if output and output[-1].strip():
+            output.append("")
+        output.append(f"{key}={value}")
+    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ENV_PATH.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+
+
+def set_pending_pc_name_env(pc_name: str) -> dict:
+    normalized = validate_pc_name(pc_name)
+    _write_single_env_value(PENDING_PC_NAME_KEY, normalized)
+    return {"ok": True, "pending_pc_name": normalized, "env_path": str(ENV_PATH)}
+
+
+def clear_pending_pc_name_env() -> None:
+    _write_single_env_value(PENDING_PC_NAME_KEY, "")
 
 
 def ensure_pc_name_env() -> dict:

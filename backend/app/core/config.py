@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -6,7 +7,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     agentstudio_pc_name: str = ""
     agentstudio_system_host_name: str = ""
-    database_url: str = "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/theanova_agentstudio"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/theanova_agentstudio"
     langgraph_database_url: str = "postgresql://postgres:postgres@127.0.0.1:5432/theanova_agentstudio"
 
     openai_api_key: str = ""
@@ -56,6 +57,39 @@ class Settings(BaseSettings):
     def project_roots(self) -> list[str]:
         return [x.strip() for x in self.allowed_project_roots.split(";") if x.strip()]
 
+def _read_backend_env_overrides() -> dict:
+    """
+    AgentStudio bootstrap 설정은 backend/.env를 최종 기준으로 사용합니다.
+
+    Windows 부모 프로세스에 오래된 DATABASE_URL 등이 남아 있으면 Pydantic의
+    기본 우선순위(OS 환경변수 > .env) 때문에 시스템 관리 화면에서 저장한 값이
+    재시작 후에도 적용되지 않을 수 있습니다. DB 접속에 필요한 bootstrap 값만
+    명시적 init 값으로 전달해 backend/.env가 확실히 우선하도록 합니다.
+    """
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if not env_path.exists():
+        return {}
+
+    mapping = {
+        "AGENTSTUDIO_PC_NAME": "agentstudio_pc_name",
+        "AGENTSTUDIO_SYSTEM_HOST_NAME": "agentstudio_system_host_name",
+        "DATABASE_URL": "database_url",
+        "LANGGRAPH_DATABASE_URL": "langgraph_database_url",
+        "POSTGRESQL18_ROOT": "postgresql18_root",
+    }
+    found = {}
+    for raw_line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in raw_line:
+            continue
+        key, value = raw_line.split("=", 1)
+        key = key.strip()
+        field = mapping.get(key)
+        if field:
+            found[field] = value.strip()
+    return found
+
+
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings(**_read_backend_env_overrides())

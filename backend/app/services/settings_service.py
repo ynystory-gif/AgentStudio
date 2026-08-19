@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from datetime import datetime
 import platform
 
@@ -17,6 +17,9 @@ from app.core.machine_identity import (
     detect_system_pc_name,
     set_pc_name_env,
     validate_pc_name,
+    pending_pc_name,
+    set_pending_pc_name_env,
+    clear_pending_pc_name_env,
 )
 
 
@@ -24,6 +27,11 @@ ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 ENV_EXAMPLE_PATH = Path(__file__).resolve().parents[2] / ".env.example"
 
 # DB 연결 이전에도 필요한 최소 bootstrap 설정만 .env에 유지합니다.
+DB_CONNECTION_ENV_ONLY_KEYS = {
+    "DATABASE_URL",
+    "LANGGRAPH_DATABASE_URL",
+}
+
 BOOTSTRAP_KEYS = {
     "AGENTSTUDIO_PC_NAME",
     "AGENTSTUDIO_SYSTEM_HOST_NAME",
@@ -79,6 +87,8 @@ SECRET_KEYS = {
     "LANGSMITH_API_KEY",
 }
 
+LOCAL_PENDING_SETTINGS_KEY = "AGENTSTUDIO_SETTINGS_PENDING"
+
 DEFAULT_SETTING_VALUES = {
     "AGENTSTUDIO_BACKEND_PORT": "8000",
     "AGENTSTUDIO_FRONTEND_PORT": "5173",
@@ -97,71 +107,125 @@ def _normalize_database_driver(value: str) -> str:
     return value
 
 
-def _read_env_lines() -> list[str]:
-    if ENV_PATH.exists():
-        return ENV_PATH.read_text(
-            encoding="utf-8",
-            errors="replace",
-        ).splitlines()
-    if ENV_EXAMPLE_PATH.exists():
-        return ENV_EXAMPLE_PATH.read_text(
-            encoding="utf-8",
-            errors="replace",
-        ).splitlines()
-    return []
-
-
-def read_env_dict() -> dict[str, str]:
+def _parse_env_lines(lines: list[str]) -> dict[str, str]:
     data: dict[str, str] = {}
-    for line in _read_env_lines():
+    for line in lines:
         stripped = line.strip()
-        if (
-            not stripped
-            or stripped.startswith("#")
-            or "=" not in line
-        ):
+        if not stripped or stripped.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         data[key.strip()] = value.strip()
     return data
 
 
-def _write_bootstrap_values(values: dict[str, str]) -> None:
-    existing_lines = _read_env_lines()
-    current = read_env_dict()
+def _read_actual_env_lines() -> list[str]:
+    if ENV_PATH.exists():
+        return ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    if ENV_EXAMPLE_PATH.exists():
+        return ENV_EXAMPLE_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    return []
 
-    for key, value in values.items():
-        if key in BOOTSTRAP_KEYS:
-            current[key] = value
 
+def read_env_dict() -> dict[str, str]:
+    # 신규 clone에서 .env가 일부 키만 가진 경우에도 .env.example의 기본값을
+    # 화면에 정상 표시하되 실제 .env 값이 항상 우선합니다.
+    data: dict[str, str] = {}
+    if ENV_EXAMPLE_PATH.exists():
+        data.update(_parse_env_lines(ENV_EXAMPLE_PATH.read_text(encoding="utf-8", errors="replace").splitlines()))
+    if ENV_PATH.exists():
+        data.update(_parse_env_lines(ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines()))
+    return data
+
+
+def read_actual_env_dict() -> dict[str, str]:
+    """backend/.env에 실제로 저장된 값만 반환합니다 (.env.example 제외)."""
+    if not ENV_PATH.exists():
+        return {}
+    return _parse_env_lines(
+        ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    )
+
+
+def get_database_env_settings() -> dict[str, str]:
+    """DB 연결 bootstrap 값은 오직 backend/.env를 source of truth로 사용합니다."""
+    actual = read_actual_env_dict()
+    merged = read_env_dict()
+    return {
+        key: actual.get(key, merged.get(key, DEFAULT_SETTING_VALUES.get(key, "")))
+        for key in DB_CONNECTION_ENV_ONLY_KEYS
+    }
+
+
+def _write_env_values(values: dict[str, str]) -> None:
+    """PC 로컬 .env를 안전한 오프라인 fallback cache로 유지합니다."""
+    existing_lines = _read_actual_env_lines()
+    update_values = {str(k): str(v) for k, v in values.items()}
     seen: set[str] = set()
     output: list[str] = []
 
     for line in existing_lines:
-        if (
-            "=" in line
-            and not line.lstrip().startswith("#")
-        ):
+        if "=" in line and not line.lstrip().startswith("#"):
             key = line.split("=", 1)[0].strip()
-            if key in BOOTSTRAP_KEYS and key in current:
-                output.append(f"{key}={current[key]}")
+            if key in update_values:
+                output.append(f"{key}={update_values[key]}")
                 seen.add(key)
                 continue
-
-            # DB로 이관된 일반 설정은 .env에서 제거
-            if key in SETTING_KEYS and key not in BOOTSTRAP_KEYS:
-                continue
-
         output.append(line)
 
-    for key in BOOTSTRAP_KEYS:
-        if key in current and key not in seen:
-            output.append(f"{key}={current[key]}")
+    missing = [key for key in update_values if key not in seen]
+    if missing:
+        if output and output[-1].strip():
+            output.append("")
+        output.append("# AgentStudio local settings fallback cache")
+        for key in missing:
+            output.append(f"{key}={update_values[key]}")
 
-    ENV_PATH.write_text(
-        "\n".join(output).rstrip() + "\n",
-        encoding="utf-8",
-    )
+    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    content = "\n".join(output).rstrip() + "\n"
+    temp_path = ENV_PATH.with_suffix(ENV_PATH.suffix + ".tmp")
+    temp_path.write_text(content, encoding="utf-8")
+    temp_path.replace(ENV_PATH)
+
+    # 실제 파일에 기록됐는지 즉시 검증합니다.
+    persisted = _parse_env_lines(ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines())
+    missing_or_mismatch = [
+        key for key, value in update_values.items()
+        if persisted.get(key) != value
+    ]
+    if missing_or_mismatch:
+        raise OSError(
+            "설정 파일 저장 검증에 실패했습니다: " + ", ".join(missing_or_mismatch)
+        )
+
+
+def _write_bootstrap_values(values: dict[str, str]) -> None:
+    filtered = {key: value for key, value in values.items() if key in BOOTSTRAP_KEYS}
+    if filtered:
+        _write_env_values(filtered)
+
+
+def _pending_setting_keys() -> set[str]:
+    actual = {}
+    if ENV_PATH.exists():
+        actual = _parse_env_lines(ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines())
+    raw = str(actual.get(LOCAL_PENDING_SETTINGS_KEY, "") or "")
+    return {key for key in raw.split(";") if key in SETTING_KEYS and key not in BOOTSTRAP_KEYS}
+
+
+def _write_pending_setting_keys(keys: set[str]) -> None:
+    _write_env_values({LOCAL_PENDING_SETTINGS_KEY: ";".join(sorted(keys))})
+
+
+def _mark_pending_settings(keys: set[str]) -> None:
+    pending = _pending_setting_keys()
+    pending.update({key for key in keys if key in SETTING_KEYS and key not in BOOTSTRAP_KEYS})
+    _write_pending_setting_keys(pending)
+
+
+def _clear_pending_settings(keys: set[str]) -> None:
+    pending = _pending_setting_keys()
+    pending.difference_update(keys)
+    _write_pending_setting_keys(pending)
 
 
 async def _read_db_settings() -> dict[str, str]:
@@ -171,7 +235,7 @@ async def _read_db_settings() -> dict[str, str]:
             await session.execute(
                 select(AppSetting).where(
                     AppSetting.pc_name == pc_name,
-                    AppSetting.key.in_(SETTING_KEYS),
+                    AppSetting.key.in_([key for key in SETTING_KEYS if key not in DB_CONNECTION_ENV_ONLY_KEYS]),
                 )
             )
         ).scalars().all()
@@ -216,75 +280,113 @@ async def register_current_machine() -> dict:
 
 
 async def rename_current_machine(new_pc_name: str) -> dict:
-    """Rename the current PC scope, enforcing a globally unique pc_name."""
+    """
+    Rename the current shared-DB PC scope.
+
+    DB가 오프라인이면 유니크 여부를 확인할 수 없으므로 활성 이름을 바꾸지 않고
+    요청 이름을 .env의 PENDING 값으로 보존합니다. DB 복구 후 자동 검증합니다.
+    """
     new_name = validate_pc_name(new_pc_name)
     old_name = current_pc_name()
     system_host_name = detect_system_pc_name()
 
     if new_name == old_name:
         identity = set_pc_name_env(new_name)
-        await register_current_machine()
+        clear_pending_pc_name_env()
+        db_synced = True
+        db_error = ""
+        try:
+            await register_current_machine()
+        except Exception as exc:
+            db_synced = False
+            db_error = str(exc)
+        settings = await get_editable_settings()
         return {
             "ok": True,
             "changed": False,
             "pc_name": new_name,
             "system_host_name": system_host_name,
-            "message": f"PC 이름 [{new_name}]을 유지합니다.",
-            "settings": await get_editable_settings(),
+            "db_synced": db_synced,
+            "db_error": db_error,
+            "message": (
+                f"PC 이름 [{new_name}]을 유지합니다."
+                if db_synced else
+                f"PC 이름 [{new_name}]은 .env에 유지했습니다. 공용 DB 연결 후 유니크 등록을 다시 확인합니다."
+            ),
+            "settings": settings,
         }
 
-    async with SessionLocal() as session:
-        duplicate_machine = (
-            await session.execute(
-                select(AgentStudioMachine).where(AgentStudioMachine.pc_name == new_name)
-            )
-        ).scalar_one_or_none()
-        duplicate_setting = (
-            await session.execute(
-                select(AppSetting.id).where(AppSetting.pc_name == new_name).limit(1)
-            )
-        ).first()
-        if duplicate_machine is not None or duplicate_setting is not None:
-            raise ValueError(
-                f"PC 이름 [{new_name}]은(는) 이미 공용 DB에서 사용 중입니다. 다른 유니크한 이름을 입력하세요."
-            )
+    try:
+        async with SessionLocal() as session:
+            duplicate_machine = (
+                await session.execute(
+                    select(AgentStudioMachine).where(AgentStudioMachine.pc_name == new_name)
+                )
+            ).scalar_one_or_none()
+            duplicate_setting = (
+                await session.execute(
+                    select(AppSetting.id).where(AppSetting.pc_name == new_name).limit(1)
+                )
+            ).first()
+            if duplicate_machine is not None or duplicate_setting is not None:
+                raise ValueError(
+                    f"PC 이름 [{new_name}]은(는) 이미 공용 DB에서 사용 중입니다. 다른 유니크한 이름을 입력하세요."
+                )
 
-        source_machine = (
-            await session.execute(
-                select(AgentStudioMachine).where(AgentStudioMachine.pc_name == old_name)
-            )
-        ).scalar_one_or_none()
-        settings_rows = (
-            await session.execute(
-                select(AppSetting).where(AppSetting.pc_name == old_name)
-            )
-        ).scalars().all()
+            source_machine = (
+                await session.execute(
+                    select(AgentStudioMachine).where(AgentStudioMachine.pc_name == old_name)
+                )
+            ).scalar_one_or_none()
+            settings_rows = (
+                await session.execute(
+                    select(AppSetting).where(AppSetting.pc_name == old_name)
+                )
+            ).scalars().all()
 
-        if source_machine is None:
-            source_machine = AgentStudioMachine(
-                pc_name=new_name,
-                host_name=system_host_name,
-                os_name=platform.platform(),
-                created_at=datetime.utcnow(),
-                last_seen_at=datetime.utcnow(),
-            )
-            session.add(source_machine)
-        else:
-            source_machine.pc_name = new_name
-            source_machine.host_name = system_host_name
-            source_machine.os_name = platform.platform()
-            source_machine.last_seen_at = datetime.utcnow()
+            if source_machine is None:
+                source_machine = AgentStudioMachine(
+                    pc_name=new_name,
+                    host_name=system_host_name,
+                    os_name=platform.platform(),
+                    created_at=datetime.utcnow(),
+                    last_seen_at=datetime.utcnow(),
+                )
+                session.add(source_machine)
+            else:
+                source_machine.pc_name = new_name
+                source_machine.host_name = system_host_name
+                source_machine.os_name = platform.platform()
+                source_machine.last_seen_at = datetime.utcnow()
 
-        for row in settings_rows:
-            row.pc_name = new_name
+            for row in settings_rows:
+                row.pc_name = new_name
 
-        # Write .env before DB commit; if commit fails, restore the previous alias.
-        set_pc_name_env(new_name)
-        try:
             await session.commit()
-        except Exception:
-            set_pc_name_env(old_name)
-            raise
+
+        set_pc_name_env(new_name)
+        clear_pending_pc_name_env()
+    except ValueError:
+        raise
+    except Exception as exc:
+        set_pending_pc_name_env(new_name)
+        settings = await get_editable_settings()
+        settings.setdefault("_machine", {})["pending_pc_name"] = new_name
+        return {
+            "ok": True,
+            "changed": False,
+            "pending": True,
+            "pc_name": old_name,
+            "pending_pc_name": new_name,
+            "system_host_name": system_host_name,
+            "db_synced": False,
+            "db_error": str(exc),
+            "message": (
+                f"공용 DB에 연결할 수 없어 PC 이름 [{new_name}]의 유니크 검증을 보류했습니다. "
+                ".env에 변경 요청을 안전하게 저장했으며 DB 연결이 복구되면 자동 검증 후 적용합니다."
+            ),
+            "settings": settings,
+        }
 
     return {
         "ok": True,
@@ -292,63 +394,90 @@ async def rename_current_machine(new_pc_name: str) -> dict:
         "old_pc_name": old_name,
         "pc_name": new_name,
         "system_host_name": system_host_name,
+        "db_synced": True,
         "message": (
             f"PC 이름을 [{old_name}] → [{new_name}]으로 변경했습니다. "
-            "기존 PC별 app_settings도 새 이름으로 함께 이동했습니다."
+            "공용 DB의 기존 PC별 app_settings도 새 이름으로 함께 이동했습니다."
         ),
         "settings": await get_editable_settings(),
     }
 
 
+async def resolve_pending_machine_name() -> dict:
+    requested = pending_pc_name()
+    if not requested:
+        return {"ok": True, "pending": False}
+    try:
+        result = await rename_current_machine(requested)
+        return result
+    except ValueError as exc:
+        # 중복이면 사용자가 다른 이름을 선택할 수 있도록 pending 값을 유지합니다.
+        return {"ok": False, "pending": True, "pending_pc_name": requested, "message": str(exc)}
+
+
 async def migrate_env_settings_to_db() -> dict:
     """
-    기존 .env 일반 설정을 DB로 1회 이관합니다.
-    DB에 이미 값이 있는 key는 덮어쓰지 않습니다.
+    .env 로컬 fallback 값을 공용 DB와 동기화합니다.
+
+    - DB에 없는 값은 최초 PC 설정으로 등록
+    - DB 오프라인 중 사용자가 수정해 PENDING 표시된 값은 기존 DB 값도 갱신
+    - 단순 캐시 값은 DB의 기존 값을 덮어쓰지 않음
     """
     env_data = read_env_dict()
+    pending = _pending_setting_keys()
 
     async with SessionLocal() as session:
         pc_name = current_pc_name()
+        # 구버전에서 잘못 저장됐을 수 있는 DB 연결 bootstrap 행은 제거합니다.
+        # 이후 DATABASE_URL/LANGGRAPH_DATABASE_URL은 backend/.env만 source of truth입니다.
+        await session.execute(
+            delete(AppSetting).where(
+                AppSetting.key.in_(list(DB_CONNECTION_ENV_ONLY_KEYS))
+            )
+        )
         existing_rows = (
             await session.execute(
                 select(AppSetting).where(AppSetting.pc_name == pc_name)
             )
         ).scalars().all()
-
-        existing = {row.key for row in existing_rows}
-        migrated = 0
+        existing = {row.key: row for row in existing_rows}
+        inserted = 0
+        updated = 0
+        synced_pending: set[str] = set()
 
         for key in SETTING_KEYS:
-            if key in BOOTSTRAP_KEYS:
+            if key in BOOTSTRAP_KEYS or key not in env_data:
                 continue
-            if key in existing:
-                continue
-            if key not in env_data:
-                continue
-
-            session.add(
-                AppSetting(
-                    pc_name=pc_name,
-                    key=key,
-                    value=env_data.get(key, ""),
-                    is_secret=key in SECRET_KEYS,
+            value = env_data.get(key, "")
+            row = existing.get(key)
+            if row is None:
+                session.add(
+                    AppSetting(
+                        pc_name=pc_name,
+                        key=key,
+                        value=value,
+                        is_secret=key in SECRET_KEYS,
+                    )
                 )
-            )
-            migrated += 1
+                inserted += 1
+                if key in pending:
+                    synced_pending.add(key)
+            elif key in pending:
+                row.value = value
+                row.is_secret = key in SECRET_KEYS
+                updated += 1
+                synced_pending.add(key)
 
         await session.commit()
 
-    if migrated:
-        # 일반 설정은 DB 이관 후 .env에서 제거
-        _write_bootstrap_values({
-            key: env_data.get(key, "")
-            for key in BOOTSTRAP_KEYS
-            if key in env_data
-        })
+    if synced_pending:
+        _clear_pending_settings(synced_pending)
 
     return {
         "ok": True,
-        "migrated": migrated,
+        "migrated": inserted,
+        "updated": updated,
+        "pending_synced": sorted(synced_pending),
     }
 
 
@@ -385,6 +514,8 @@ async def load_db_settings_into_runtime() -> dict:
     }
 
     _apply_runtime_values(runtime_values)
+    if runtime_values:
+        _write_env_values(runtime_values)
 
     return {
         "ok": True,
@@ -394,18 +525,27 @@ async def load_db_settings_into_runtime() -> dict:
 
 async def get_editable_settings() -> dict[str, Any]:
     env_data = read_env_dict()
+    actual_env_data = read_actual_env_dict()
 
+    db_connected = True
+    db_error = ""
     try:
         db_data = await _read_db_settings()
-    except Exception:
-        # 최초 DB 생성 전에는 .env/기본값으로 화면을 유지
+    except Exception as exc:
+        # 최초 DB 생성 전/인증 실패 시에도 .env + .env.example 기본값으로 화면을 유지합니다.
         db_data = {}
+        db_connected = False
+        db_error = str(exc)
 
     result: dict[str, Any] = {}
 
     for key in SETTING_KEYS:
         default_value = DEFAULT_SETTING_VALUES.get(key, "")
-        if key in BOOTSTRAP_KEYS:
+        if key in DB_CONNECTION_ENV_ONLY_KEYS:
+            # DATABASE_URL/LANGGRAPH_DATABASE_URL은 DB 자체에 연결하기 위한 bootstrap 값이므로
+            # app_settings를 절대 조회하지 않고 backend/.env 실제 저장값만 사용합니다.
+            value = actual_env_data.get(key, env_data.get(key, default_value))
+        elif key in BOOTSTRAP_KEYS:
             value = env_data.get(key, default_value)
         else:
             value = db_data.get(
@@ -428,19 +568,108 @@ async def get_editable_settings() -> dict[str, Any]:
         "pc_name": pc_name,
         "system_host_name": system_host_name,
         "editable": True,
-        "unique": True,
+        "unique": db_connected and not pending_pc_name(),
         "scope": "PC_NAME",
         "env_key": "AGENTSTUDIO_PC_NAME",
+        "pending_pc_name": pending_pc_name(),
+        "unique_verified": db_connected and not pending_pc_name(),
     }
     result["_storage"] = {
         "primary": "PostgreSQL",
+        "fallback": ".env",
         "table": "app_settings",
         "scope": "pc_name + key",
         "pc_name": pc_name,
         "bootstrap": sorted(BOOTSTRAP_KEYS),
+        "env_only": sorted(DB_CONNECTION_ENV_ONLY_KEYS),
+        "database_connection_source": str(ENV_PATH),
+        "database_connection_storage": "backend/.env only (app_settings 미사용)",
+        "db_connected": db_connected,
+        "db_error": db_error,
+        "mode": "shared_db+local_env" if db_connected else "local_env_fallback",
+        "pending_settings": sorted(_pending_setting_keys()),
     }
 
     return result
+
+
+async def save_database_env_settings(values: dict[str, Any]) -> dict[str, Any]:
+    """
+    DATABASE_URL / LANGGRAPH_DATABASE_URL은 DB 연결 자체를 만들기 위한 bootstrap 설정입니다.
+    따라서 PostgreSQL app_settings에 절대 저장하지 않고 backend/.env에만 저장합니다.
+    DB가 완전히 오프라인이어도 저장/재조회가 가능해야 합니다.
+    """
+    allowed = DB_CONNECTION_ENV_ONLY_KEYS | {"POSTGRESQL18_ROOT"}
+    env_values: dict[str, str] = {}
+    for key, value in values.items():
+        if key not in allowed or value is None:
+            continue
+        env_values[key] = str(value).strip()
+
+    if not env_values:
+        raise ValueError("저장할 DB 환경 설정이 없습니다.")
+
+    # DB 접속 없이 파일에 먼저 확정 저장합니다.
+    _write_env_values(env_values)
+    get_settings.cache_clear()
+
+    # .env.example이나 app_settings가 아니라 실제 backend/.env를 다시 읽어 검증합니다.
+    actual = read_actual_env_dict()
+    mismatched = [key for key, value in env_values.items() if actual.get(key) != value]
+    if mismatched:
+        raise OSError("backend/.env 저장 확인 실패: " + ", ".join(mismatched))
+
+    database_rebound = False
+    database_rebind_error = ""
+    database_url = str(env_values.get("DATABASE_URL") or actual.get("DATABASE_URL") or "").strip()
+    if database_url:
+        try:
+            from app.core.database import rebind_database
+            await rebind_database(database_url)
+            database_rebound = True
+        except Exception as exc:
+            # 연결 실패는 저장 실패가 아닙니다. .env에는 이미 안전하게 저장됐습니다.
+            database_rebind_error = str(exc)
+
+    # LANGGRAPH_DATABASE_URL도 .env 저장 직후 현재 런타임 Checkpointer에 즉시 반영합니다.
+    # Backend 시작 당시 DB 인증이 실패했더라도 시스템 관리에서 올바른 URL을 저장하면
+    # Backend 재시작 없이 LangGraph 영속화를 복구할 수 있습니다.
+    langgraph_rebound = False
+    langgraph_rebind_error = ""
+    if "LANGGRAPH_DATABASE_URL" in env_values:
+        try:
+            from app.services.langgraph_runtime import agent_graph_runtime
+            langgraph_rebound = bool(await agent_graph_runtime.restart())
+            if not langgraph_rebound:
+                langgraph_rebind_error = agent_graph_runtime.last_error
+        except Exception as exc:
+            langgraph_rebind_error = str(exc)
+
+    # 반환값도 DB를 거치지 않고 .env에서 직접 구성합니다.
+    persisted = {key: actual.get(key, "") for key in env_values}
+    message = f"DB 연결 설정을 {ENV_PATH}에 저장했습니다. PostgreSQL app_settings에는 저장하지 않습니다."
+    if database_rebound:
+        message += " 현재 Backend DB 연결에도 즉시 적용했습니다."
+    elif database_rebind_error:
+        message += " 현재 DB 재연결은 실패했지만 .env 저장은 완료되었습니다. 연결 정보를 수정한 뒤 다시 테스트할 수 있습니다."
+
+    if "LANGGRAPH_DATABASE_URL" in env_values:
+        if langgraph_rebound:
+            message += " LangGraph PostgreSQL Checkpointer도 즉시 재연결했습니다."
+        elif langgraph_rebind_error:
+            message += " LangGraph Checkpointer 재연결은 실패했지만 .env 저장값은 유지됩니다."
+
+    return {
+        "ok": True,
+        "storage": "env_only",
+        "env_path": str(ENV_PATH),
+        "saved": persisted,
+        "database_rebound": database_rebound,
+        "database_rebind_error": database_rebind_error,
+        "langgraph_rebound": langgraph_rebound,
+        "langgraph_rebind_error": langgraph_rebind_error,
+        "message": message,
+    }
 
 
 async def update_settings(
@@ -490,12 +719,6 @@ async def update_settings(
 
         value = str(value)
 
-        if (
-            key == "DATABASE_URL"
-            and isinstance(value, str)
-        ):
-            value = _normalize_database_driver(value)
-
         if key in SECRET_KEYS and value == "":
             continue
 
@@ -504,53 +727,104 @@ async def update_settings(
         else:
             db_values[key] = value
 
-    # DB bootstrap 정보는 .env에도 유지
-    if bootstrap_values:
-        _write_bootstrap_values(bootstrap_values)
+    # 모든 설정을 PC 로컬 .env fallback cache에 먼저 저장합니다.
+    # 공용 DB가 죽어 있어도 시스템 관리 화면에서 설정을 잃지 않습니다.
+    local_values = {**bootstrap_values, **db_values}
+    database_rebound = False
+    database_rebind_error = ""
+    if local_values:
+        _write_env_values(local_values)
         get_settings.cache_clear()
 
-    # 일반 설정은 PostgreSQL app_settings에 upsert
+    # DATABASE_URL 저장은 파일 기록만으로 끝내지 않고 현재 Backend DB Engine에도
+    # 즉시 반영합니다. 테스트가 성공한 화면 값과 실제 프로젝트/설정 DB가 달라지는
+    # 문제를 방지합니다. 실패하더라도 .env 저장값은 유지하여 재시작 후 복구할 수 있습니다.
+    if "DATABASE_URL" in bootstrap_values and str(bootstrap_values.get("DATABASE_URL") or "").strip():
+        try:
+            from app.core.database import rebind_database
+            await rebind_database(str(bootstrap_values["DATABASE_URL"]).strip())
+            database_rebound = True
+        except Exception as exc:
+            database_rebind_error = str(exc)
+
+    # 저장 직후 현재 Backend 프로세스에도 일반 설정을 반영합니다.
     if db_values:
-        async with SessionLocal() as session:
-            pc_name = current_pc_name()
-            rows = (
-                await session.execute(
-                    select(AppSetting).where(
-                        AppSetting.pc_name == pc_name,
-                        AppSetting.key.in_(
-                            list(db_values.keys())
-                        ),
-                    )
-                )
-            ).scalars().all()
+        _apply_runtime_values(db_values)
 
-            existing = {row.key: row for row in rows}
-
-            for key, value in db_values.items():
-                row = existing.get(key)
-                if row:
-                    row.value = value
-                    row.is_secret = key in SECRET_KEYS
-                else:
-                    session.add(
-                        AppSetting(
-                            pc_name=pc_name,
-                            key=key,
-                            value=value,
-                            is_secret=key in SECRET_KEYS,
+    db_synced = True
+    db_error = ""
+    if db_values:
+        try:
+            async with SessionLocal() as session:
+                pc_name = current_pc_name()
+                rows = (
+                    await session.execute(
+                        select(AppSetting).where(
+                            AppSetting.pc_name == pc_name,
+                            AppSetting.key.in_(list(db_values.keys())),
                         )
                     )
+                ).scalars().all()
 
-            await session.commit()
+                existing = {row.key: row for row in rows}
+                for key, value in db_values.items():
+                    row = existing.get(key)
+                    if row:
+                        row.value = value
+                        row.is_secret = key in SECRET_KEYS
+                    else:
+                        session.add(
+                            AppSetting(
+                                pc_name=pc_name,
+                                key=key,
+                                value=value,
+                                is_secret=key in SECRET_KEYS,
+                            )
+                        )
+                await session.commit()
+            _clear_pending_settings(set(db_values.keys()))
+        except Exception as exc:
+            db_synced = False
+            db_error = str(exc)
+            _mark_pending_settings(set(db_values.keys()))
 
-        # 저장 직후 Backend 런타임에도 즉시 반영
-        _apply_runtime_values(db_values)
+    restart_required = any(
+        key in bootstrap_values
+        for key in ("LANGGRAPH_DATABASE_URL", "AGENTSTUDIO_BACKEND_PORT", "AGENTSTUDIO_FRONTEND_PORT")
+    )
+
+    if db_synced:
+        message = (
+            f"설정을 PC [{current_pc_name()}] 기준으로 .env에 저장했습니다. "
+            + ("공용 PostgreSQL app_settings에도 동기화했습니다." if db_values else "bootstrap 설정을 저장했습니다.")
+        )
+    else:
+        message = (
+            f"공용 DB에 연결할 수 없어 설정을 PC [{current_pc_name()}]의 .env에 먼저 저장했습니다. "
+            "DB 연결이 복구되면 '설정 DB 이관' 또는 다음 시작 시 자동으로 공용 DB에 동기화됩니다."
+        )
+    if database_rebound:
+        message += " DATABASE_URL은 저장 후 현재 Backend DB 연결에도 즉시 적용했습니다."
+    elif database_rebind_error:
+        message += " DATABASE_URL은 .env에 저장했지만 현재 Backend DB 재연결은 실패했습니다. 연결 정보를 확인하거나 SYSTEM_ADMIN.cmd를 다시 실행하세요."
+    if restart_required:
+        message += " LangGraph DB URL/서비스 포트 변경은 SYSTEM_ADMIN.cmd 재실행 후 관련 런타임에 완전히 적용됩니다."
+
+    saved_bootstrap = {}
+    persisted_env = read_env_dict()
+    for key in bootstrap_values:
+        if key in persisted_env:
+            saved_bootstrap[key] = persisted_env[key]
 
     return {
         "ok": True,
-        "message": (
-            f"설정이 PC [{current_pc_name()}] 기준으로 PostgreSQL app_settings 테이블에 저장되고 Backend 런타임에 즉시 반영되었습니다. "
-            "DB 연결/서비스 시작용 bootstrap 설정과 PC 이름은 .env에도 유지됩니다."
-        ),
+        "db_synced": db_synced,
+        "db_error": db_error,
+        "local_saved": True,
+        "database_rebound": database_rebound,
+        "database_rebind_error": database_rebind_error,
+        "saved_bootstrap": saved_bootstrap,
+        "restart_required": restart_required,
+        "message": message,
         "settings": await get_editable_settings(),
     }

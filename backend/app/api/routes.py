@@ -11,9 +11,9 @@ from app.services.project_paths import resolve_project_paths
 from app.services.database_provisioning import provision_agentstudio_database
 from app.core.config import get_settings
 from app.services.pgvector_installer import install_pgvector_windows18, latest_pg18_windows_release, detect_postgresql18_root, validate_postgresql18_root
-from app.services.settings_service import get_editable_settings, update_settings, migrate_env_settings_to_db, rename_current_machine
+from app.services.settings_service import get_editable_settings, update_settings, migrate_env_settings_to_db, rename_current_machine, save_database_env_settings
 from app.services.connection_test_service import (
-    test_postgresql, test_pgvector, test_ollama, test_openai, test_tavily, test_langsmith, test_all
+    test_postgresql, test_postgresql_admin, test_pgvector, test_ollama, test_openai, test_tavily, test_langsmith, test_all
 )
 from app.services.llm_runtime_status_service import get_llm_runtime_status
 from app.services.weather_service import build_weather_dashboard, weather_config
@@ -491,6 +491,18 @@ class PgvectorInstallRequest(BaseModel):
     admin_user: str = ""
     admin_password: str = ""
 
+class PostgreSqlAdminConnectionTestRequest(BaseModel):
+    admin_user: str = "postgres"
+    admin_password: str = ""
+
+class DatabaseUrlConnectionTestRequest(BaseModel):
+    database_url: str = ""
+
+class DatabaseEnvSettingsRequest(BaseModel):
+    database_url: str = ""
+    langgraph_database_url: str = ""
+    postgresql_root: str = ""
+
 class DatabaseProvisionRequest(BaseModel):
     postgresql_root: str = ""
     admin_user: str = "postgres"
@@ -684,15 +696,49 @@ async def save_machine_name(req: MachineNameUpdateRequest):
 
 @router.post("/settings/migrate-to-db")
 async def settings_migrate_to_db():
-    return await migrate_env_settings_to_db()
+    try:
+        result = await migrate_env_settings_to_db()
+        result["message"] = (
+            f"공용 DB 동기화 완료: 신규 {result.get('migrated', 0)}개 / "
+            f"오프라인 수정 반영 {result.get('updated', 0)}개"
+        )
+        return result
+    except Exception as exc:
+        return {
+            "ok": False,
+            "database_connected": False,
+            "migrated": 0,
+            "updated": 0,
+            "message": f"공용 DB에 연결할 수 없어 동기화를 보류했습니다: {exc}",
+        }
+
+@router.post("/settings/database-env")
+async def save_database_environment(req: DatabaseEnvSettingsRequest):
+    """DB 연결 bootstrap 값은 PostgreSQL이 아니라 backend/.env에만 저장합니다."""
+    try:
+        return await save_database_env_settings({
+            "DATABASE_URL": req.database_url,
+            "LANGGRAPH_DATABASE_URL": req.langgraph_database_url,
+            "POSTGRESQL18_ROOT": req.postgresql_root,
+        })
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
 
 @router.post("/settings/test/postgresql")
-async def settings_test_postgresql():
-    return await test_postgresql()
+async def settings_test_postgresql(req: DatabaseUrlConnectionTestRequest | None = None):
+    return await test_postgresql(req.database_url if req else None)
+
+@router.post("/settings/test/postgresql-admin")
+async def settings_test_postgresql_admin(req: PostgreSqlAdminConnectionTestRequest):
+    return await test_postgresql_admin(
+        admin_user=req.admin_user,
+        admin_password=req.admin_password,
+    )
 
 @router.post("/settings/test/pgvector")
-async def settings_test_pgvector():
-    return await test_pgvector()
+async def settings_test_pgvector(req: DatabaseUrlConnectionTestRequest | None = None):
+    return await test_pgvector(req.database_url if req else None)
 
 @router.post("/settings/test/ollama")
 async def settings_test_ollama():
@@ -859,7 +905,7 @@ async def provision_agentstudio_db(req: DatabaseProvisionRequest):
             database_name=req.database_name,
         )
 
-        await update_settings({
+        await save_database_env_settings({
             "DATABASE_URL": result["database_url"],
             "LANGGRAPH_DATABASE_URL": result["langgraph_database_url"],
             "POSTGRESQL18_ROOT": req.postgresql_root,
@@ -1236,7 +1282,6 @@ async def create_agent_project(req: AgentProjectCreateRequest):
 
 @router.get("/projects/diagnostics")
 async def project_list_diagnostics():
-    schema_status = await verify_project_schema()
     """
     Frontend -> FastAPI -> PostgreSQL 프로젝트 목록 경로를 진단합니다.
     실패 시 Backend 로그 전체 경로를 함께 반환합니다.
@@ -1251,7 +1296,9 @@ async def project_list_diagnostics():
     backend_log = log_dir / "system_manager.log"
     api_log = log_dir / "api_projects.log"
 
+    schema_status = {"ok": False, "message": "DB 연결 확인 전"}
     try:
+        schema_status = await verify_project_schema()
         async with SessionLocal() as session:
             count = (
                 await session.execute(
@@ -1423,20 +1470,21 @@ async def database_health():
 
 @router.get("/projects")
 async def list_agent_projects():
-    async with SessionLocal() as session:
-        rows = (
-            await session.execute(
-                select(Project).order_by(
-                    Project.last_opened_at.desc().nullslast(),
-                    Project.last_opened_at.desc().nullslast(),
-                    Project.id.desc(),
+    try:
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(Project).order_by(
+                        Project.last_opened_at.desc().nullslast(),
+                        Project.id.desc(),
+                    )
                 )
-            )
-        ).scalars().all()
+            ).scalars().all()
+    except Exception:
+        # 공용 DB가 오프라인/인증 실패여도 Frontend 전체가 500으로 무너지지 않게
+        # 빈 목록을 반환합니다. 상세 원인은 /health/database와 /projects/diagnostics에서 확인합니다.
+        return []
 
-    # 프로젝트 목록 조회 자체도 런타임 허용 경로를 보강합니다.
-    # 시작 시 오프라인이었던 드라이브/폴더가 나중에 다시 연결된 경우에도
-    # 사용자가 프로젝트 목록을 여는 순간 정상 접근할 수 있습니다.
     for project in rows:
         try:
             register_runtime_project_root(project.root_path)
@@ -1461,7 +1509,6 @@ async def list_agent_projects():
         }
         for p in rows
     ]
-
 
 
 @router.get("/system/db-runtime")
@@ -1698,7 +1745,7 @@ async def sql_workspace_postgresql_admin_script(req: SqlWorkspaceDatabaseAdminSc
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.265", "build": "UserEditableUniquePcNameFix"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.274", "build": "BalancedSystemSettingsColumnsLayoutFix"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -3005,6 +3052,12 @@ async def execute_python_editor_code(payload: dict):
     session_id = str(payload.get("session_id") or "default").strip() or "default"
     mode = str(payload.get("mode") or "selection").strip().lower()
     capture_last_expression = bool(payload.get("capture_last_expression"))
+    notebook_mode = bool(payload.get("notebook_mode"))
+    raw_cell_index = payload.get("cell_index")
+    try:
+        cell_index = int(raw_cell_index) if raw_cell_index is not None else None
+    except (TypeError, ValueError):
+        cell_index = None
 
     if not root:
         raise HTTPException(status_code=400, detail="root가 필요합니다.")
@@ -3022,6 +3075,8 @@ async def execute_python_editor_code(payload: dict):
             session_id=session_id,
             reset=(mode == "full"),
             capture_last_expression=capture_last_expression,
+            notebook_mode=notebook_mode,
+            cell_index=cell_index,
         )
         return result
     except (FileNotFoundError, ValueError) as exc:
@@ -4099,7 +4154,7 @@ async def workflow_start_job(req: WorkflowStartRequest):
 
 @router.post("/workflow/start")
 async def workflow_start(req: WorkflowStartRequest):
-    """호환용 동기 Endpoint. Frontend v5.265은 /workflow/start-job을 사용하며 시작 전 Backend 버전을 검증합니다."""
+    """호환용 동기 Endpoint. Frontend v5.274은 /workflow/start-job을 사용하며 시작 전 Backend 버전을 검증합니다."""
     thread_id = req.thread_id or uuid.uuid4().hex
     return await _execute_workflow_with_diagnostics(
         req=req,
