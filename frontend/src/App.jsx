@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { api, connectJobs, runtimeInfo } from './api'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.276'
+const AGENTSTUDIO_FRONTEND_VERSION='5.282'
 
 const joinWin = (root, file) => `${root}\\${file}`.replaceAll('\\\\', '\\')
 const localIsoDate = () => {
@@ -15,6 +15,47 @@ const localIsoDate = () => {
 }
 const localIsoMonth = () => localIsoDate().slice(0,7)
 const normalizeProjectRelativePath=(value='')=>String(value||'').replace(/\\/g,'/').replace(/^\/+/, '')
+const formatRedisBytes=(value)=>{
+  const bytes=Number(value)
+  if(!Number.isFinite(bytes)||bytes<0) return '-'
+  if(bytes<1024) return `${bytes} B`
+  if(bytes<1024*1024) return `${(bytes/1024).toFixed(bytes<10240?1:0)} KB`
+  return `${(bytes/(1024*1024)).toFixed(1)} MB`
+}
+const redisTtlLabel=(ttl)=>{
+  const value=Number(ttl)
+  if(value===-1) return 'No limit'
+  if(value===-2||!Number.isFinite(value)) return '-'
+  if(value<60) return `${value}s`
+  if(value<3600) return `${Math.floor(value/60)}m ${value%60}s`
+  if(value<86400) return `${Math.floor(value/3600)}h ${Math.floor((value%3600)/60)}m`
+  return `${Math.floor(value/86400)}d ${Math.floor((value%86400)/3600)}h`
+}
+const buildRedisKeyTree=(keys=[])=>{
+  const root={name:'',path:'',children:new Map(),items:[]}
+  for(const item of Array.isArray(keys)?keys:[]){
+    const full=String(item?.key||'')
+    if(!full) continue
+    const parts=full.split(':')
+    const leaf=parts.pop()||full
+    let node=root
+    let path=''
+    for(const part of parts){
+      path=path?`${path}:${part}`:part
+      if(!node.children.has(part)) node.children.set(part,{name:part,path,children:new Map(),items:[]})
+      node=node.children.get(part)
+    }
+    node.items.push({...item,label:leaf})
+  }
+  const finalize=(node)=>({
+    name:node.name,
+    path:node.path,
+    children:[...node.children.values()].sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base'})).map(finalize),
+    items:node.items.sort((a,b)=>String(a.label||'').localeCompare(String(b.label||''),undefined,{sensitivity:'base'}))
+  })
+  return finalize(root)
+}
+const countRedisTreeKeys=(node)=>(node?.items||[]).length+(node?.children||[]).reduce((sum,child)=>sum+countRedisTreeKeys(child),0)
 
 const getEditorLanguage=(filePath='')=>{
   const normalized=String(filePath||'').replace(/\\/g,'/').toLowerCase()
@@ -3272,6 +3313,7 @@ function IDE() {
   })
   const [sqlConnections,setSqlConnections]=useState([])
   const [sqlSupabaseConnectionUrl,setSqlSupabaseConnectionUrl]=useState('')
+  const [sqlConnectionImport,setSqlConnectionImport]=useState({busy:false,db_type:'',source_name:'',message:'',error:''})
   const [sqlDatabaseManual,setSqlDatabaseManual]=useState(false)
   const [sqlConnectionStatus,setSqlConnectionStatus]=useState(null)
   const [sqlConnectionBusy,setSqlConnectionBusy]=useState(false)
@@ -3289,6 +3331,17 @@ function IDE() {
   const [sqlDbObjectsBusy,setSqlDbObjectsBusy]=useState(false)
   const [sqlDbObjectsError,setSqlDbObjectsError]=useState('')
   const [sqlDbObjectExpanded,setSqlDbObjectExpanded]=useState({})
+  const [redisBrowser,setRedisBrowser]=useState(null)
+  const [redisBrowserBusy,setRedisBrowserBusy]=useState(false)
+  const [redisBrowserError,setRedisBrowserError]=useState('')
+  const [redisKeyFilter,setRedisKeyFilter]=useState('')
+  const [redisTypeFilter,setRedisTypeFilter]=useState('all')
+  const [redisSelectedKey,setRedisSelectedKey]=useState('')
+  const [redisKeyDetail,setRedisKeyDetail]=useState(null)
+  const [redisKeyDetailBusy,setRedisKeyDetailBusy]=useState(false)
+  const [redisKeyExpanded,setRedisKeyExpanded]=useState({})
+  const [redisContextMenu,setRedisContextMenu]=useState(null)
+  const [redisScriptBusy,setRedisScriptBusy]=useState('')
   const [sqlObjectActionBusy,setSqlObjectActionBusy]=useState('')
   const [sqlObjectContextMenu,setSqlObjectContextMenu]=useState(null)
   const [sqlDatabaseContextMenu,setSqlDatabaseContextMenu]=useState(null)
@@ -3606,6 +3659,8 @@ function IDE() {
         ? {...common,name:'Google Cloud Firestore 연결',db_type:'firestore',database:'(default)',driver:'google-cloud-firestore',dashboard_url:'https://console.cloud.google.com/firestore/databases'}
         : kind==='supabase'
           ? {...common,name:'Supabase 연결',db_type:'supabase',host:'',port:5432,database:'postgres',username:'postgres',driver:'psycopg',dashboard_url:'https://supabase.com/dashboard',ssl_mode:'require'}
+          : kind==='redis'
+            ? {...common,name:'Redis 연결',db_type:'redis',host:'127.0.0.1',port:6379,database:'0',username:'',driver:'redis-py'}
           : kind==='mssql'
             ? {...common,name:'MSSQL 연결',db_type:'mssql',host:'127.0.0.1',port:1433,driver:'ODBC Driver 18 for SQL Server'}
             : kind==='oracle'
@@ -3632,6 +3687,70 @@ function IDE() {
       setSqlMessages(prev=>[{type:'info',text:'Supabase Connection URL을 Host/Port/Database/User/Password로 분해했습니다. 원본 URL은 저장하지 않습니다.',time:new Date().toLocaleTimeString()},...prev].slice(0,100))
     }catch(e){
       setSqlMessages(prev=>[{type:'error',text:`Supabase Connection URL 형식 확인 필요: ${e}`,time:new Date().toLocaleTimeString()},...prev].slice(0,100))
+    }
+  }
+
+  const importSqlConnectionFile=async(dbType)=>{
+    const kind=String(dbType||'').toLowerCase()
+    if(!['supabase','firestore','redis'].includes(kind)) return
+    const workspaceRoot=activeWorkspaceRoot
+    if(!workspaceRoot){
+      setSqlConnectionImport({busy:false,db_type:kind,source_name:'',message:'',error:'먼저 프로젝트를 선택하세요.'})
+      return
+    }
+    setSqlConnectionImport({busy:true,db_type:kind,source_name:'',message:'파일 선택창을 여는 중...',error:''})
+    try{
+      const result=await api('/sql/import-connection-file',{
+        method:'POST',
+        body:JSON.stringify({root:workspaceRoot,db_type:kind,initial_path:workspaceRoot})
+      })
+      if(result?.cancelled){
+        setSqlConnectionImport({busy:false,db_type:kind,source_name:'',message:'파일 선택을 취소했습니다.',error:''})
+        return
+      }
+      const imported=result?.profile||{}
+      const detected=Array.isArray(result?.detected_fields)?result.detected_fields:[]
+      const detectedKind=String(result?.db_type||imported?.db_type||kind).toLowerCase()
+      const targetKind=['supabase','firestore','redis'].includes(detectedKind)?detectedKind:kind
+      setSqlProfile(prev=>{
+        const defaults=sqlProfileForType(targetKind)
+        const previousDefaultName=sqlProfileForType(prev.db_type||kind).name
+        const providerChanged=targetKind!==kind
+        const keepName=providerChanged
+          ? defaults.name
+          : ((!prev.name||prev.name===previousDefaultName)?defaults.name:prev.name)
+        const hasImportedPassword=Object.prototype.hasOwnProperty.call(imported,'password')&&String(imported.password||'')!==''
+        return {
+          ...defaults,
+          ...(providerChanged?{}:prev),
+          ...imported,
+          db_type:targetKind,
+          connection_id:providerChanged?'':(prev.connection_id||''),
+          name:keepName,
+          password:Object.prototype.hasOwnProperty.call(imported,'password')?String(imported.password||''):(providerChanged?'':(prev.password||'')),
+          credential_saved:hasImportedPassword?false:(providerChanged?false:!!prev.credential_saved)
+        }
+      })
+      setSqlDatabaseManual(true)
+      if(kind==='supabase'||targetKind==='supabase') setSqlSupabaseConnectionUrl('')
+      const safeFields=detected.map(field=>field==='password'?'password(감지됨)':field).join(', ')
+      const switched=targetKind!==kind?` · 파일 형식 감지: ${sqlProfileForType(targetKind).name}`:''
+      const text=String(result?.message||`${result?.source_name||'연결 파일'} 분석 완료`) + switched + (safeFields?` · ${safeFields}`:'')
+      setSqlConnectionImport({busy:false,db_type:targetKind,source_name:result?.source_name||'',message:text,error:''})
+      setSqlMessages(prev=>[{type:'info',text,time:new Date().toLocaleTimeString()},...prev].slice(0,100))
+    }catch(e){
+      let text=String(e?.message||e||'연결 설정 파일 분석 실패')
+      try{
+        const raw=String(e?.responseBody||'')
+        if(raw){
+          const parsed=JSON.parse(raw)
+          const detail=parsed?.detail
+          text=String((detail&&typeof detail==='object'?(detail.message||detail.detail):detail)||text)
+        }
+      }catch{}
+      text=text.replace(/^Backend HTTP \d+:\s*/,'').trim()
+      setSqlConnectionImport({busy:false,db_type:kind,source_name:'',message:'',error:text})
+      setSqlMessages(prev=>[{type:'error',text:`연결 설정 파일 확인 필요: ${text}`,time:new Date().toLocaleTimeString()},...prev].slice(0,100))
     }
   }
 
@@ -3672,12 +3791,18 @@ function IDE() {
   const newSqlWorkspaceConnection=(dbType=sqlProfile.db_type||'postgresql')=>{
     const fresh=sqlProfileForType(dbType)
     setSqlSupabaseConnectionUrl('')
+    setSqlConnectionImport({busy:false,db_type:'',source_name:'',message:'',error:''})
     setSqlDatabaseManual(false)
     setSqlProfile(fresh)
     setSqlConnectionStatus(prev=>prev?{...prev,connected:false,connected_at:null,profile:fresh}:prev)
     setSqlDbObjects(null)
     setSqlDbObjectsError('')
     setSqlDbObjectExpanded({})
+    setRedisBrowser(null)
+    setRedisBrowserError('')
+    setRedisSelectedKey('')
+    setRedisKeyDetail(null)
+    setRedisKeyExpanded({})
   }
 
   const selectSqlWorkspaceConnection=async(connectionId)=>{
@@ -3695,11 +3820,19 @@ function IDE() {
         body:JSON.stringify({root:activeWorkspaceRoot,connection_id:cid})
       })
       applySqlWorkspaceStatus(status,{preservePassword:false})
-      if(status?.connected&&status?.profile?.db_type!=='firestore') await loadSqlDbObjects({quiet:true})
-      else{
+      if(status?.connected&&status?.profile?.db_type==='redis'){
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
         setSqlDbObjectExpanded({})
+        await loadRedisKeys({quiet:true,preserveSelection:false})
+      }else if(status?.connected&&status?.profile?.db_type!=='firestore'){
+        resetRedisBrowser()
+        await loadSqlDbObjects({quiet:true})
+      }else{
+        setSqlDbObjects(null)
+        setSqlDbObjectsError('')
+        setSqlDbObjectExpanded({})
+        resetRedisBrowser()
       }
       if(status?.profile?.db_type==='sqlite3') await loadSqliteProjectStatus({quiet:true})
     }catch(e){
@@ -3732,7 +3865,7 @@ function IDE() {
   const loadSqlDbObjects=async({quiet=false}={})=>{
     const workspaceRoot=activeWorkspaceRoot
     if(!workspaceRoot) return null
-    if(String(sqlProfile.db_type||'').toLowerCase()==='firestore'){
+    if(['firestore','redis'].includes(String(sqlProfile.db_type||'').toLowerCase())){
       setSqlDbObjects(null)
       setSqlDbObjectsError('')
       return null
@@ -3762,6 +3895,195 @@ function IDE() {
       if(!quiet) setSqlDbObjectsBusy(false)
     }
   }
+
+  const resetRedisBrowser=()=>{
+    setRedisBrowser(null)
+    setRedisBrowserError('')
+    setRedisSelectedKey('')
+    setRedisKeyDetail(null)
+    setRedisKeyExpanded({})
+    setRedisContextMenu(null)
+  }
+
+  const loadRedisKeyDetail=async(key,{quiet=false}={})=>{
+    const workspaceRoot=activeWorkspaceRoot
+    const keyName=String(key||'')
+    if(!workspaceRoot||!keyName) return null
+    if(!quiet) setRedisKeyDetailBusy(true)
+    try{
+      const detail=await api(`/sql/redis/key?root=${encodeURIComponent(workspaceRoot)}&key=${encodeURIComponent(keyName)}&max_items=500`)
+      setRedisSelectedKey(keyName)
+      setRedisKeyDetail(detail)
+      return detail
+    }catch(e){
+      setRedisKeyDetail(null)
+      setRedisBrowserError(String(e))
+      return null
+    }finally{
+      if(!quiet) setRedisKeyDetailBusy(false)
+    }
+  }
+
+  const loadRedisKeys=async({quiet=false,preserveSelection=true}={})=>{
+    const workspaceRoot=activeWorkspaceRoot
+    if(!workspaceRoot) return null
+    if(!quiet) setRedisBrowserBusy(true)
+    setRedisBrowserError('')
+    try{
+      const raw=String(redisKeyFilter||'').trim()
+      const hasGlob=/[*?\[]/.test(raw)
+      const pattern=raw?(hasGlob?raw:`*${raw}*`):'*'
+      const result=await api(`/sql/redis/keys?root=${encodeURIComponent(workspaceRoot)}&pattern=${encodeURIComponent(pattern)}&limit=2000`)
+      setRedisBrowser(result)
+      const keys=Array.isArray(result?.keys)?result.keys:[]
+      const previous=preserveSelection?String(redisSelectedKey||''):''
+      const nextKey=previous&&keys.some(item=>String(item?.key||'')===previous)?previous:(keys[0]?.key||'')
+      if(nextKey){
+        await loadRedisKeyDetail(nextKey,{quiet:true})
+      }else{
+        setRedisSelectedKey('')
+        setRedisKeyDetail(null)
+      }
+      return result
+    }catch(e){
+      setRedisBrowser(null)
+      setRedisKeyDetail(null)
+      setRedisBrowserError(String(e))
+      return null
+    }finally{
+      if(!quiet) setRedisBrowserBusy(false)
+    }
+  }
+
+  const toggleRedisKeyGroup=(path)=>{
+    setRedisKeyExpanded(prev=>({...prev,[path]:prev[path]===false?true:false}))
+  }
+
+  const openRedisContextMenu=(event,node)=>{
+    if(!sqlConnectionStatus?.connected||String(sqlProfile.db_type||'').toLowerCase()!=='redis') return
+    event.preventDefault()
+    event.stopPropagation()
+    const menuWidth=286
+    const menuHeight=390
+    const x=Math.max(8,Math.min(event.clientX,window.innerWidth-menuWidth-8))
+    const y=Math.max(8,Math.min(event.clientY,window.innerHeight-menuHeight-8))
+    const payload={
+      x,y,
+      nodeKind:node?.kind==='group'?'group':'key',
+      key:String(node?.key||''),
+      keyType:String(node?.keyType||''),
+      prefix:String(node?.prefix||''),
+      label:String(node?.label||node?.key||node?.prefix||'Redis'),
+    }
+    if(payload.nodeKind==='key'&&payload.key){
+      setRedisSelectedKey(payload.key)
+      if(redisSelectedKey!==payload.key) loadRedisKeyDetail(payload.key,{quiet:true})
+    }
+    setSqlObjectContextMenu(null)
+    setSqlDatabaseContextMenu(null)
+    setRedisContextMenu(payload)
+  }
+
+  const createRedisPythonScript=async(action)=>{
+    const menu=redisContextMenu
+    if(!menu||!activeWorkspaceRoot||!sqlConnectionStatus?.connected||redisScriptBusy) return
+    const normalized=String(action||'').toLowerCase()
+    setRedisContextMenu(null)
+    setRedisScriptBusy(normalized)
+    try{
+      const response=await api('/sql/redis/script',{
+        method:'POST',
+        body:JSON.stringify({
+          root:activeWorkspaceRoot,
+          action:normalized,
+          key:menu.key||'',
+          key_type:menu.keyType||'',
+          prefix:menu.prefix||'',
+          node_kind:menu.nodeKind||'key',
+        })
+      })
+      if(response?.relative_path){
+        await loadFiles()
+        await openFile(response.relative_path)
+      }
+      setSqlResultTab('MESSAGES')
+      setSqlMessages(prev=>[{
+        type:'success',
+        text:response?.message||'Redis 임시 Python 코드를 생성했습니다.',
+        time:new Date().toLocaleTimeString()
+      },...prev].slice(0,100))
+    }catch(e){
+      setSqlResultTab('MESSAGES')
+      setSqlMessages(prev=>[{
+        type:'error',
+        text:`Redis Python 코드 생성 실패: ${e}`,
+        time:new Date().toLocaleTimeString()
+      },...prev].slice(0,100))
+    }finally{
+      setRedisScriptBusy('')
+    }
+  }
+
+  const renderRedisTreeNodes=(node,level=0)=>{
+    if(!node) return null
+    return <>
+      {(node.children||[]).map(child=>{
+        const open=redisKeyExpanded[child.path]!==false
+        const descendantCount=countRedisTreeKeys(child)
+        return <div className="redis-tree-group" key={`redis-group:${child.path}`}>
+          <button
+            type="button"
+            className="redis-tree-row group"
+            style={{paddingLeft:`${8+level*14}px`}}
+            onClick={()=>toggleRedisKeyGroup(child.path)}
+            onContextMenu={(event)=>openRedisContextMenu(event,{kind:'group',prefix:child.path,label:child.path})}
+            title={`${child.path} · 우클릭: Redis Python 코드 생성`}
+          >
+            <span className="redis-tree-caret">{open?'⌄':'›'}</span>
+            <span className="redis-tree-folder">▱</span>
+            <strong>{child.name}</strong>
+            <em>{descendantCount||''}</em>
+          </button>
+          {open&&renderRedisTreeNodes(child,level+1)}
+        </div>
+      })}
+      {(node.items||[]).map(item=>{
+        const type=String(item?.type||'unknown').toLowerCase()
+        const active=redisSelectedKey===item.key
+        const fullKey=String(item?.key||'')
+        const parentPrefix=fullKey.includes(':')?fullKey.split(':').slice(0,-1).join(':'):''
+        return <button
+          type="button"
+          key={`redis-key:${item.key}`}
+          className={`redis-tree-row key ${active?'active':''}`}
+          style={{paddingLeft:`${24+level*14}px`}}
+          onClick={()=>loadRedisKeyDetail(item.key)}
+          onContextMenu={(event)=>openRedisContextMenu(event,{kind:'key',key:fullKey,keyType:type,prefix:parentPrefix,label:fullKey})}
+          title={`${item.key} · 우클릭: 연결/조회/등록/수정/삭제 Python 코드 생성`}
+        >
+          <span className={`redis-type-badge ${type}`}>{type.toUpperCase()}</span>
+          <code>{item.label||item.key}</code>
+          <small>{redisTtlLabel(item.ttl)}</small>
+        </button>
+      })}
+    </>
+  }
+
+  useEffect(()=>{
+    if(!redisContextMenu) return
+    const close=()=>setRedisContextMenu(null)
+    const onKey=(event)=>{if(event.key==='Escape') close()}
+    window.addEventListener('mousedown',close)
+    window.addEventListener('scroll',close,true)
+    window.addEventListener('resize',close)
+    window.addEventListener('keydown',onKey,true)
+    return ()=>{
+      window.removeEventListener('mousedown',close)
+      window.removeEventListener('scroll',close,true)
+      window.removeEventListener('resize',close)
+      window.removeEventListener('keydown',onKey,true)
+    }
+  },[redisContextMenu])
 
   const toggleSqlDbObject=(key)=>{
     setSqlDbObjectExpanded(prev=>({...prev,[key]:!prev[key]}))
@@ -4052,12 +4374,19 @@ function IDE() {
       const rootChanged=sqlLoadedRootRef.current!==workspaceRoot
       sqlLoadedRootRef.current=workspaceRoot
       applySqlWorkspaceStatus(status,{preservePassword:!rootChanged})
-      if(status?.connected&&status?.profile?.db_type!=='firestore'){
+      if(status?.connected&&status?.profile?.db_type==='redis'){
+        setSqlDbObjects(null)
+        setSqlDbObjectsError('')
+        setSqlDbObjectExpanded({})
+        await loadRedisKeys({quiet:true})
+      }else if(status?.connected&&status?.profile?.db_type!=='firestore'){
+        resetRedisBrowser()
         await loadSqlDbObjects({quiet:true})
       }else{
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
         setSqlDbObjectExpanded({})
+        resetRedisBrowser()
       }
       return status
     }catch(e){
@@ -4106,11 +4435,19 @@ function IDE() {
       })
       applySqlWorkspaceStatus(status,{preservePassword:false})
       if(!status?.profile?.connection_id) newSqlWorkspaceConnection(sqlProfile.db_type)
-      if(status?.connected) await loadSqlDbObjects({quiet:true})
-      else{
+      if(status?.connected&&status?.profile?.db_type==='redis'){
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
         setSqlDbObjectExpanded({})
+        await loadRedisKeys({quiet:true,preserveSelection:false})
+      }else if(status?.connected&&status?.profile?.db_type!=='firestore'){
+        resetRedisBrowser()
+        await loadSqlDbObjects({quiet:true})
+      }else{
+        setSqlDbObjects(null)
+        setSqlDbObjectsError('')
+        setSqlDbObjectExpanded({})
+        resetRedisBrowser()
       }
       setSqlMessages(prev=>[{type:'info',text:`DB 연결 '${label}'을 삭제했습니다.`,time:new Date().toLocaleTimeString()},...prev].slice(0,100))
     }catch(e){
@@ -4134,11 +4471,19 @@ function IDE() {
         text:`${status?.profile?.name||String(status?.profile?.db_type||sqlProfile.db_type).toUpperCase()} 연결 성공${status?.profile?.credential_saved?' · 저장된 보안 자격증명 사용 가능':''}`,
         time:new Date().toLocaleTimeString()
       },...prev].slice(0,100))
-      if((status?.profile?.db_type||sqlProfile.db_type)!=='firestore') await loadSqlDbObjects({quiet:true})
-      else{
+      if((status?.profile?.db_type||sqlProfile.db_type)==='redis'){
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
         setSqlDbObjectExpanded({})
+        await loadRedisKeys({quiet:true,preserveSelection:false})
+      }else if((status?.profile?.db_type||sqlProfile.db_type)!=='firestore'){
+        resetRedisBrowser()
+        await loadSqlDbObjects({quiet:true})
+      }else{
+        setSqlDbObjects(null)
+        setSqlDbObjectsError('')
+        setSqlDbObjectExpanded({})
+        resetRedisBrowser()
       }
       if((status?.profile?.db_type||sqlProfile.db_type)==='sqlite3') await loadSqliteProjectStatus({quiet:true})
     }catch(e){
@@ -4161,6 +4506,7 @@ function IDE() {
       setSqlDbObjects(null)
       setSqlDbObjectsError('')
       setSqlDbObjectExpanded({})
+      resetRedisBrowser()
       setSqlMessages(prev=>[{type:'info',text:`${sqlProfile.name||'데이터베이스'} 연결을 해제했습니다.`,time:new Date().toLocaleTimeString()},...prev].slice(0,100))
     }catch(e){
       setSqlMessages(prev=>[{type:'error',text:`연결 해제 실패: ${e}`,time:new Date().toLocaleTimeString()},...prev].slice(0,100))
@@ -14371,7 +14717,7 @@ function IDE() {
             <input
               value={sqlProfile.name||''}
               onChange={e=>setSqlProfile(prev=>({...prev,name:e.target.value}))}
-              placeholder="예: 운영 MSSQL / 개발 PostgreSQL / Supabase / Firestore"
+              placeholder="예: 운영 MSSQL / 개발 PostgreSQL / Supabase / Firestore / Redis"
             />
           </label>
 
@@ -14380,6 +14726,7 @@ function IDE() {
             <select value={sqlProfile.db_type} onChange={e=>{
               const nextType=e.target.value
               setSqlSupabaseConnectionUrl('')
+              setSqlConnectionImport({busy:false,db_type:'',source_name:'',message:'',error:''})
               setSqlProfile(prev=>{
                 const previousDefaultName=sqlProfileForType(prev.db_type||'postgresql').name
                 const nextDefaultName=sqlProfileForType(nextType).name
@@ -14396,6 +14743,7 @@ function IDE() {
               <option value="postgresql">PostgreSQL</option>
               <option value="supabase">Supabase (PostgreSQL)</option>
               <option value="firestore">Google Cloud Firestore</option>
+              <option value="redis">Redis (Key-Value)</option>
               <option value="mssql">MSSQL</option>
               <option value="oracle">Oracle</option>
               <option value="sqlite3">SQLite3</option>
@@ -14404,6 +14752,17 @@ function IDE() {
 
           {sqlProfile.db_type==='firestore'
             ? <>
+                <div className="sql-connection-import-card">
+                  <div>
+                    <strong>Firestore Service Account JSON 자동 등록</strong>
+                    <small>Google Cloud/Firebase Service Account JSON을 분석해 Project ID와 JSON 파일 경로를 자동 등록합니다. Private Key 내용은 설정에 복사하지 않습니다.</small>
+                  </div>
+                  <button type="button" onClick={()=>importSqlConnectionFile('firestore')} disabled={sqlConnectionImport.busy}>
+                    {sqlConnectionImport.busy&&sqlConnectionImport.db_type==='firestore'?'분석 중...':'Service Account JSON 찾기 / 로드'}
+                  </button>
+                  {sqlConnectionImport.db_type==='firestore'&&sqlConnectionImport.message&&<p className="ok">{sqlConnectionImport.message}</p>}
+                  {sqlConnectionImport.db_type==='firestore'&&sqlConnectionImport.error&&<p className="error">{sqlConnectionImport.error}</p>}
+                </div>
                 <label className="sql-field">
                   <span>Google Cloud Project ID</span>
                   <input value={sqlProfile.project_id||''} onChange={e=>setSqlProfile(prev=>({...prev,project_id:e.target.value}))} placeholder="예: my-firebase-project"/>
@@ -14420,6 +14779,46 @@ function IDE() {
                   <div><span>드라이버</span><code>google-cloud-firestore</code></div>
                   <div><span>구조</span><code>Collection → Document → Field</code></div>
                   <small>Service Account JSON 파일 자체의 내용은 AgentStudio 설정에 저장하지 않고 파일 경로만 저장합니다.</small>
+                </div>
+              </>
+            : sqlProfile.db_type==='redis'
+            ? <>
+                <div className="sql-connection-import-card">
+                  <div>
+                    <strong>Redis 연결 파일 자동 등록</strong>
+                    <small>Python/JSON/.env 파일에서 Redis 연결 정보를 분석합니다. Python 파일은 실행하지 않고 AST로만 읽습니다.</small>
+                  </div>
+                  <button type="button" onClick={()=>importSqlConnectionFile('redis')} disabled={sqlConnectionImport.busy}>
+                    {sqlConnectionImport.busy&&sqlConnectionImport.db_type==='redis'?'분석 중...':'파일 찾기 / 로드'}
+                  </button>
+                  {sqlConnectionImport.db_type==='redis'&&sqlConnectionImport.message&&<p className="ok">{sqlConnectionImport.message}</p>}
+                  {sqlConnectionImport.db_type==='redis'&&sqlConnectionImport.error&&<p className="error">{sqlConnectionImport.error}</p>}
+                </div>
+                <div className="sql-field-grid two">
+                  <label className="sql-field"><span>Host</span><input value={sqlProfile.host||''} onChange={e=>setSqlProfile(prev=>({...prev,host:e.target.value}))} placeholder="127.0.0.1"/></label>
+                  <label className="sql-field"><span>Port</span><input type="number" value={sqlProfile.port||6379} onChange={e=>setSqlProfile(prev=>({...prev,port:Number(e.target.value)||6379}))} placeholder="6379"/></label>
+                </div>
+                <label className="sql-field">
+                  <span>Redis DB index</span>
+                  <input type="number" min="0" value={sqlProfile.database??'0'} onChange={e=>setSqlProfile(prev=>({...prev,database:String(Math.max(0,Number(e.target.value)||0))}))} placeholder="0"/>
+                </label>
+                <label className="sql-field">
+                  <span>사용자 (ACL 사용 시)</span>
+                  <input value={sqlProfile.username||''} onChange={e=>setSqlProfile(prev=>({...prev,username:e.target.value}))} placeholder="비워두면 기본 사용자"/>
+                </label>
+                <label className="sql-field">
+                  <span>비밀번호 {sqlProfile.credential_saved&&<em className="sql-credential-saved">Windows 보안 저장됨</em>}</span>
+                  <input
+                    type="password"
+                    value={sqlProfile.password||''}
+                    onChange={e=>setSqlProfile(prev=>({...prev,password:e.target.value}))}
+                    placeholder={sqlProfile.credential_saved?'저장된 비밀번호 사용 · 변경할 때만 새 비밀번호 입력':'비밀번호가 없으면 비워두세요'}
+                  />
+                </label>
+                <div className="sql-connection-info">
+                  <div><span>드라이버</span><code>redis-py</code></div>
+                  <div><span>구조</span><code>Key → Value · String / Hash / List / Set / ZSet</code></div>
+                  <small>Redis는 SQL DB가 아니라 NoSQL Key-Value 데이터베이스입니다. 연결/인증/PING 테스트를 지원하며 SQL 실행은 사용하지 않습니다.</small>
                 </div>
               </>
             : sqlProfile.db_type==='sqlite3'
@@ -14460,6 +14859,17 @@ function IDE() {
               </>
             : <>
                 {sqlProfile.db_type==='supabase'&&<>
+                  <div className="sql-connection-import-card">
+                    <div>
+                      <strong>Supabase JSON 자동 등록</strong>
+                      <small>JSON의 PostgreSQL URL 또는 Host/Port/Database/User/Password/SSL 정보를 분석해 아래 입력란에 자동 등록합니다.</small>
+                    </div>
+                    <button type="button" onClick={()=>importSqlConnectionFile('supabase')} disabled={sqlConnectionImport.busy}>
+                      {sqlConnectionImport.busy&&sqlConnectionImport.db_type==='supabase'?'분석 중...':'JSON 파일 찾기 / 로드'}
+                    </button>
+                    {sqlConnectionImport.db_type==='supabase'&&sqlConnectionImport.message&&<p className="ok">{sqlConnectionImport.message}</p>}
+                    {sqlConnectionImport.db_type==='supabase'&&sqlConnectionImport.error&&<p className="error">{sqlConnectionImport.error}</p>}
+                  </div>
                   <label className="sql-field">
                     <span>Supabase Connection URL</span>
                     <input
@@ -14555,28 +14965,112 @@ function IDE() {
                 ? 'Firestore는 NoSQL 문서형 DB입니다. AgentStudio에서는 Project/Database/Service Account 경로를 저장하고 연결을 테스트합니다.'
                 : sqlProfile.db_type==='supabase'
                   ? 'Supabase는 PostgreSQL 기반 관리형 플랫폼으로 psycopg와 SSL(require)을 사용해 SQL Workspace에 연결합니다.'
-                  : '동일한 DB 종류도 연결 이름을 다르게 하여 여러 개 등록할 수 있습니다. Windows에서는 비밀번호를 DPAPI 현재 사용자 범위로 암호화하여 저장하며 평문으로 기록하지 않습니다.'}</small>
+                  : sqlProfile.db_type==='redis'
+                    ? 'Redis는 NoSQL Key-Value DB입니다. Host/Port/DB index/ACL 사용자/비밀번호를 저장하고 redis-py PING으로 연결한 뒤 Key Browser에서 데이터를 조회합니다.'
+                    : '동일한 DB 종류도 연결 이름을 다르게 하여 여러 개 등록할 수 있습니다. Windows에서는 비밀번호를 DPAPI 현재 사용자 범위로 암호화하여 저장하며 평문으로 기록하지 않습니다.'}</small>
           </div>
 
           <div className="sql-object-explorer">
             <div className="sql-object-explorer-head">
               <div>
-                <strong>{sqlProfile.db_type==='firestore'?'Firestore 연결':'DB Object Explorer'}</strong>
-                <small>{sqlProfile.db_type==='firestore'?'NoSQL Document Database · Collection → Document → Field':'테이블 · 뷰 · 프로시저 · 함수 · 인덱스 · 시퀀스 · 트리거'}</small>
-                <small className="sql-object-doubleclick-help">{sqlProfile.db_type==='firestore'?'현재 버전에서는 Firestore 인증/연결 테스트를 지원하며 SQL 실행은 사용하지 않습니다.':'더블클릭: 테이블은 전체 컬럼 SELECT 조회 · 기타 객체는 수정용 임시 SQL 생성'}</small>
+                <strong>{sqlProfile.db_type==='firestore'?'Firestore 연결':sqlProfile.db_type==='redis'?'Redis 연결':'DB Object Explorer'}</strong>
+                <small>{sqlProfile.db_type==='firestore'?'NoSQL Document Database · Collection → Document → Field':sqlProfile.db_type==='redis'?'NoSQL Key-Value Database · String / Hash / List / Set / ZSet':'테이블 · 뷰 · 프로시저 · 함수 · 인덱스 · 시퀀스 · 트리거'}</small>
+                <small className="sql-object-doubleclick-help">{sqlProfile.db_type==='firestore'?'Firestore 인증/연결 테스트를 지원하며 SQL 실행은 사용하지 않습니다.':sqlProfile.db_type==='redis'?'Redis 인증/PING 후 Key Browser에서 실제 Key/Value를 읽기 전용으로 조회합니다. SQL 실행은 사용하지 않습니다.':'더블클릭: 테이블은 전체 컬럼 SELECT 조회 · 기타 객체는 수정용 임시 SQL 생성'}</small>
               </div>
               <button
                 type="button"
-                onClick={()=>loadSqlDbObjects()}
-                disabled={sqlProfile.db_type==='firestore'||!sqlConnectionStatus?.connected||sqlDbObjectsBusy}
-                title="DB 객체 목록 새로고침"
+                onClick={()=>sqlProfile.db_type==='redis'?loadRedisKeys():loadSqlDbObjects()}
+                disabled={sqlProfile.db_type==='firestore'||!sqlConnectionStatus?.connected||(sqlProfile.db_type==='redis'?redisBrowserBusy:sqlDbObjectsBusy)}
+                title={sqlProfile.db_type==='redis'?'Redis Key 목록 새로고침':'DB 객체 목록 새로고침'}
               >
-                {sqlDbObjectsBusy?'…':'↻'}
+                {(sqlProfile.db_type==='redis'?redisBrowserBusy:sqlDbObjectsBusy)?'…':'↻'}
               </button>
             </div>
 
             {sqlProfile.db_type==='firestore'
               ? <div className="sql-object-empty">{sqlConnectionStatus?.connected?'Firestore 인증 및 연결 테스트가 성공했습니다. 컬렉션/문서 작업은 프로젝트 코드에서 Google Cloud Firestore SDK를 사용하세요.':'Project ID와 인증 정보를 입력한 뒤 연결 / 테스트를 실행하세요.'}</div>
+              : sqlProfile.db_type==='redis'
+                ? (!sqlConnectionStatus?.connected
+                    ? <div className="sql-object-empty">Host/Port/DB index와 필요한 인증 정보를 입력한 뒤 연결 / 테스트를 실행하세요.</div>
+                    : (()=>{
+                        const allKeys=Array.isArray(redisBrowser?.keys)?redisBrowser.keys:[]
+                        const visibleKeys=redisTypeFilter==='all'?allKeys:allKeys.filter(item=>String(item?.type||'').toLowerCase()===redisTypeFilter)
+                        const tree=buildRedisKeyTree(visibleKeys)
+                        const detail=redisKeyDetail
+                        const detailType=String(detail?.type||'').toLowerCase()
+                        return <div className="redis-browser-shell">
+                          <div className="redis-browser-toolbar">
+                            <select value={redisTypeFilter} onChange={e=>setRedisTypeFilter(e.target.value)} title="Redis Key 타입 필터">
+                              <option value="all">All Key Types</option>
+                              <option value="string">STRING</option>
+                              <option value="hash">HASH</option>
+                              <option value="list">LIST</option>
+                              <option value="set">SET</option>
+                              <option value="zset">ZSET</option>
+                              <option value="stream">STREAM</option>
+                            </select>
+                            <div className="redis-key-search">
+                              <input
+                                value={redisKeyFilter}
+                                onChange={e=>setRedisKeyFilter(e.target.value)}
+                                onKeyDown={e=>{if(e.key==='Enter') loadRedisKeys({preserveSelection:false})}}
+                                placeholder="Filter by Key Name or Pattern"
+                              />
+                              <button type="button" onClick={()=>loadRedisKeys({preserveSelection:false})} disabled={redisBrowserBusy}>⌕</button>
+                            </div>
+                          </div>
+                          <div className="redis-browser-summary">
+                            <strong>Results: {visibleKeys.length}</strong>
+                            <span>Total keys {redisBrowser?.total_keys??'-'} · DB {redisBrowser?.database??sqlProfile.database??'0'}</span>
+                            <button type="button" onClick={()=>loadRedisKeys()} disabled={redisBrowserBusy}>{redisBrowserBusy?'조회 중...':'↻ 새로고침'}</button>
+                          </div>
+                          {redisBrowserError&&<div className="sql-object-error">{redisBrowserError}</div>}
+                          <div className="redis-browser-main">
+                            <div className="redis-key-pane">
+                              {redisBrowserBusy&&!redisBrowser
+                                ? <div className="sql-object-empty">Redis Key를 읽고 있습니다...</div>
+                                : visibleKeys.length
+                                  ? <div className="redis-key-tree">{renderRedisTreeNodes(tree)}</div>
+                                  : <div className="sql-object-empty">조건에 맞는 Redis Key가 없습니다.</div>}
+                            </div>
+                            <div className="redis-detail-pane">
+                              {redisKeyDetailBusy
+                                ? <div className="sql-object-empty">Key 상세 값을 읽고 있습니다...</div>
+                                : !detail
+                                  ? <div className="sql-object-empty">왼쪽 Key를 선택하면 값과 TTL 정보가 표시됩니다.</div>
+                                  : <>
+                                      <div className="redis-detail-head">
+                                        <div className="redis-detail-title">
+                                          <span className={`redis-type-badge large ${detailType}`}>{detailType.toUpperCase()}</span>
+                                          <strong title={detail.key}>{detail.key}</strong>
+                                        </div>
+                                        <button type="button" onClick={()=>loadRedisKeyDetail(detail.key)} disabled={redisKeyDetailBusy}>↻</button>
+                                      </div>
+                                      <div className="redis-detail-meta">
+                                        <span>Key Size: <strong>{formatRedisBytes(detail.size_bytes)}</strong></span>
+                                        <span>Length: <strong>{detail.length??'-'}</strong></span>
+                                        <span>TTL: <strong>{redisTtlLabel(detail.ttl)}</strong></span>
+                                      </div>
+                                      <div className="redis-detail-content">
+                                        {detailType==='string'
+                                          ? <pre className="redis-string-value">{String(detail.value??'')}</pre>
+                                          : detailType==='hash'
+                                            ? <table className="redis-value-table"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>{(detail.rows||[]).map((row,index)=><tr key={`${row.field}-${index}`}><td>{row.field}</td><td>{row.value}</td></tr>)}</tbody></table>
+                                            : ['list','set'].includes(detailType)
+                                              ? <table className="redis-value-table"><thead><tr><th>Index</th><th>Element</th></tr></thead><tbody>{(detail.rows||[]).map((row,index)=><tr key={`${row.index}-${index}`}><td>{row.index}</td><td>{row.value}</td></tr>)}</tbody></table>
+                                              : detailType==='zset'
+                                                ? <table className="redis-value-table"><thead><tr><th>Index</th><th>Member</th><th>Score</th></tr></thead><tbody>{(detail.rows||[]).map((row,index)=><tr key={`${row.member}-${index}`}><td>{row.index}</td><td>{row.member}</td><td>{row.score}</td></tr>)}</tbody></table>
+                                                : detailType==='stream'
+                                                  ? <table className="redis-value-table"><thead><tr><th>ID</th><th>Fields</th></tr></thead><tbody>{(detail.rows||[]).map((row,index)=><tr key={`${row.id}-${index}`}><td>{row.id}</td><td><code>{JSON.stringify(row.fields,null,2)}</code></td></tr>)}</tbody></table>
+                                                  : <pre className="redis-string-value">{String(detail.value??'')}</pre>}
+                                        {detail.truncated&&<div className="redis-detail-truncated">표시 성능을 위해 일부 데이터만 보여줍니다. 최대 {detail.max_items||500}개 항목</div>}
+                                      </div>
+                                      {detail.refreshed_at&&<div className="redis-detail-refreshed">Last refresh: {detail.refreshed_at.replace('T',' ')}</div>}
+                                    </>}
+                            </div>
+                          </div>
+                        </div>
+                      })())
               : !sqlConnectionStatus?.connected
               ? <div className="sql-object-empty">DB에 연결하면 개발 객체 목록이 표시됩니다.</div>
               : sqlDbObjectsBusy&&!sqlDbObjects
@@ -14673,6 +15167,35 @@ function IDE() {
 
             {sqlDbObjects?.refreshed_at&&
               <div className="sql-object-refreshed">최근 조회: {sqlDbObjects.refreshed_at.replace('T',' ')}</div>}
+
+            {redisContextMenu&&<div
+              className="sql-object-context-menu redis-context-menu"
+              style={{left:redisContextMenu.x,top:redisContextMenu.y}}
+              onMouseDown={event=>event.stopPropagation()}
+            >
+              <div className="sql-context-menu-title">
+                <strong>{redisContextMenu.label||'Redis'}</strong>
+                <small>{redisContextMenu.nodeKind==='group'?'Redis Key 그룹':'Redis Key'}{redisContextMenu.keyType?` · ${redisContextMenu.keyType.toUpperCase()}`:''}</small>
+              </div>
+              {[
+                ['connection','⛓','Redis 연결코드','현재 Host/Port/DB/User 기반 redis-py 연결 코드'],
+                ['list','☷','리스트 조회','선택 노드 범위 Key 또는 LIST 요소 조회'],
+                ['read','⌕','조회','Key 타입에 맞는 조회 명령 생성'],
+                ['create','＋','등록','Key 타입에 맞는 등록 예제'],
+                ['update','✎','수정','Key 타입에 맞는 수정 예제'],
+                ['delete','🗑','삭제','삭제 확인 가드가 포함된 안전한 삭제 예제'],
+              ].map(([action,icon,title,description])=><button
+                type="button"
+                key={action}
+                className={action==='delete'?'redis-menu-danger':''}
+                onClick={()=>createRedisPythonScript(action)}
+                disabled={!!redisScriptBusy}
+              >
+                <span>{icon}</span>
+                <div><strong>{title}</strong><small>{description}</small></div>
+              </button>)}
+              <div className="redis-context-note">임시 `.py` 파일만 생성하며 자동 실행하지 않습니다. 저장된 비밀번호는 파일에 평문으로 넣지 않습니다.</div>
+            </div>}
 
             {sqlObjectContextMenu&&<div
               className="sql-object-context-menu"

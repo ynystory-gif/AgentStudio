@@ -180,3 +180,146 @@ async def pick_folder(
         title,
         initial_path,
     )
+
+
+
+def _pick_file_windows(
+    title: str = "파일을 선택하세요.",
+    initial_path: str = "",
+    file_filter: str = "모든 파일 (*.*)|*.*",
+) -> dict:
+    """Windows OpenFileDialog를 TopMost owner와 함께 표시합니다."""
+    safe_title = _escape_ps_single(title)
+    safe_initial = _escape_ps_single(initial_path)
+    safe_filter = _escape_ps_single(file_filter)
+
+    script = rf"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+$owner = New-Object System.Windows.Forms.Form
+$owner.Text = 'THEANOVA AgentStudio'
+$owner.Width = 1
+$owner.Height = 1
+$owner.ShowInTaskbar = $false
+$owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedToolWindow
+$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$owner.TopMost = $true
+$owner.Opacity = 0
+
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = '{safe_title}'
+$dialog.Filter = '{safe_filter}'
+$dialog.CheckFileExists = $true
+$dialog.CheckPathExists = $true
+$dialog.Multiselect = $false
+$dialog.RestoreDirectory = $true
+
+$initial = '{safe_initial}'
+if ($initial -ne '') {{
+    if (Test-Path -LiteralPath $initial -PathType Container) {{
+        $dialog.InitialDirectory = $initial
+    }} elseif (Test-Path -LiteralPath $initial -PathType Leaf) {{
+        $dialog.InitialDirectory = Split-Path -Parent $initial
+        $dialog.FileName = Split-Path -Leaf $initial
+    }}
+}}
+
+try {{
+    $owner.Show()
+    $owner.Activate()
+    $owner.BringToFront()
+    $result = $dialog.ShowDialog($owner)
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {{
+        Write-Output ('__THEANOVA_FILE__=' + $dialog.FileName)
+    }} else {{
+        Write-Output '__THEANOVA_CANCELLED__=1'
+    }}
+}}
+finally {{
+    try {{ $dialog.Dispose() }} catch {{}}
+    try {{ $owner.Close() }} catch {{}}
+    try {{ $owner.Dispose() }} catch {{}}
+}}
+"""
+
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        proc = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-STA",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            creationflags=creationflags,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "cancelled": False, "path": "", "message": "파일 선택창 응답 시간이 초과되었습니다."}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "cancelled": False,
+            "path": "",
+            "message": f"파일 선택 프로세스 실행 실패: {exc}",
+            "traceback": traceback.format_exc()[-4000:],
+        }
+
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    if proc.returncode != 0:
+        return {
+            "ok": False,
+            "cancelled": False,
+            "path": "",
+            "message": stderr or stdout or f"파일 선택 프로세스 종료 코드: {proc.returncode}",
+        }
+
+    for line in stdout.splitlines():
+        if line.startswith("__THEANOVA_FILE__="):
+            selected = line.split("=", 1)[1].strip()
+            if selected:
+                return {"ok": True, "cancelled": False, "path": selected, "message": "파일을 선택했습니다."}
+
+    if "__THEANOVA_CANCELLED__=1" in stdout:
+        return {"ok": True, "cancelled": True, "path": "", "message": "파일 선택을 취소했습니다."}
+
+    return {
+        "ok": False,
+        "cancelled": False,
+        "path": "",
+        "message": "파일 선택 프로세스가 경로를 반환하지 않았습니다.",
+    }
+
+
+async def pick_file(
+    title: str = "파일을 선택하세요.",
+    initial_path: str = "",
+    file_filter: str = "모든 파일 (*.*)|*.*",
+) -> dict:
+    if os.name != "nt":
+        return {
+            "ok": False,
+            "cancelled": False,
+            "path": "",
+            "message": "현재 파일 선택 기능은 Windows에서 지원합니다.",
+        }
+    return await asyncio.to_thread(
+        _pick_file_windows,
+        title,
+        initial_path,
+        file_filter,
+    )

@@ -1,4 +1,42 @@
+# THEANOVA AgentStudio
+
+## v5.282 Redis 임시 Python 실행/자격증명 주입 수정
+
+- Redis 우클릭 메뉴로 생성한 `.agentstudio/redis_scratch/*.py`가 `getpass.getpass()` 입력 대기에서 멈추던 문제를 수정했습니다.
+- 새 파일은 대화형 비밀번호 입력을 사용하지 않습니다.
+- AgentStudio에서 실행할 때 저장된 Windows DPAPI Redis 비밀번호를 실행 요청에만 주입하고 실행 직후 환경변수를 원복합니다.
+- 생성 Python 파일에는 Redis 비밀번호 평문을 기록하지 않습니다.
+- v5.280에서 이미 생성된 Redis scratch 파일도 `# 연결:` 헤더를 이용해 저장 프로필을 찾고 `REDIS_PASSWORD`를 주입하여 호환 실행합니다.
+- 새 scratch 파일에는 `AgentStudio-Redis-Connection-ID` 메타데이터를 추가하여 정확한 연결 프로필을 사용합니다.
+
 # THEANOVA AgentStudio v3
+
+## v5.281 연결 파일 유형 자동 감지 및 Firestore Service Account 가져오기
+
+- Supabase JSON 가져오기에서 Firebase/Google Service Account JSON을 선택해도 HTTP 400 오류로 끝내지 않습니다.
+- Service Account JSON을 자동 감지하면 DB 종류를 Google Cloud Firestore로 전환하고 Project ID 및 JSON 경로를 자동 입력합니다.
+- Firestore 설정 영역에 `Service Account JSON 찾기 / 로드` 기능을 추가했습니다.
+- Service Account의 private_key 원문은 AgentStudio 연결 설정에 복사하거나 로그로 출력하지 않습니다. 파일 경로만 저장합니다.
+- 연결 파일 형식 오류는 `BackendHttpError` 원문 대신 사용자용 안내 메시지로 표시합니다.
+- Redis/Supabase 기존 자동 가져오기 기능은 유지합니다.
+
+
+## v5.280 Redis 노드 우클릭 Python 코드 생성
+- Redis Key Browser의 그룹/Key 노드에서 마우스 오른쪽 버튼 메뉴를 지원합니다.
+- 메뉴: Redis 연결코드 / 리스트 조회 / 조회 / 등록 / 수정 / 삭제.
+- 선택한 Redis Host/Port/DB index/사용자와 Key/Key Type을 반영해 `.agentstudio/redis_scratch`에 임시 Python 파일을 생성합니다.
+- STRING/HASH/LIST/SET/ZSET/STREAM별 조회·등록·수정 템플릿을 생성합니다.
+- 삭제 코드는 `CONFIRM_DELETE = False` 보호장치를 포함하며 자동 실행하지 않습니다.
+- AgentStudio에 DPAPI로 저장된 Redis 비밀번호는 임시 Python 파일에 평문으로 기록하지 않습니다.
+- 별도 패치 CMD 없이 기존 `SYSTEM_ADMIN.cmd`만 사용합니다.
+
+## v5.279 Supabase / Redis 연결 파일 자동 등록
+- Supabase JSON 파일 찾기/로드 및 PostgreSQL 연결 필드 자동 입력
+- Redis `.py` / `.json` / `.env` 연결 설정 파일 찾기/로드 및 자동 입력
+- Redis Python 설정은 실행하지 않고 AST로 안전하게 분석
+- Firebase Service Account JSON을 Supabase JSON으로 오인하지 않도록 형식 검증
+- 별도 패치 CMD 없이 기존 `SYSTEM_ADMIN.cmd`만 사용
+
 
 에이전트 스튜디오는 **AI Agent + MCP 프로그램 전문 코딩 에이전트 IDE**입니다.
 
@@ -19,6 +57,26 @@
 - Host/Port/Database/Service Name/User/Driver 등 연결 정보는 LOCALAPPDATA의 AgentStudio 영속 설정에 저장됩니다.
 - Windows의 DB 비밀번호는 평문으로 저장하지 않고 DPAPI(Current User)로 암호화합니다.
 - v5.238 이전의 DB 종류별 단일 연결 설정은 처음 읽을 때 다중 연결 프로필 구조로 호환됩니다.
+
+
+## v5.278 Redis Key Browser / Value Inspector
+- Redis 연결 후 우측 DB 영역에서 빈 안내문 대신 실제 Redis Key Browser를 표시합니다.
+- `SCAN` 기반으로 Key 목록을 조회하여 운영 Redis에서도 `KEYS *`처럼 서버를 장시간 막지 않도록 했습니다.
+- `:` 구분 Key를 폴더 트리처럼 그룹화하며 STRING/HASH/LIST/SET/ZSET/STREAM 타입 배지를 표시합니다.
+- Key 이름/패턴 검색과 타입 필터, DB 전체 Key 수, 새로고침을 지원합니다.
+- Key를 선택하면 Key Size, Length, TTL과 실제 값을 읽기 전용으로 표시합니다.
+- HASH는 Field/Value, LIST/SET은 Index/Element, ZSET은 Member/Score, STREAM은 ID/Fields 형태로 표시합니다.
+- 대용량 Key는 UI 멈춤 방지를 위해 표시 개수를 제한하고 일부 표시 여부를 안내합니다.
+- Redis SQL 실행은 계속 차단하며 데이터 조회는 Redis 전용 API를 사용합니다.
+
+## v5.277 Redis Database Provider Support
+- SQL Workspace의 DB 종류 목록에 `Redis (Key-Value)`를 추가했습니다.
+- Redis는 관계형 SQL DB가 아니라 NoSQL Key-Value 데이터베이스로 분류합니다.
+- 기본 연결값은 Host `127.0.0.1`, Port `6379`, DB index `0`입니다.
+- Redis ACL 사용자명은 선택 입력이며, 비밀번호가 있으면 기존 DB 연결과 동일하게 Windows DPAPI(Current User)로 보안 저장할 수 있습니다.
+- AgentStudio Backend는 `redis-py`의 `PING`으로 Redis 연결/인증을 실제 확인합니다.
+- Redis 연결 상태에서는 SQL 실행/Object Explorer를 사용하지 않고 프로젝트 코드의 Redis 클라이언트를 사용하도록 안내합니다.
+- Backend 의존성에 `redis>=5.0`을 추가했습니다.
 
 ## 기술 스택
 - FastAPI

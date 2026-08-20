@@ -10252,3 +10252,218 @@ display:none은 React DOM을 unmount하지 않습니다.
 
 /* ===== v5.269 postgres credential scope + admin connection test ===== */
 .credential-scope-hint b{color:#dbeafe;}
+
+/* ===== v5.278 Redis Key Browser / Value Inspector ===== */
+.redis-browser-shell{
+  display:flex;
+  flex:1 1 auto;
+  min-height:0;
+  flex-direction:column;
+  background:#08111a;
+  overflow:hidden;
+}
+.redis-browser-toolbar{
+  display:grid;
+  grid-template-columns:150px minmax(0,1fr);
+  gap:7px;
+  padding:8px;
+  border-bottom:1px solid #203447;
+  background:#0a151f;
+}
+.redis-browser-toolbar select,
+.redis-key-search input{
+  width:100%;
+  min-width:0;
+  height:32px;
+  box-sizing:border-box;
+  border:1px solid #314b63;
+  border-radius:5px;
+  background:#0b1722;
+  color:#d8e8f5;
+  font-size:10px;
+  outline:none;
+}
+.redis-browser-toolbar select{padding:0 7px;}
+.redis-key-search{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:5px;}
+.redis-key-search input{padding:0 9px;}
+.redis-key-search input:focus,.redis-browser-toolbar select:focus{border-color:#4a8bc0;box-shadow:0 0 0 2px rgba(74,139,192,.12);}
+.redis-key-search button{
+  height:32px;border:1px solid #34506a;border-radius:5px;background:#12263a;color:#cce5f8;cursor:pointer;font-size:16px;
+}
+.redis-key-search button:hover:not(:disabled){background:#18334c;}
+.redis-key-search button:disabled{opacity:.45;cursor:not-allowed;}
+.redis-browser-summary{
+  min-height:34px;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:0 9px;
+  border-bottom:1px solid #203447;
+  background:#0d1924;
+  color:#7f98ad;
+  font-size:9px;
+}
+.redis-browser-summary strong{color:#cfe3f3;font-size:10px;}
+.redis-browser-summary span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.redis-browser-summary button{
+  margin-left:auto;height:24px;padding:0 7px;border:1px solid #304a60;border-radius:4px;background:#102235;color:#9fc6e5;font-size:8px;cursor:pointer;white-space:nowrap;
+}
+.redis-browser-summary button:hover:not(:disabled){background:#17324b;}
+.redis-browser-summary button:disabled{opacity:.45;cursor:not-allowed;}
+.redis-browser-main{
+  flex:1 1 auto;
+  min-height:0;
+  display:grid;
+  grid-template-rows:minmax(300px,42%) minmax(360px,58%);
+  overflow:hidden;
+}
+.redis-key-pane{
+  min-height:0;
+  overflow:hidden;
+  border-bottom:1px solid #294155;
+  background:#09131d;
+}
+.redis-key-tree{
+  height:100%;
+  overflow:auto;
+  padding:5px 4px 8px;
+  scrollbar-gutter:stable;
+  scrollbar-color:#4d7091 #09111a;
+}
+.redis-key-tree::-webkit-scrollbar,.redis-detail-content::-webkit-scrollbar{width:10px;height:10px;}
+.redis-key-tree::-webkit-scrollbar-track,.redis-detail-content::-webkit-scrollbar-track{background:#09111a;}
+.redis-key-tree::-webkit-scrollbar-thumb,.redis-detail-content::-webkit-scrollbar-thumb{background:#476a8b;border-radius:7px;border:2px solid #09111a;}
+.redis-tree-row{
+  width:100%;
+  min-width:0;
+  height:29px;
+  display:flex;
+  align-items:center;
+  gap:6px;
+  border:0;
+  border-radius:4px;
+  background:transparent;
+  color:#b7cadb;
+  text-align:left;
+  cursor:pointer;
+  overflow:hidden;
+}
+.redis-tree-row:hover{background:#10263a;color:#edf8ff;}
+.redis-tree-row.group strong{font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.redis-tree-row.group em{margin-left:auto;padding-right:8px;font-style:normal;font-size:8px;color:#6e879b;}
+.redis-tree-caret{width:12px;flex:0 0 12px;text-align:center;color:#78a8cf;font-size:14px;}
+.redis-tree-folder{width:15px;flex:0 0 15px;text-align:center;color:#7fa5c4;font-size:14px;}
+.redis-tree-row.key{height:31px;}
+.redis-tree-row.key.active{background:#173750;box-shadow:inset 2px 0 0 #4e9bd3;}
+.redis-tree-row.key code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:Consolas,'D2Coding',monospace;font-size:10px;color:#d5e6f4;}
+.redis-tree-row.key small{margin-left:auto;padding-right:8px;font-size:8px;color:#758fa5;white-space:nowrap;}
+.redis-type-badge{
+  flex:0 0 auto;
+  min-width:36px;
+  padding:2px 5px;
+  border-radius:3px;
+  color:#fff;
+  font-size:8px;
+  line-height:1.35;
+  font-weight:800;
+  text-align:center;
+  letter-spacing:.15px;
+  background:#526170;
+}
+.redis-type-badge.string{background:#6d18ca;}
+.redis-type-badge.hash{background:#314ee8;}
+.redis-type-badge.list{background:#078857;}
+.redis-type-badge.set{background:#b56b16;}
+.redis-type-badge.zset{background:#c24679;}
+.redis-type-badge.stream{background:#167eaa;}
+.redis-type-badge.large{min-width:44px;padding:3px 6px;font-size:9px;}
+.redis-detail-pane{
+  display:flex;
+  min-height:0;
+  flex-direction:column;
+  background:#0a141e;
+  overflow:hidden;
+}
+.redis-detail-head{
+  min-height:43px;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:0 9px;
+  border-bottom:1px solid #24394c;
+  background:#0e1a25;
+}
+.redis-detail-title{display:flex;align-items:center;gap:8px;min-width:0;flex:1;}
+.redis-detail-title strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e6f2fb;font-family:Consolas,'D2Coding',monospace;font-size:11px;}
+.redis-detail-head>button{width:28px;height:26px;border:1px solid #34506a;border-radius:4px;background:#12263a;color:#bddcf2;cursor:pointer;}
+.redis-detail-head>button:hover:not(:disabled){background:#19354f;}
+.redis-detail-meta{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px 14px;
+  padding:7px 9px;
+  border-bottom:1px solid #223648;
+  color:#7891a6;
+  font-size:9px;
+}
+.redis-detail-meta strong{color:#bcd1e2;font-weight:600;}
+.redis-detail-content{
+  flex:1 1 auto;
+  min-height:0;
+  overflow:auto;
+  padding:8px;
+  scrollbar-gutter:stable;
+}
+.redis-string-value{
+  min-height:120px;
+  margin:0;
+  padding:10px;
+  border:1px solid #293f52;
+  border-radius:5px;
+  background:#08121b;
+  color:#d6e7f4;
+  font-family:Consolas,'D2Coding',monospace;
+  font-size:10px;
+  line-height:1.5;
+  white-space:pre-wrap;
+  word-break:break-word;
+}
+.redis-value-table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:9px;color:#c5d7e5;}
+.redis-value-table th{height:30px;padding:0 7px;border:1px solid #2a4358;background:#10202d;color:#9db7cb;text-align:left;font-weight:700;}
+.redis-value-table td{padding:7px;border:1px solid #233b4e;background:#0c1823;vertical-align:top;word-break:break-word;white-space:pre-wrap;}
+.redis-value-table tr:nth-child(even) td{background:#0e1b27;}
+.redis-value-table th:first-child,.redis-value-table td:first-child{width:30%;}
+.redis-value-table td code{font-family:Consolas,'D2Coding',monospace;font-size:8px;color:#cbddea;white-space:pre-wrap;}
+.redis-detail-truncated{margin-top:7px;padding:6px 8px;border:1px solid #5d4b28;border-radius:4px;background:#241d0d;color:#d8bb75;font-size:8px;line-height:1.4;}
+.redis-detail-refreshed{padding:5px 8px;border-top:1px solid #1d3041;color:#60798f;font-size:8px;text-align:right;}
+@media (max-width:1100px){
+  .redis-browser-toolbar{grid-template-columns:1fr;}
+}
+
+/* ===== v5.279 Supabase / Redis connection file auto import ===== */
+.sql-connection-import-card{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:8px 10px;
+  align-items:center;
+  margin:8px 0 12px;
+  padding:10px 11px;
+  border:1px solid var(--border,#26384a);
+  border-radius:8px;
+  background:rgba(20,34,48,.55);
+}
+.sql-connection-import-card>div{min-width:0;display:flex;flex-direction:column;gap:3px}
+.sql-connection-import-card strong{font-size:12px;color:var(--text,#dce7f3)}
+.sql-connection-import-card small{font-size:10px;line-height:1.45;color:var(--muted,#8fa6ba)}
+.sql-connection-import-card button{white-space:nowrap;min-height:34px}
+.sql-connection-import-card p{grid-column:1/-1;margin:0;padding-top:3px;font-size:10px;line-height:1.45;word-break:break-word}
+.sql-connection-import-card p.ok{color:#70d7a0}
+.sql-connection-import-card p.error{color:#ff8b8b}
+
+
+/* ===== v5.280 Redis node context-menu Python scratch actions ===== */
+.redis-tree-row.group,.redis-tree-row.key{cursor:context-menu;}
+.redis-context-menu{min-width:286px;max-width:330px;}
+.redis-context-menu .redis-menu-danger{color:#ffadb5;}
+.redis-context-menu .redis-menu-danger:hover:not(:disabled){background:#341b22;}
+.redis-context-note{border-top:1px solid #25394b;margin-top:4px;padding:8px 10px;color:#8298ad;font-size:9px;line-height:1.45;}

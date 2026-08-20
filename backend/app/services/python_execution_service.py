@@ -82,6 +82,12 @@ for raw in sys.stdin:
         reset = bool(request.get("reset"))
         capture_last_expression = bool(request.get("capture_last_expression"))
         notebook_mode = bool(request.get("notebook_mode"))
+        raw_env_overrides = request.get("env_overrides") or {}
+        env_overrides = {
+            str(key): str(value)
+            for key, value in raw_env_overrides.items()
+            if isinstance(key, str) and value is not None
+        } if isinstance(raw_env_overrides, dict) else {}
         if notebook_mode:
             code = _preprocess_notebook_code(code)
 
@@ -114,7 +120,18 @@ for raw in sys.stdin:
         error_message = ""
         trace = ""
 
+        previous_env = {}
+        missing_env = set()
         try:
+            # 요청 단위 secret/env는 persistent worker 전체에 남기지 않는다.
+            # Redis scratch 실행 시 DPAPI에서 복호화한 비밀번호도 이 블록 안에서만 노출된다.
+            for env_key, env_value in env_overrides.items():
+                if env_key in os.environ:
+                    previous_env[env_key] = os.environ[env_key]
+                else:
+                    missing_env.add(env_key)
+                os.environ[env_key] = env_value
+
             # 실행 코드가 에디터의 미저장 내용이거나 F8 선택 영역이어도
             # traceback이 디스크의 오래된 파일 내용을 다시 읽지 않도록
             # 현재 실행 코드를 linecache에 등록한다.
@@ -153,6 +170,12 @@ for raw in sys.stdin:
             error_type = type(exc).__name__
             error_message = str(exc)
             trace = traceback.format_exc()
+        finally:
+            for env_key in env_overrides:
+                if env_key in previous_env:
+                    os.environ[env_key] = previous_env[env_key]
+                elif env_key in missing_env:
+                    os.environ.pop(env_key, None)
 
         response = {
             "ok": ok,
@@ -379,6 +402,7 @@ class PythonExecutionManager:
         capture_last_expression: bool = False,
         notebook_mode: bool = False,
         cell_index: int | None = None,
+        env_overrides: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         project_root = Path(root).expanduser().resolve()
         if not project_root.exists() or not project_root.is_dir():
@@ -414,6 +438,7 @@ class PythonExecutionManager:
             "reset": bool(reset),
             "capture_last_expression": bool(capture_last_expression),
             "notebook_mode": bool(notebook_mode),
+            "env_overrides": {str(k): str(v) for k, v in (env_overrides or {}).items() if v is not None},
         }
 
         with session.lock:

@@ -25,3 +25,6 @@ oracledb>=2.5
 
 # Google Cloud Firestore database provider
 google-cloud-firestore>=2.21
+
+# Redis Key-Value database provider
+redis>=5.0

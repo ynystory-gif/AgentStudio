@@ -20,7 +20,7 @@ from uuid import UUID
 _LEGACY_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 _LEGACY_PROFILE_FILE = _LEGACY_DATA_DIR / "sql_workspace_profiles.json"
 _LOCK = threading.RLock()
-_SUPPORTED_DB_TYPES = {"postgresql", "supabase", "firestore", "mssql", "oracle", "sqlite3"}
+_SUPPORTED_DB_TYPES = {"postgresql", "supabase", "firestore", "redis", "mssql", "oracle", "sqlite3"}
 # project_key -> connection_id -> live DB runtime
 _RUNTIME: dict[str, dict[str, dict[str, Any]]] = {}
 # project_key -> currently selected live/saved connection id
@@ -63,6 +63,7 @@ def _default_connection_name(db_type: str) -> str:
         "postgresql": "PostgreSQL 연결",
         "supabase": "Supabase 연결",
         "firestore": "Google Cloud Firestore 연결",
+        "redis": "Redis 연결",
         "mssql": "MSSQL 연결",
         "oracle": "Oracle 연결",
         "sqlite3": "SQLite3 연결",
@@ -95,6 +96,15 @@ def _default_profile(db_type: str = "postgresql") -> dict[str, Any]:
             "database": "(default)",
             "driver": "google-cloud-firestore",
             "dashboard_url": "https://console.cloud.google.com/firestore/databases",
+        }
+    if kind == "redis":
+        return {
+            **common,
+            "host": "127.0.0.1",
+            "port": 6379,
+            "database": "0",
+            "username": "",
+            "driver": "redis-py",
         }
     if kind == "supabase":
         return {
@@ -183,7 +193,7 @@ def _normalize_database_history(value: Any) -> list[dict[str, Any]]:
         db_type = str(item.get("db_type") or "").strip().lower()
         host = str(item.get("host") or "").strip()
         database = str(item.get("database") or "").strip()
-        if db_type not in {"postgresql", "supabase", "mssql"} or not host or not database:
+        if db_type not in {"postgresql", "supabase", "redis", "mssql"} or not host or not database:
             continue
         try:
             port = int(item.get("port") or 0)
@@ -837,8 +847,50 @@ def _connect_sqlite(root: str, profile: dict[str, Any]):
     return conn
 
 
+def _connect_redis(profile: dict[str, Any], password: str):
+    try:
+        import redis
+    except Exception as exc:
+        raise RuntimeError("Redis 드라이버 redis-py가 설치되어 있지 않습니다. backend requirements 설치 후 다시 실행하세요.") from exc
+
+    host = str(profile.get("host") or "127.0.0.1").strip() or "127.0.0.1"
+    try:
+        port = int(profile.get("port") or 6379)
+    except Exception as exc:
+        raise RuntimeError("Redis Port는 숫자여야 합니다. 기본값은 6379입니다.") from exc
+    raw_db = str(profile.get("database") if profile.get("database") is not None else "0").strip()
+    try:
+        db_index = int(raw_db or "0")
+    except Exception as exc:
+        raise RuntimeError("Redis DB는 데이터베이스 이름이 아니라 0 이상의 DB index 숫자를 입력하세요. 예: 0") from exc
+    if db_index < 0:
+        raise RuntimeError("Redis DB index는 0 이상이어야 합니다.")
+
+    username = str(profile.get("username") or "").strip() or None
+    client = redis.Redis(
+        host=host,
+        port=port,
+        db=db_index,
+        username=username,
+        password=str(password or "") or None,
+        decode_responses=True,
+        socket_connect_timeout=5,
+        socket_timeout=5,
+        health_check_interval=30,
+    )
+    profile["host"] = host
+    profile["port"] = port
+    profile["database"] = str(db_index)
+    return client
+
+
 def _ping_connection(conn: Any, db_type: str) -> None:
-    if str(db_type or "").lower() == "firestore":
+    kind = str(db_type or "").lower()
+    if kind == "redis":
+        if conn.ping() is not True:
+            raise RuntimeError("Redis PING 응답을 확인하지 못했습니다.")
+        return
+    if kind == "firestore":
         # collections() performs an authenticated Firestore RPC. Reading at most
         # one collection name is enough to validate credentials/project access.
         iterator = iter(conn.collections())
@@ -857,7 +909,7 @@ def _ping_connection(conn: Any, db_type: str) -> None:
 
 def _remember_database_history(root: str, profile: dict[str, Any]) -> None:
     db_type = str(profile.get("db_type") or "").strip().lower()
-    if db_type not in {"postgresql", "supabase", "mssql"}:
+    if db_type not in {"postgresql", "supabase", "redis", "mssql"}:
         return
     host = str(profile.get("host") or "").strip()
     database = str(profile.get("database") or "").strip()
@@ -899,9 +951,12 @@ def connect(root: str, profile: dict[str, Any], password: str = "") -> dict[str,
     if clean["db_type"] == "firestore":
         if not clean.get("database"):
             clean["database"] = "(default)"
+    elif clean["db_type"] == "redis":
+        if str(clean.get("database") or "").strip() == "":
+            clean["database"] = "0"
     elif not clean.get("database") and clean["db_type"] != "oracle":
         raise RuntimeError("SQLite DB 파일 경로가 필요합니다." if clean["db_type"] == "sqlite3" else "Database 이름이 필요합니다.")
-    if clean["db_type"] not in {"sqlite3", "firestore"} and not clean.get("username"):
+    if clean["db_type"] not in {"sqlite3", "firestore", "redis"} and not clean.get("username"):
         raise RuntimeError("사용자 이름이 필요합니다.")
 
     saved = save_profile(root, clean, password=supplied_password if supplied_password else None)
@@ -914,6 +969,8 @@ def connect(root: str, profile: dict[str, Any], password: str = "") -> dict[str,
         conn = _connect_sqlite(root, saved)
     elif clean["db_type"] == "firestore":
         conn = _connect_firestore(root, saved)
+    elif clean["db_type"] == "redis":
+        conn = _connect_redis(saved, effective_password)
     elif clean["db_type"] == "mssql":
         conn = _connect_mssql(saved, effective_password)
     elif clean["db_type"] == "oracle":
@@ -1186,6 +1243,8 @@ def execute(root: str, sql: str, max_rows: int = 1000) -> dict[str, Any]:
     db_type = str(runtime.get("profile", {}).get("db_type", "") or "").lower()
     if db_type == "firestore":
         raise RuntimeError("Google Cloud Firestore는 SQL 실행 대상이 아닙니다. Firestore SDK/CRUD 기능을 사용하세요.")
+    if db_type == "redis":
+        raise RuntimeError("Redis는 SQL 실행 대상이 아닙니다. redis-py 또는 프로젝트의 Redis 클라이언트를 사용하세요.")
     statements = [item for item in _split_sql_statements(statement, db_type) if item.strip()]
     if not statements:
         raise RuntimeError("실행할 SQL이 없습니다.")
@@ -1802,6 +1861,475 @@ def sqlite_project_status(root: str) -> dict[str, Any]:
     }
 
 
+
+
+def _redis_length(conn: Any, key: str, key_type: str) -> int | None:
+    kind = str(key_type or "").lower()
+    try:
+        if kind == "string":
+            return int(conn.strlen(key))
+        if kind == "hash":
+            return int(conn.hlen(key))
+        if kind == "list":
+            return int(conn.llen(key))
+        if kind == "set":
+            return int(conn.scard(key))
+        if kind == "zset":
+            return int(conn.zcard(key))
+        if kind == "stream":
+            return int(conn.xlen(key))
+    except Exception:
+        return None
+    return None
+
+
+def _redis_memory_usage(conn: Any, key: str) -> int | None:
+    try:
+        value = conn.memory_usage(key)
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _redis_key_summary(conn: Any, key: str) -> dict[str, Any]:
+    key_type = str(conn.type(key) or "none").lower()
+    try:
+        ttl = int(conn.ttl(key))
+    except Exception:
+        ttl = -2
+    return {
+        "key": str(key),
+        "type": key_type,
+        "ttl": ttl,
+        "length": _redis_length(conn, key, key_type),
+        "size_bytes": _redis_memory_usage(conn, key),
+    }
+
+
+def list_redis_keys(root: str, pattern: str = "*", limit: int = 1000) -> dict[str, Any]:
+    """Read Redis keys safely with SCAN for the AgentStudio key browser.
+
+    KEYS is intentionally not used because it can block a busy Redis server.
+    """
+    runtime = _require_active_runtime(root)
+    profile = _sanitized_profile(runtime.get("profile"))
+    if profile.get("db_type") != "redis":
+        raise RuntimeError("현재 선택된 연결은 Redis가 아닙니다.")
+    conn = runtime["connection"]
+
+    match = str(pattern or "*").strip() or "*"
+    try:
+        max_keys = max(1, min(int(limit or 1000), 5000))
+    except Exception:
+        max_keys = 1000
+
+    keys: list[dict[str, Any]] = []
+    cursor = 0
+    seen: set[str] = set()
+    scan_complete = False
+    while len(keys) < max_keys:
+        cursor, batch = conn.scan(cursor=cursor, match=match, count=min(500, max(50, max_keys)))
+        for raw_key in batch or []:
+            key = str(raw_key)
+            if key in seen:
+                continue
+            seen.add(key)
+            keys.append(_redis_key_summary(conn, key))
+            if len(keys) >= max_keys:
+                break
+        if int(cursor or 0) == 0:
+            scan_complete = True
+            break
+
+    keys.sort(key=lambda item: str(item.get("key") or "").casefold())
+    try:
+        total_keys = int(conn.dbsize())
+    except Exception:
+        total_keys = len(keys)
+
+    return {
+        "ok": True,
+        "db_type": "redis",
+        "database": str(profile.get("database") or "0"),
+        "pattern": match,
+        "keys": keys,
+        "returned_count": len(keys),
+        "total_keys": total_keys,
+        "scan_complete": scan_complete,
+        "limit": max_keys,
+        "refreshed_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def get_redis_key(root: str, key: str, max_items: int = 500) -> dict[str, Any]:
+    runtime = _require_active_runtime(root)
+    profile = _sanitized_profile(runtime.get("profile"))
+    if profile.get("db_type") != "redis":
+        raise RuntimeError("현재 선택된 연결은 Redis가 아닙니다.")
+    conn = runtime["connection"]
+    key_name = str(key or "")
+    if not key_name:
+        raise RuntimeError("조회할 Redis Key가 필요합니다.")
+
+    summary = _redis_key_summary(conn, key_name)
+    key_type = summary["type"]
+    if key_type == "none":
+        raise RuntimeError("선택한 Redis Key가 존재하지 않거나 이미 만료되었습니다.")
+    try:
+        limit = max(1, min(int(max_items or 500), 2000))
+    except Exception:
+        limit = 500
+
+    value: Any = None
+    rows: list[dict[str, Any]] = []
+    truncated = False
+    if key_type == "string":
+        # Keep the browser responsive even when a string contains a very large payload.
+        value = conn.getrange(key_name, 0, 131071)
+        truncated = bool((summary.get("length") or 0) > 131072)
+    elif key_type == "hash":
+        cursor = 0
+        while len(rows) < limit:
+            cursor, chunk = conn.hscan(key_name, cursor=cursor, count=min(250, limit))
+            for field_name, field_value in (chunk or {}).items():
+                rows.append({"field": str(field_name), "value": str(field_value)})
+                if len(rows) >= limit:
+                    break
+            if int(cursor or 0) == 0:
+                break
+        truncated = int(summary.get("length") or 0) > len(rows)
+    elif key_type == "list":
+        values = conn.lrange(key_name, 0, limit - 1)
+        rows = [{"index": index, "value": str(item)} for index, item in enumerate(values or [])]
+        truncated = int(summary.get("length") or 0) > len(rows)
+    elif key_type == "set":
+        cursor = 0
+        members: list[str] = []
+        while len(members) < limit:
+            cursor, chunk = conn.sscan(key_name, cursor=cursor, count=min(250, limit))
+            for item in chunk or []:
+                members.append(str(item))
+                if len(members) >= limit:
+                    break
+            if int(cursor or 0) == 0:
+                break
+        members.sort(key=str.casefold)
+        rows = [{"index": index, "value": item} for index, item in enumerate(members)]
+        truncated = int(summary.get("length") or 0) > len(rows)
+    elif key_type == "zset":
+        values = conn.zrange(key_name, 0, limit - 1, withscores=True)
+        rows = [{"index": index, "member": str(member), "score": score} for index, (member, score) in enumerate(values or [])]
+        truncated = int(summary.get("length") or 0) > len(rows)
+    elif key_type == "stream":
+        values = conn.xrange(key_name, min="-", max="+", count=limit)
+        rows = [{"id": str(entry_id), "fields": {str(k): str(v) for k, v in (fields or {}).items()}} for entry_id, fields in (values or [])]
+        truncated = int(summary.get("length") or 0) > len(rows)
+    else:
+        value = f"{key_type.upper()} 타입은 현재 읽기 전용 요약만 지원합니다."
+
+    return {
+        "ok": True,
+        **summary,
+        "database": str(profile.get("database") or "0"),
+        "value": value,
+        "rows": rows,
+        "truncated": truncated,
+        "max_items": limit,
+        "refreshed_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _redis_python_connection_block(profile: dict[str, Any], *, credential_saved: bool) -> str:
+    # Build a safe redis-py connection block without writing saved passwords to source.
+    # AgentStudio 실행기는 scratch 파일의 connection-id를 보고 DPAPI secret을
+    # AGENTSTUDIO_REDIS_PASSWORD/REDIS_PASSWORD에 요청 단위로만 주입한다.
+    host = str(profile.get("host") or "127.0.0.1")
+    try:
+        port = int(profile.get("port") or 6379)
+    except Exception:
+        port = 6379
+    try:
+        database = int(str(profile.get("database") or "0"))
+    except Exception:
+        database = 0
+    username = str(profile.get("username") or "").strip()
+    credential_note = (
+        "# AgentStudio에 저장된 Redis 비밀번호는 실행 순간에만 안전하게 주입됩니다.\n"
+        "# 파일에는 평문 비밀번호가 저장되지 않으며, 대화형 getpass 입력도 사용하지 않습니다.\n"
+        if credential_saved else
+        "# 비밀번호가 필요한 Redis라면 REDIS_PASSWORD 환경변수를 사용할 수 있습니다.\n"
+    )
+    password_code = (
+        "REDIS_PASSWORD = (\n"
+        "    os.getenv(\"AGENTSTUDIO_REDIS_PASSWORD\")\n"
+        "    or os.getenv(\"REDIS_PASSWORD\")\n"
+        "    or None\n"
+        ")\n"
+    )
+    username_literal = repr(username) if username else "None"
+    return (
+        "import os\n"
+        "import redis\n\n"
+        + credential_note
+        + password_code
+        + "\n"
+        + "r = redis.Redis(\n"
+        + f"    host={host!r},\n"
+        + f"    port={port},\n"
+        + f"    db={database},\n"
+        + f"    username={username_literal},\n"
+        + "    password=REDIS_PASSWORD,\n"
+        + "    decode_responses=True,\n"
+        + "    socket_connect_timeout=5,\n"
+        + "    socket_timeout=5,\n"
+        + ")\n"
+        + "try:\n"
+        + "    r.ping()\n"
+        + "except redis.exceptions.AuthenticationError as exc:\n"
+        + "    raise RuntimeError(\"Redis 인증 실패: AgentStudio 연결 정보의 비밀번호를 확인하거나 REDIS_PASSWORD를 설정하세요.\") from exc\n"
+    )
+
+
+def _redis_read_snippet(key: str, key_type: str) -> str:
+    key_literal = repr(str(key or ""))
+    kind = str(key_type or "").strip().lower()
+    snippets = {
+        "string": f'''KEY = {key_literal}\nvalue = r.get(KEY)\nprint(value)\n''',
+        "hash": f'''KEY = {key_literal}\nvalue = r.hgetall(KEY)\nfor field, field_value in value.items():\n    print(field, "=", field_value)\n''',
+        "list": f'''KEY = {key_literal}\nvalues = r.lrange(KEY, 0, -1)\nfor index, value in enumerate(values):\n    print(index, value)\n''',
+        "set": f'''KEY = {key_literal}\nvalues = sorted(r.smembers(KEY))\nfor value in values:\n    print(value)\n''',
+        "zset": f'''KEY = {key_literal}\nvalues = r.zrange(KEY, 0, -1, withscores=True)\nfor member, score in values:\n    print(member, score)\n''',
+        "stream": f'''KEY = {key_literal}\nvalues = r.xrange(KEY, min="-", max="+")\nfor entry_id, fields in values:\n    print(entry_id, fields)\n''',
+    }
+    return snippets.get(kind, f'''KEY = {key_literal}\nkey_type = r.type(KEY)\nprint("type:", key_type)\nprint("value 조회 코드를 Key 타입에 맞게 작성하세요.")\n''')
+
+
+def _redis_create_snippet(key: str, key_type: str, prefix: str, node_kind: str) -> str:
+    kind = str(key_type or "").strip().lower()
+    is_group = str(node_kind or "").lower() == "group"
+    if is_group:
+        prefix_text = str(prefix or key or "").rstrip(":")
+        target = f"{prefix_text}:new_key" if prefix_text else "new_key"
+        return f'''# 그룹 아래에 새 STRING Key를 등록하는 기본 예제입니다.\nKEY = {target!r}\nVALUE = "새 값"\nr.set(KEY, VALUE)\nprint("등록 완료:", KEY)\n'''
+    key_literal = repr(str(key or ""))
+    snippets = {
+        "string": f'''# STRING은 기존 Key에 SET하면 덮어쓰므로 새 Key 이름을 사용하세요.\nKEY = {str(key or "") + ":new"!r}\nVALUE = "새 값"\nr.set(KEY, VALUE)\nprint("등록 완료:", KEY)\n''',
+        "hash": f'''KEY = {key_literal}\nFIELD = "new_field"\nVALUE = "새 값"\nr.hset(KEY, FIELD, VALUE)\nprint("필드 등록 완료:", FIELD)\n''',
+        "list": f'''KEY = {key_literal}\nVALUE = "새 요소"\nr.rpush(KEY, VALUE)\nprint("LIST 요소 등록 완료:", VALUE)\n''',
+        "set": f'''KEY = {key_literal}\nMEMBER = "새 멤버"\nr.sadd(KEY, MEMBER)\nprint("SET 멤버 등록 완료:", MEMBER)\n''',
+        "zset": f'''KEY = {key_literal}\nMEMBER = "새 멤버"\nSCORE = 1.0\nr.zadd(KEY, {{MEMBER: SCORE}})\nprint("ZSET 멤버 등록 완료:", MEMBER, SCORE)\n''',
+        "stream": f'''KEY = {key_literal}\nFIELDS = {{"field": "새 값"}}\nentry_id = r.xadd(KEY, FIELDS)\nprint("STREAM 엔트리 등록 완료:", entry_id)\n''',
+    }
+    return snippets.get(kind, f'''KEY = {key_literal}\nVALUE = "새 값"\nr.set(KEY, VALUE)\nprint("등록 완료:", KEY)\n''')
+
+
+def _redis_update_snippet(key: str, key_type: str, prefix: str, node_kind: str) -> str:
+    kind = str(key_type or "").strip().lower()
+    if str(node_kind or "").lower() == "group":
+        prefix_text = str(prefix or key or "").rstrip(":")
+        target = f"{prefix_text}:target_key" if prefix_text else "target_key"
+        return f'''# 수정할 실제 Key 이름으로 TARGET_KEY를 변경하세요.\nTARGET_KEY = {target!r}\nNEW_VALUE = "수정할 값"\ncurrent_type = r.type(TARGET_KEY)\nif current_type != "string":\n    raise RuntimeError(f"기본 그룹 수정 템플릿은 STRING용입니다. 현재 타입: {{current_type}}")\nr.set(TARGET_KEY, NEW_VALUE)\nprint("수정 완료:", TARGET_KEY)\n'''
+    key_literal = repr(str(key or ""))
+    snippets = {
+        "string": f'''KEY = {key_literal}\nNEW_VALUE = "수정할 값"\nr.set(KEY, NEW_VALUE)\nprint("STRING 수정 완료:", KEY)\n''',
+        "hash": f'''KEY = {key_literal}\nFIELD = "수정할_field"\nNEW_VALUE = "수정할 값"\nr.hset(KEY, FIELD, NEW_VALUE)\nprint("HASH 필드 수정 완료:", FIELD)\n''',
+        "list": f'''KEY = {key_literal}\nINDEX = 0\nNEW_VALUE = "수정할 요소"\nr.lset(KEY, INDEX, NEW_VALUE)\nprint("LIST 요소 수정 완료:", INDEX)\n''',
+        "set": f'''KEY = {key_literal}\nOLD_MEMBER = "기존 멤버"\nNEW_MEMBER = "새 멤버"\npipe = r.pipeline(transaction=True)\npipe.srem(KEY, OLD_MEMBER)\npipe.sadd(KEY, NEW_MEMBER)\npipe.execute()\nprint("SET 멤버 교체 완료")\n''',
+        "zset": f'''KEY = {key_literal}\nMEMBER = "수정할 멤버"\nNEW_SCORE = 2.0\nr.zadd(KEY, {{MEMBER: NEW_SCORE}})\nprint("ZSET score 수정 완료:", MEMBER, NEW_SCORE)\n''',
+        "stream": f'''KEY = {key_literal}\n# Redis Stream 엔트리는 직접 UPDATE하지 않습니다. 필요한 경우 기존 ID를 삭제하고 새 엔트리를 추가하세요.\nOLD_ID = "0-0"  # 실제 ID로 변경\nNEW_FIELDS = {{"field": "수정할 값"}}\nif OLD_ID == "0-0":\n    raise RuntimeError("OLD_ID를 실제 Stream 엔트리 ID로 변경한 뒤 실행하세요.")\nr.xdel(KEY, OLD_ID)\nnew_id = r.xadd(KEY, NEW_FIELDS)\nprint("STREAM 교체 완료:", OLD_ID, "->", new_id)\n''',
+    }
+    return snippets.get(kind, f'''KEY = {key_literal}\nNEW_VALUE = "수정할 값"\nr.set(KEY, NEW_VALUE)\nprint("수정 완료:", KEY)\n''')
+
+
+def _redis_delete_snippet(key: str, prefix: str, node_kind: str) -> str:
+    if str(node_kind or "").lower() == "group":
+        prefix_text = str(prefix or key or "").rstrip(":")
+        pattern = f"{prefix_text}:*" if prefix_text else "*"
+        return f'''# ⚠ 그룹 삭제는 여러 Key를 삭제할 수 있습니다. 먼저 대상 목록을 확인하세요.\nPATTERN = {pattern!r}\nkeys = list(r.scan_iter(match=PATTERN, count=200))\nprint("삭제 대상 개수:", len(keys))\nfor item in keys:\n    print(" -", item)\n\nCONFIRM_DELETE = False\nif not CONFIRM_DELETE:\n    raise RuntimeError("삭제 대상 확인 후 CONFIRM_DELETE = True로 변경하세요.")\nif keys:\n    deleted = r.delete(*keys)\n    print("삭제 완료:", deleted)\n'''
+    key_literal = repr(str(key or ""))
+    return f'''KEY = {key_literal}\nprint("삭제 대상:", KEY, "type=", r.type(KEY))\nCONFIRM_DELETE = False\nif not CONFIRM_DELETE:\n    raise RuntimeError("Key를 확인한 뒤 CONFIRM_DELETE = True로 변경하세요.")\ndeleted = r.delete(KEY)\nprint("삭제 완료:", deleted)\n'''
+
+
+def _redis_list_snippet(key: str, key_type: str, prefix: str, node_kind: str) -> str:
+    kind = str(key_type or "").strip().lower()
+    if str(node_kind or "").lower() == "key" and kind == "list":
+        return _redis_read_snippet(key, "list")
+    if str(node_kind or "").lower() == "group":
+        prefix_text = str(prefix or key or "").rstrip(":")
+        pattern = f"{prefix_text}:*" if prefix_text else "*"
+    else:
+        key_text = str(key or "")
+        prefix_text = key_text.rsplit(":", 1)[0] if ":" in key_text else key_text
+        pattern = f"{prefix_text}:*" if prefix_text else "*"
+    return f'''# KEYS * 대신 SCAN을 사용하여 현재 노드 범위의 Key 목록을 조회합니다.\nPATTERN = {pattern!r}\nfor item in r.scan_iter(match=PATTERN, count=200):\n    print(r.type(item).upper(), item, "TTL=", r.ttl(item))\n'''
+
+
+def redis_python_script_runtime_env(root: str, relative_path: str) -> dict[str, str]:
+    """Return per-execution Redis secret env for AgentStudio-generated scratch files.
+
+    The secret is decrypted only in the backend process and is never written to the
+    generated .py file or returned to the frontend. Legacy v5.280 scratch files,
+    which only contain a connection name, are supported as a fallback.
+    """
+    project_root = Path(_project_key(root)).resolve()
+    relative = str(relative_path or "").replace("\\", "/").lstrip("/")
+    if not relative.lower().endswith(".py"):
+        return {}
+    target = (project_root / relative).resolve()
+    scratch_root = (project_root / ".agentstudio" / "redis_scratch").resolve()
+    try:
+        target.relative_to(scratch_root)
+    except ValueError:
+        return {}
+    if not target.exists() or not target.is_file():
+        return {}
+
+    try:
+        header = "\n".join(target.read_text(encoding="utf-8", errors="replace").splitlines()[:24])
+    except Exception:
+        return {}
+
+    connection_id = ""
+    connection_name = ""
+    for line in header.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# AgentStudio-Redis-Connection-ID:"):
+            connection_id = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("# 연결:"):
+            connection_name = stripped.split(":", 1)[1].strip()
+
+    key = _project_key(root)
+    with _LOCK:
+        profiles = _load_profiles()
+        entry = _saved_entry(key, profiles)
+        saved = entry.get("connections") or {}
+        stored = saved.get(connection_id) if connection_id else None
+        if not stored and connection_name:
+            matches = [
+                item for item in saved.values()
+                if str(item.get("db_type") or "").lower() == "redis"
+                and str(item.get("name") or "").strip() == connection_name
+            ]
+            if len(matches) == 1:
+                stored = matches[0]
+        if not stored:
+            active_id = str(_ACTIVE_RUNTIME.get(key) or entry.get("active_connection_id") or "")
+            candidate = saved.get(active_id) if active_id else None
+            if candidate and str(candidate.get("db_type") or "").lower() == "redis":
+                stored = candidate
+
+    if not stored or str(stored.get("db_type") or "").lower() != "redis":
+        return {}
+    encrypted = str(stored.get("_password_dpapi") or "").strip()
+    if not encrypted:
+        return {}
+    try:
+        password = _unprotect_password(encrypted)
+    except Exception:
+        return {}
+    if not password:
+        return {}
+    # REDIS_PASSWORD keeps v5.280-generated getpass scripts working; the
+    # AgentStudio-specific name is preferred by v5.282+ generated files.
+    return {
+        "AGENTSTUDIO_REDIS_PASSWORD": password,
+        "REDIS_PASSWORD": password,
+    }
+
+
+def create_redis_python_script(
+    root: str,
+    action: str,
+    key: str = "",
+    key_type: str = "",
+    prefix: str = "",
+    node_kind: str = "key",
+) -> dict[str, Any]:
+    # Generate a Redis operation as a temporary Python file; never execute it.
+    runtime = _require_active_runtime(root)
+    profile = _sanitized_profile(runtime.get("profile"))
+    if profile.get("db_type") != "redis":
+        raise RuntimeError("현재 선택된 연결은 Redis가 아닙니다.")
+
+    normalized_action = str(action or "").strip().lower()
+    allowed = {"connection", "list", "read", "create", "update", "delete"}
+    if normalized_action not in allowed:
+        raise ValueError("지원하지 않는 Redis Python 코드 메뉴입니다.")
+
+    normalized_kind = "group" if str(node_kind or "").strip().lower() == "group" else "key"
+    key_name = str(key or "")
+    prefix_name = str(prefix or "")
+    detected_type = str(key_type or "").strip().lower()
+    if normalized_kind == "key" and key_name:
+        try:
+            actual = str(runtime["connection"].type(key_name) or "none").lower()
+            if actual != "none":
+                detected_type = actual
+        except Exception:
+            pass
+    if normalized_kind == "key" and normalized_action != "connection" and not key_name:
+        raise ValueError("Redis Key 노드용 코드를 만들려면 Key 이름이 필요합니다.")
+
+    cid = str(profile.get("connection_id") or "")
+    credential_saved = bool(get_profile(root, connection_id=cid).get("credential_saved")) if cid else False
+    connection = _redis_python_connection_block(profile, credential_saved=credential_saved)
+
+    labels = {
+        "connection": "Redis 연결코드",
+        "list": "리스트 조회",
+        "read": "조회",
+        "create": "등록",
+        "update": "수정",
+        "delete": "삭제",
+    }
+    if normalized_action == "connection":
+        body = 'print("Redis PING:", r.ping())\nprint("DB index:", r.connection_pool.connection_kwargs.get("db", 0))\n'
+    elif normalized_action == "list":
+        body = _redis_list_snippet(key_name, detected_type, prefix_name, normalized_kind)
+    elif normalized_action == "read":
+        body = _redis_list_snippet(key_name, detected_type, prefix_name, normalized_kind) if normalized_kind == "group" else _redis_read_snippet(key_name, detected_type)
+    elif normalized_action == "create":
+        body = _redis_create_snippet(key_name, detected_type, prefix_name, normalized_kind)
+    elif normalized_action == "update":
+        body = _redis_update_snippet(key_name, detected_type, prefix_name, normalized_kind)
+    else:
+        body = _redis_delete_snippet(key_name, prefix_name, normalized_kind)
+
+    project_root = Path(_project_key(root)).resolve()
+    scratch_dir = project_root / ".agentstudio" / "redis_scratch"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    target_name = key_name or prefix_name or "redis"
+    scratch_name = f"redis_{normalized_action}_{_scratch_safe_name(target_name)}_{timestamp}.py"
+    scratch_path = scratch_dir / scratch_name
+    target_label = key_name if normalized_kind == "key" else (prefix_name or "Redis root")
+    header = (
+        "# THEANOVA AgentStudio · Redis 임시 Python 코드\n"
+        f"# 메뉴: {labels[normalized_action]}\n"
+        f"# 연결: {profile.get('name') or 'Redis 연결'}\n"
+        f"# AgentStudio-Redis-Connection-ID: {cid}\n"
+        f"# 대상: {target_label}\n"
+        f"# 노드: {normalized_kind} · 타입: {detected_type or '-'}\n"
+        f"# 생성 시각: {datetime.now().isoformat(timespec='seconds')}\n"
+        "# 이 파일은 자동 실행되지 않습니다. 실행 전에 Key/값/삭제 조건을 반드시 확인하세요.\n"
+        "# 저장된 Redis 비밀번호는 이 파일에 평문으로 포함하지 않습니다.\n\n"
+    )
+    content = header + connection + "\n" + body
+    scratch_path.write_text(content, encoding="utf-8", newline="\n")
+    return {
+        "ok": True,
+        "action": normalized_action,
+        "label": labels[normalized_action],
+        "db_type": "redis",
+        "node_kind": normalized_kind,
+        "key": key_name,
+        "prefix": prefix_name,
+        "key_type": detected_type,
+        "relative_path": scratch_path.relative_to(project_root).as_posix(),
+        "content": content,
+        "message": f"{labels[normalized_action]}를 Redis 임시 Python 파일로 생성했습니다. 자동 실행되지 않습니다.",
+    }
+
 def list_database_objects(root: str) -> dict[str, Any]:
     runtime = _require_active_runtime(root)
     conn = runtime["connection"]
@@ -1817,6 +2345,17 @@ def list_database_objects(root: str) -> dict[str, Any]:
             "schemas": [],
             "counts": {},
             "note": "Firestore는 NoSQL 문서 DB이므로 SQL Object Explorer를 사용하지 않습니다.",
+            "refreshed_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    if db_type == "redis":
+        return {
+            "ok": True,
+            "db_type": db_type,
+            "database": str(profile.get("database") or "0"),
+            "schemas": [],
+            "counts": {},
+            "note": "Redis는 NoSQL Key-Value DB이므로 SQL Object Explorer를 사용하지 않습니다.",
             "refreshed_at": datetime.now().isoformat(timespec="seconds"),
         }
 

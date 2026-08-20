@@ -1,7 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 from app.services.db_gateway import DatabaseGateway
-from app.services.folder_picker import pick_folder
+from app.services.folder_picker import pick_folder, pick_file
 from app.services.ollama_installer import install_ollama_windows
 from app.services.ollama_runtime_manager import get_ollama_runtime_status, start_ollama_server, stop_ollama_server
 import asyncio
@@ -16,6 +16,7 @@ from app.services.connection_test_service import (
     test_postgresql, test_postgresql_admin, test_pgvector, test_ollama, test_openai, test_tavily, test_langsmith, test_all
 )
 from app.services.llm_runtime_status_service import get_llm_runtime_status
+from app.services.connection_import_service import analyze_connection_file
 from app.services.weather_service import build_weather_dashboard, weather_config
 from app.services.llm_catalog_service import build_llm_catalog
 from app.services.project_root_registry import ensure_persisted_project_root
@@ -36,6 +37,10 @@ from app.services.sql_workspace_service import (
     execute as execute_sql_workspace,
     cancel_execution as cancel_sql_workspace_execution,
     list_database_objects as list_sql_workspace_objects,
+    list_redis_keys as list_sql_workspace_redis_keys,
+    get_redis_key as get_sql_workspace_redis_key,
+    create_redis_python_script as create_sql_workspace_redis_python_script,
+    redis_python_script_runtime_env as get_redis_python_script_runtime_env,
     sqlite_project_status as get_sqlite_project_status,
     open_database_object as open_sql_workspace_object,
     create_table_script as create_sql_workspace_table_script,
@@ -544,6 +549,13 @@ class SqlWorkspaceProfileRequest(BaseModel):
     trust_server_certificate: bool = True
 
 
+
+
+class SqlWorkspaceConnectionFileImportRequest(BaseModel):
+    root: str = ""
+    db_type: str
+    initial_path: str = ""
+
 class SqlWorkspaceConnectionRequest(BaseModel):
     root: str
     connection_id: str = ""
@@ -573,6 +585,15 @@ class SqlWorkspaceDatabaseAdminScriptRequest(BaseModel):
     root: str
     action: str
     value: str = ""
+
+
+class SqlWorkspaceRedisScriptRequest(BaseModel):
+    root: str
+    action: str
+    key: str = ""
+    key_type: str = ""
+    prefix: str = ""
+    node_kind: str = "key"
 
 
 class UsageSaveRequest(BaseModel):
@@ -1571,6 +1592,39 @@ async def sql_workspace_profile_get(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+
+
+@router.post("/sql/import-connection-file")
+async def sql_workspace_import_connection_file(req: SqlWorkspaceConnectionFileImportRequest):
+    kind = str(req.db_type or "").strip().lower()
+    if kind not in {"supabase", "firestore", "redis"}:
+        raise HTTPException(status_code=400, detail="파일 자동 분석은 Supabase, Google Cloud Firestore, Redis 연결에서 지원합니다.")
+
+    if kind == "supabase":
+        title = "Supabase PostgreSQL 연결 JSON 선택"
+        file_filter = "JSON 파일 (*.json)|*.json|모든 파일 (*.*)|*.*"
+    elif kind == "firestore":
+        title = "Google Cloud / Firebase Service Account JSON 선택"
+        file_filter = "Service Account JSON (*.json)|*.json|모든 파일 (*.*)|*.*"
+    else:
+        title = "Redis 연결 설정 파일 선택"
+        file_filter = "Redis 설정 (*.py;*.json;*.env;*.txt)|*.py;*.json;*.env;*.txt|Python (*.py)|*.py|JSON (*.json)|*.json|모든 파일 (*.*)|*.*"
+
+    initial = str(req.initial_path or req.root or "").strip()
+    picked = await pick_file(title=title, initial_path=initial, file_filter=file_filter)
+    if not picked.get("ok") or picked.get("cancelled"):
+        return picked
+
+    try:
+        analyzed = await asyncio.to_thread(analyze_connection_file, str(picked.get("path") or ""), kind)
+        return {**analyzed, "cancelled": False}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={
+            "message": f"연결 설정 파일 분석 실패: {exc}",
+            "exception": type(exc).__name__,
+        }) from exc
+
+
 @router.post("/sql/profile")
 async def sql_workspace_profile(req: SqlWorkspaceProfileRequest):
     try:
@@ -1650,6 +1704,55 @@ async def sql_workspace_objects(root: str = Query(...)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail={
             "message": f"DB Object Explorer 조회 실패: {exc}",
+            "exception": type(exc).__name__,
+        }) from exc
+
+
+@router.get("/sql/redis/keys")
+async def sql_workspace_redis_keys(
+    root: str = Query(...),
+    pattern: str = Query("*"),
+    limit: int = Query(1000, ge=1, le=5000),
+):
+    try:
+        return await asyncio.to_thread(list_sql_workspace_redis_keys, root, pattern, limit)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={
+            "message": f"Redis Key 목록 조회 실패: {exc}",
+            "exception": type(exc).__name__,
+        }) from exc
+
+
+@router.get("/sql/redis/key")
+async def sql_workspace_redis_key(
+    root: str = Query(...),
+    key: str = Query(...),
+    max_items: int = Query(500, ge=1, le=2000),
+):
+    try:
+        return await asyncio.to_thread(get_sql_workspace_redis_key, root, key, max_items)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={
+            "message": f"Redis Key 상세 조회 실패: {exc}",
+            "exception": type(exc).__name__,
+        }) from exc
+
+
+@router.post("/sql/redis/script")
+async def sql_workspace_redis_script(req: SqlWorkspaceRedisScriptRequest):
+    try:
+        return await asyncio.to_thread(
+            create_sql_workspace_redis_python_script,
+            req.root,
+            req.action,
+            req.key,
+            req.key_type,
+            req.prefix,
+            req.node_kind,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={
+            "message": f"Redis 임시 Python 코드 생성 실패: {exc}",
             "exception": type(exc).__name__,
         }) from exc
 
@@ -1749,7 +1852,7 @@ async def sql_workspace_postgresql_admin_script(req: SqlWorkspaceDatabaseAdminSc
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.276", "build": "NotebookWorkingDirectoryFix"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.282", "build": "RedisScratchExecutionCredentialFix"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -3071,6 +3174,11 @@ async def execute_python_editor_code(payload: dict):
         raise HTTPException(status_code=400, detail="Python(.py) 또는 Jupyter Notebook(.ipynb) 파일만 실행할 수 있습니다.")
 
     try:
+        execution_env = await asyncio.to_thread(
+            get_redis_python_script_runtime_env,
+            root,
+            relative_path,
+        )
         result = await asyncio.to_thread(
             python_execution_manager.execute,
             root=root,
@@ -3081,6 +3189,7 @@ async def execute_python_editor_code(payload: dict):
             capture_last_expression=capture_last_expression,
             notebook_mode=notebook_mode,
             cell_index=cell_index,
+            env_overrides=execution_env,
         )
         return result
     except (FileNotFoundError, ValueError) as exc:
@@ -4158,7 +4267,7 @@ async def workflow_start_job(req: WorkflowStartRequest):
 
 @router.post("/workflow/start")
 async def workflow_start(req: WorkflowStartRequest):
-    """호환용 동기 Endpoint. Frontend v5.276은 /workflow/start-job을 사용하며 시작 전 Backend 버전을 검증합니다."""
+    """호환용 동기 Endpoint. Frontend v5.282는 /workflow/start-job을 사용하며 시작 전 Backend 버전을 검증합니다."""
     thread_id = req.thread_id or uuid.uuid4().hex
     return await _execute_workflow_with_diagnostics(
         req=req,

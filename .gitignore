@@ -13,3 +13,5 @@ serviceAccountKey.json
 *service-account*.json
 *service_account*.json
 google-credentials*.json
+.agentstudio/sql_scratch/
+.agentstudio/redis_scratch/
