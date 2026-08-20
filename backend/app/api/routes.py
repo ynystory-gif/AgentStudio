@@ -537,6 +537,10 @@ class SqlWorkspaceProfileRequest(BaseModel):
     password: str = ""
     driver: str = "ODBC Driver 18 for SQL Server"
     service_name: str = ""
+    project_id: str = ""
+    service_account_json: str = ""
+    dashboard_url: str = ""
+    ssl_mode: str = ""
     trust_server_certificate: bool = True
 
 
@@ -1745,7 +1749,7 @@ async def sql_workspace_postgresql_admin_script(req: SqlWorkspaceDatabaseAdminSc
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.274", "build": "BalancedSystemSettingsColumnsLayoutFix"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.276", "build": "NotebookWorkingDirectoryFix"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -4154,7 +4158,7 @@ async def workflow_start_job(req: WorkflowStartRequest):
 
 @router.post("/workflow/start")
 async def workflow_start(req: WorkflowStartRequest):
-    """호환용 동기 Endpoint. Frontend v5.274은 /workflow/start-job을 사용하며 시작 전 Backend 버전을 검증합니다."""
+    """호환용 동기 Endpoint. Frontend v5.276은 /workflow/start-job을 사용하며 시작 전 Backend 버전을 검증합니다."""
     thread_id = req.thread_id or uuid.uuid4().hex
     return await _execute_workflow_with_diagnostics(
         req=req,

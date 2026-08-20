@@ -39,8 +39,10 @@ docker compose up -d postgres
 
 그 다음:
 ```text
-시스템관리.cmd
+SYSTEM_ADMIN.cmd
 ```
+
+> v5.276부터 사용자가 직접 실행하는 시스템 관리 진입점은 `SYSTEM_ADMIN.cmd` 하나만 사용합니다. `SYSTEM_ADMIN.ps1`은 `SYSTEM_ADMIN.cmd`가 내부적으로 호출하는 구현 파일입니다.
 
 ## UTF-8 CMD
 모든 CMD는 다음 기준을 사용합니다.
@@ -1375,13 +1377,11 @@ echo 문자열 일부를 명령어로 해석함.
 - SYSTEM_ADMIN.ps1에서만 한글 메시지 출력
 - SYSTEM_ADMIN.ps1을 UTF-8 BOM으로 저장
 - PowerShell Console OutputEncoding을 UTF-8로 지정
-- SYSTEM_ADMIN_DIAG.cmd 추가
-  - PowerShell controller를 `-NoExit`로 직접 실행하여 오류 확인 가능
+- 당시 진단용 별도 CMD가 추가되었으나, v5.276에서 사용자 실행 진입점을 `SYSTEM_ADMIN.cmd` 하나로 통일하면서 제거했습니다.
 
-권장 실행:
-1. SYSTEM_ADMIN.cmd 실행
-2. 문제가 남으면 SYSTEM_ADMIN_DIAG.cmd 실행
-3. PowerShell 상세 오류 화면 또는 logs 경로 확인
+현재 권장 실행:
+1. `SYSTEM_ADMIN.cmd` 실행
+2. 문제가 남으면 `SYSTEM_ADMIN.cmd`가 출력한 logs 경로 확인
 
 
 ## v5.61 PostgreSQL Health Check 비차단 방식

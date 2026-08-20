@@ -86,7 +86,7 @@ async def lifespan(app: FastAPI):
         await mcp_registry_monitor.stop()
         await agent_graph_runtime.stop()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.274", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.276", lifespan=lifespan)
 
 # Frontend 개발 서버(Vite)와 Backend API 간 CORS 허용
 app.add_middleware(

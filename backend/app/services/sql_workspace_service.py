@@ -20,7 +20,7 @@ from uuid import UUID
 _LEGACY_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 _LEGACY_PROFILE_FILE = _LEGACY_DATA_DIR / "sql_workspace_profiles.json"
 _LOCK = threading.RLock()
-_SUPPORTED_DB_TYPES = {"postgresql", "mssql", "oracle", "sqlite3"}
+_SUPPORTED_DB_TYPES = {"postgresql", "supabase", "firestore", "mssql", "oracle", "sqlite3"}
 # project_key -> connection_id -> live DB runtime
 _RUNTIME: dict[str, dict[str, dict[str, Any]]] = {}
 # project_key -> currently selected live/saved connection id
@@ -61,6 +61,8 @@ def _default_connection_name(db_type: str) -> str:
     kind = str(db_type or "postgresql").lower()
     return {
         "postgresql": "PostgreSQL 연결",
+        "supabase": "Supabase 연결",
+        "firestore": "Google Cloud Firestore 연결",
         "mssql": "MSSQL 연결",
         "oracle": "Oracle 연결",
         "sqlite3": "SQLite3 연결",
@@ -79,10 +81,32 @@ def _default_profile(db_type: str = "postgresql") -> dict[str, Any]:
         "username": "",
         "driver": "",
         "service_name": "",
+        "project_id": "",
+        "service_account_json": "",
+        "dashboard_url": "",
+        "ssl_mode": "",
         "trust_server_certificate": True,
     }
     if kind == "sqlite3":
         return {**common, "driver": "Python sqlite3 (stdlib)"}
+    if kind == "firestore":
+        return {
+            **common,
+            "database": "(default)",
+            "driver": "google-cloud-firestore",
+            "dashboard_url": "https://console.cloud.google.com/firestore/databases",
+        }
+    if kind == "supabase":
+        return {
+            **common,
+            "host": "",
+            "port": 5432,
+            "database": "postgres",
+            "username": "postgres",
+            "driver": "psycopg",
+            "dashboard_url": "https://supabase.com/dashboard",
+            "ssl_mode": "require",
+        }
     if kind == "mssql":
         return {
             **common,
@@ -159,7 +183,7 @@ def _normalize_database_history(value: Any) -> list[dict[str, Any]]:
         db_type = str(item.get("db_type") or "").strip().lower()
         host = str(item.get("host") or "").strip()
         database = str(item.get("database") or "").strip()
-        if db_type not in {"postgresql", "mssql"} or not host or not database:
+        if db_type not in {"postgresql", "supabase", "mssql"} or not host or not database:
             continue
         try:
             port = int(item.get("port") or 0)
@@ -456,6 +480,10 @@ def _make_profile_name(clean: dict[str, Any]) -> str:
     kind = str(clean.get("db_type") or "postgresql")
     if kind == "sqlite3":
         target = str(clean.get("database") or "").strip()
+    elif kind == "firestore":
+        project = str(clean.get("project_id") or "").strip()
+        database = str(clean.get("database") or "(default)").strip()
+        target = f"{project}/{database}".strip("/")
     elif kind == "oracle":
         target = f"{clean.get('host') or ''}/{clean.get('service_name') or ''}".strip("/")
     else:
@@ -682,15 +710,57 @@ def _connect_postgresql(profile: dict[str, Any], password: str):
     except Exception as exc:
         raise RuntimeError("PostgreSQL 드라이버 psycopg가 설치되어 있지 않습니다.") from exc
 
-    return psycopg.connect(
-        host=profile["host"],
-        port=int(profile["port"]),
-        dbname=profile["database"],
-        user=profile["username"],
-        password=password,
-        connect_timeout=8,
-        application_name="THEANOVA AgentStudio SQL Workspace",
+    kwargs = {
+        "host": profile["host"],
+        "port": int(profile["port"]),
+        "dbname": profile["database"],
+        "user": profile["username"],
+        "password": password,
+        "connect_timeout": 8,
+        "application_name": "THEANOVA AgentStudio SQL Workspace",
+    }
+    ssl_mode = str(profile.get("ssl_mode") or "").strip()
+    if ssl_mode:
+        kwargs["sslmode"] = ssl_mode
+    return psycopg.connect(**kwargs)
+
+
+def _resolve_firestore_service_account_path(root: str, raw_path: str) -> Path | None:
+    value = str(raw_path or "").strip().strip('"')
+    if not value:
+        return None
+    candidate = Path(os.path.expandvars(os.path.expanduser(value)))
+    if not candidate.is_absolute():
+        candidate = Path(_project_key(root)) / candidate
+    resolved = candidate.resolve()
+    if not resolved.exists() or not resolved.is_file():
+        raise RuntimeError(f"Firestore Service Account JSON 파일을 찾을 수 없습니다: {resolved}")
+    return resolved
+
+
+def _connect_firestore(root: str, profile: dict[str, Any]):
+    try:
+        from google.cloud import firestore as google_firestore
+    except Exception as exc:
+        raise RuntimeError(
+            "Google Cloud Firestore 드라이버가 설치되어 있지 않습니다. "
+            "backend 가상환경에서 google-cloud-firestore를 설치하세요."
+        ) from exc
+
+    project_id = str(profile.get("project_id") or "").strip() or None
+    database_id = str(profile.get("database") or "(default)").strip() or "(default)"
+    service_account_path = _resolve_firestore_service_account_path(
+        root, str(profile.get("service_account_json") or "")
     )
+    kwargs: dict[str, Any] = {}
+    if project_id:
+        kwargs["project"] = project_id
+    if database_id and database_id != "(default)":
+        kwargs["database"] = database_id
+
+    if service_account_path:
+        return google_firestore.Client.from_service_account_json(str(service_account_path), **kwargs)
+    return google_firestore.Client(**kwargs)
 
 
 def _connect_mssql(profile: dict[str, Any], password: str):
@@ -768,6 +838,12 @@ def _connect_sqlite(root: str, profile: dict[str, Any]):
 
 
 def _ping_connection(conn: Any, db_type: str) -> None:
+    if str(db_type or "").lower() == "firestore":
+        # collections() performs an authenticated Firestore RPC. Reading at most
+        # one collection name is enough to validate credentials/project access.
+        iterator = iter(conn.collections())
+        next(iterator, None)
+        return
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT 1 FROM DUAL" if db_type == "oracle" else "SELECT 1")
@@ -781,7 +857,7 @@ def _ping_connection(conn: Any, db_type: str) -> None:
 
 def _remember_database_history(root: str, profile: dict[str, Any]) -> None:
     db_type = str(profile.get("db_type") or "").strip().lower()
-    if db_type not in {"postgresql", "mssql"}:
+    if db_type not in {"postgresql", "supabase", "mssql"}:
         return
     host = str(profile.get("host") or "").strip()
     database = str(profile.get("database") or "").strip()
@@ -820,19 +896,24 @@ def connect(root: str, profile: dict[str, Any], password: str = "") -> dict[str,
     key = _project_key(root)
     clean = _sanitized_profile(profile)
     supplied_password = str(password or "")
-    if not clean.get("database") and clean["db_type"] != "oracle":
+    if clean["db_type"] == "firestore":
+        if not clean.get("database"):
+            clean["database"] = "(default)"
+    elif not clean.get("database") and clean["db_type"] != "oracle":
         raise RuntimeError("SQLite DB 파일 경로가 필요합니다." if clean["db_type"] == "sqlite3" else "Database 이름이 필요합니다.")
-    if clean["db_type"] != "sqlite3" and not clean.get("username"):
+    if clean["db_type"] not in {"sqlite3", "firestore"} and not clean.get("username"):
         raise RuntimeError("사용자 이름이 필요합니다.")
 
     saved = save_profile(root, clean, password=supplied_password if supplied_password else None)
     cid = str(saved.get("connection_id") or "")
     effective_password = supplied_password
-    if clean["db_type"] != "sqlite3" and not effective_password and saved.get("credential_saved"):
+    if clean["db_type"] not in {"sqlite3", "firestore"} and not effective_password and saved.get("credential_saved"):
         effective_password = _stored_password(root, cid)
 
     if clean["db_type"] == "sqlite3":
         conn = _connect_sqlite(root, saved)
+    elif clean["db_type"] == "firestore":
+        conn = _connect_firestore(root, saved)
     elif clean["db_type"] == "mssql":
         conn = _connect_mssql(saved, effective_password)
     elif clean["db_type"] == "oracle":
@@ -855,7 +936,7 @@ def connect(root: str, profile: dict[str, Any], password: str = "") -> dict[str,
         "connection": conn,
         "profile": saved,
         "connected_at": datetime.now().isoformat(timespec="seconds"),
-        "password_in_memory": bool(effective_password),
+        "password_in_memory": bool(effective_password) if clean["db_type"] != "firestore" else False,
     }
     with _LOCK:
         bucket = _runtime_bucket(key, create=True)
@@ -1103,6 +1184,8 @@ def execute(root: str, sql: str, max_rows: int = 1000) -> dict[str, Any]:
     runtime = _require_active_runtime(root)
     conn = runtime["connection"]
     db_type = str(runtime.get("profile", {}).get("db_type", "") or "").lower()
+    if db_type == "firestore":
+        raise RuntimeError("Google Cloud Firestore는 SQL 실행 대상이 아닙니다. Firestore SDK/CRUD 기능을 사용하세요.")
     statements = [item for item in _split_sql_statements(statement, db_type) if item.strip()]
     if not statements:
         raise RuntimeError("실행할 SQL이 없습니다.")
@@ -1724,6 +1807,18 @@ def list_database_objects(root: str) -> dict[str, Any]:
     conn = runtime["connection"]
     profile = _sanitized_profile(runtime.get("profile"))
     db_type = profile.get("db_type", "postgresql")
+
+    if db_type == "firestore":
+        return {
+            "ok": True,
+            "db_type": db_type,
+            "database": profile.get("database") or "(default)",
+            "project_id": profile.get("project_id") or "",
+            "schemas": [],
+            "counts": {},
+            "note": "Firestore는 NoSQL 문서 DB이므로 SQL Object Explorer를 사용하지 않습니다.",
+            "refreshed_at": datetime.now().isoformat(timespec="seconds"),
+        }
 
     if db_type == "sqlite3":
         schemas_map = _sqlite_objects(conn)

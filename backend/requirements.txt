@@ -22,3 +22,6 @@ openai>=1.100
 # SQL Workspace external database drivers
 pyodbc>=5.2
 oracledb>=2.5
+
+# Google Cloud Firestore database provider
+google-cloud-firestore>=2.21

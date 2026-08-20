@@ -8,3 +8,8 @@ dist/
 .idea/
 *.log
 data/
+# Google Cloud / Firebase service account credentials
+serviceAccountKey.json
+*service-account*.json
+*service_account*.json
+google-credentials*.json

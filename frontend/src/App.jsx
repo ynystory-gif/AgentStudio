@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { api, connectJobs, runtimeInfo } from './api'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.274'
+const AGENTSTUDIO_FRONTEND_VERSION='5.276'
 
 const joinWin = (root, file) => `${root}\\${file}`.replaceAll('\\\\', '\\')
 const localIsoDate = () => {
@@ -3263,10 +3263,15 @@ function IDE() {
     password:'',
     driver:'ODBC Driver 18 for SQL Server',
     service_name:'FREEPDB1',
+    project_id:'',
+    service_account_json:'',
+    dashboard_url:'',
+    ssl_mode:'',
     trust_server_certificate:true,
     credential_saved:false
   })
   const [sqlConnections,setSqlConnections]=useState([])
+  const [sqlSupabaseConnectionUrl,setSqlSupabaseConnectionUrl]=useState('')
   const [sqlDatabaseManual,setSqlDatabaseManual]=useState(false)
   const [sqlConnectionStatus,setSqlConnectionStatus]=useState(null)
   const [sqlConnectionBusy,setSqlConnectionBusy]=useState(false)
@@ -3594,18 +3599,44 @@ function IDE() {
 
   const sqlProfileForType=(dbType,previous={})=>{
     const kind=String(dbType||'postgresql').toLowerCase()
+    const common={connection_id:'',name:'DB 연결',db_type:kind,host:'',port:0,database:'',username:'',password:'',driver:'',service_name:'',project_id:'',service_account_json:'',dashboard_url:'',ssl_mode:'',trust_server_certificate:true,credential_saved:false}
     const defaults=kind==='sqlite3'
-      ? {connection_id:'',name:'SQLite3 연결',db_type:'sqlite3',host:'',port:0,database:'',username:'',password:'',driver:'Python sqlite3 (stdlib)',service_name:'',trust_server_certificate:true,credential_saved:false}
-      : kind==='mssql'
-        ? {connection_id:'',name:'MSSQL 연결',db_type:'mssql',host:'127.0.0.1',port:1433,database:'',username:'',password:'',driver:'ODBC Driver 18 for SQL Server',service_name:'',trust_server_certificate:true,credential_saved:false}
-        : kind==='oracle'
-          ? {connection_id:'',name:'Oracle 연결',db_type:'oracle',host:'127.0.0.1',port:1521,database:'',username:'',password:'',driver:'',service_name:'FREEPDB1',trust_server_certificate:true,credential_saved:false}
-          : {connection_id:'',name:'PostgreSQL 연결',db_type:'postgresql',host:'127.0.0.1',port:5432,database:'',username:'postgres',password:'',driver:'',service_name:'',trust_server_certificate:true,credential_saved:false}
+      ? {...common,name:'SQLite3 연결',db_type:'sqlite3',database:'',driver:'Python sqlite3 (stdlib)'}
+      : kind==='firestore'
+        ? {...common,name:'Google Cloud Firestore 연결',db_type:'firestore',database:'(default)',driver:'google-cloud-firestore',dashboard_url:'https://console.cloud.google.com/firestore/databases'}
+        : kind==='supabase'
+          ? {...common,name:'Supabase 연결',db_type:'supabase',host:'',port:5432,database:'postgres',username:'postgres',driver:'psycopg',dashboard_url:'https://supabase.com/dashboard',ssl_mode:'require'}
+          : kind==='mssql'
+            ? {...common,name:'MSSQL 연결',db_type:'mssql',host:'127.0.0.1',port:1433,driver:'ODBC Driver 18 for SQL Server'}
+            : kind==='oracle'
+              ? {...common,name:'Oracle 연결',db_type:'oracle',host:'127.0.0.1',port:1521,service_name:'FREEPDB1'}
+              : {...common,name:'PostgreSQL 연결',db_type:'postgresql',host:'127.0.0.1',port:5432,username:'postgres'}
     return {...defaults,...previous,db_type:kind,port:(previous.db_type===kind&&previous.port!==undefined)?previous.port:defaults.port}
   }
 
+
+  const applySupabaseConnectionUrl=()=>{
+    const raw=String(sqlSupabaseConnectionUrl||'').trim()
+    if(!raw) return
+    try{
+      const normalized=raw.replace(/^postgresql\+[^:]+:/i,'postgresql:').replace(/^postgres:/i,'postgresql:')
+      const parsed=new URL(normalized)
+      const host=parsed.hostname||''
+      const port=Number(parsed.port||5432)
+      const database=decodeURIComponent((parsed.pathname||'/postgres').replace(/^\//,'')||'postgres')
+      const username=decodeURIComponent(parsed.username||'postgres')
+      const password=decodeURIComponent(parsed.password||'')
+      if(!host) throw new Error('Host를 읽을 수 없습니다.')
+      setSqlProfile(prev=>({...prev,db_type:'supabase',host,port,database,username,password,ssl_mode:prev.ssl_mode||'require'}))
+      setSqlSupabaseConnectionUrl('')
+      setSqlMessages(prev=>[{type:'info',text:'Supabase Connection URL을 Host/Port/Database/User/Password로 분해했습니다. 원본 URL은 저장하지 않습니다.',time:new Date().toLocaleTimeString()},...prev].slice(0,100))
+    }catch(e){
+      setSqlMessages(prev=>[{type:'error',text:`Supabase Connection URL 형식 확인 필요: ${e}`,time:new Date().toLocaleTimeString()},...prev].slice(0,100))
+    }
+  }
+
   const getSqlDatabaseHistory=()=>{
-    if(['sqlite3','oracle'].includes(String(sqlProfile.db_type||'').toLowerCase())) return []
+    if(['sqlite3','oracle','firestore'].includes(String(sqlProfile.db_type||'').toLowerCase())) return []
     const kind=String(sqlProfile.db_type||'').toLowerCase()
     const host=String(sqlProfile.host||'').trim().toLowerCase()
     const port=Number(sqlProfile.port||0)
@@ -3640,6 +3671,7 @@ function IDE() {
 
   const newSqlWorkspaceConnection=(dbType=sqlProfile.db_type||'postgresql')=>{
     const fresh=sqlProfileForType(dbType)
+    setSqlSupabaseConnectionUrl('')
     setSqlDatabaseManual(false)
     setSqlProfile(fresh)
     setSqlConnectionStatus(prev=>prev?{...prev,connected:false,connected_at:null,profile:fresh}:prev)
@@ -3650,6 +3682,7 @@ function IDE() {
 
   const selectSqlWorkspaceConnection=async(connectionId)=>{
     if(!activeWorkspaceRoot) return
+    setSqlSupabaseConnectionUrl('')
     const cid=String(connectionId||'')
     if(!cid){
       newSqlWorkspaceConnection()
@@ -3662,7 +3695,7 @@ function IDE() {
         body:JSON.stringify({root:activeWorkspaceRoot,connection_id:cid})
       })
       applySqlWorkspaceStatus(status,{preservePassword:false})
-      if(status?.connected) await loadSqlDbObjects({quiet:true})
+      if(status?.connected&&status?.profile?.db_type!=='firestore') await loadSqlDbObjects({quiet:true})
       else{
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
@@ -3699,6 +3732,11 @@ function IDE() {
   const loadSqlDbObjects=async({quiet=false}={})=>{
     const workspaceRoot=activeWorkspaceRoot
     if(!workspaceRoot) return null
+    if(String(sqlProfile.db_type||'').toLowerCase()==='firestore'){
+      setSqlDbObjects(null)
+      setSqlDbObjectsError('')
+      return null
+    }
     if(!quiet) setSqlDbObjectsBusy(true)
     setSqlDbObjectsError('')
     try{
@@ -4014,7 +4052,7 @@ function IDE() {
       const rootChanged=sqlLoadedRootRef.current!==workspaceRoot
       sqlLoadedRootRef.current=workspaceRoot
       applySqlWorkspaceStatus(status,{preservePassword:!rootChanged})
-      if(status?.connected){
+      if(status?.connected&&status?.profile?.db_type!=='firestore'){
         await loadSqlDbObjects({quiet:true})
       }else{
         setSqlDbObjects(null)
@@ -4096,7 +4134,12 @@ function IDE() {
         text:`${status?.profile?.name||String(status?.profile?.db_type||sqlProfile.db_type).toUpperCase()} 연결 성공${status?.profile?.credential_saved?' · 저장된 보안 자격증명 사용 가능':''}`,
         time:new Date().toLocaleTimeString()
       },...prev].slice(0,100))
-      await loadSqlDbObjects({quiet:true})
+      if((status?.profile?.db_type||sqlProfile.db_type)!=='firestore') await loadSqlDbObjects({quiet:true})
+      else{
+        setSqlDbObjects(null)
+        setSqlDbObjectsError('')
+        setSqlDbObjectExpanded({})
+      }
       if((status?.profile?.db_type||sqlProfile.db_type)==='sqlite3') await loadSqliteProjectStatus({quiet:true})
     }catch(e){
       setSqlConnectionStatus(prev=>({...prev,connected:false,error:String(e)}))
@@ -4202,8 +4245,6 @@ function IDE() {
       setWorkspaceRightCollapsed(false)
       loadSqlWorkspaceStatus()
       loadSqliteProjectStatus({quiet:true})
-    }else if(codeRightPanelTab==='SQL_DB'){
-      setCodeRightPanelTab('FILES')
     }
   },[workspaceTab,selected,activeWorkspaceRoot])
 
@@ -14194,14 +14235,14 @@ function IDE() {
             AI 변경 제안
             {codeEditProposal&&<span className="code-proposal-badge">1</span>}
           </button>
-          {isSqlFile&&<button
+          <button
             type="button"
             className={codeRightPanelTab==='SQL_DB'?'active':''}
-            onClick={()=>setCodeRightPanelTab('SQL_DB')}
+            onClick={()=>{setCodeRightPanelTab('SQL_DB');loadSqlWorkspaceStatus()}}
           >
             DB 연결
             <span className={sqlConnectionStatus?.connected?'sql-tab-dot connected':'sql-tab-dot'}></span>
-          </button>}
+          </button>
         </div>
 
         {codeRightPanelTab==='FILES'&&
@@ -14280,7 +14321,7 @@ function IDE() {
           }
         </div>}
 
-        {codeRightPanelTab==='SQL_DB'&&isSqlFile&&
+        {codeRightPanelTab==='SQL_DB'&&
         <div className="info-card sql-connection-panel code-tab-panel">
           <div className="sql-connection-panel-head">
             <div>
@@ -14330,7 +14371,7 @@ function IDE() {
             <input
               value={sqlProfile.name||''}
               onChange={e=>setSqlProfile(prev=>({...prev,name:e.target.value}))}
-              placeholder="예: 운영 MSSQL / 개발 PostgreSQL / Oracle ERP"
+              placeholder="예: 운영 MSSQL / 개발 PostgreSQL / Supabase / Firestore"
             />
           </label>
 
@@ -14338,23 +14379,50 @@ function IDE() {
             <span>DB 종류</span>
             <select value={sqlProfile.db_type} onChange={e=>{
               const nextType=e.target.value
-              setSqlProfile(prev=>({
-                ...sqlProfileForType(nextType),
-                connection_id:prev.connection_id||'',
-                name:prev.name||sqlProfileForType(nextType).name,
-                credential_saved:prev.db_type===nextType?!!prev.credential_saved:false,
-                password:''
-              }))
+              setSqlSupabaseConnectionUrl('')
+              setSqlProfile(prev=>{
+                const previousDefaultName=sqlProfileForType(prev.db_type||'postgresql').name
+                const nextDefaultName=sqlProfileForType(nextType).name
+                return {
+                  ...sqlProfileForType(nextType),
+                  connection_id:prev.connection_id||'',
+                  name:(!prev.name||prev.name===previousDefaultName)?nextDefaultName:prev.name,
+                  credential_saved:prev.db_type===nextType?!!prev.credential_saved:false,
+                  password:''
+                }
+              })
               if(nextType==='sqlite3') loadSqliteProjectStatus({quiet:true})
             }}>
               <option value="postgresql">PostgreSQL</option>
+              <option value="supabase">Supabase (PostgreSQL)</option>
+              <option value="firestore">Google Cloud Firestore</option>
               <option value="mssql">MSSQL</option>
               <option value="oracle">Oracle</option>
               <option value="sqlite3">SQLite3</option>
             </select>
           </label>
 
-          {sqlProfile.db_type==='sqlite3'
+          {sqlProfile.db_type==='firestore'
+            ? <>
+                <label className="sql-field">
+                  <span>Google Cloud Project ID</span>
+                  <input value={sqlProfile.project_id||''} onChange={e=>setSqlProfile(prev=>({...prev,project_id:e.target.value}))} placeholder="예: my-firebase-project"/>
+                </label>
+                <label className="sql-field">
+                  <span>Firestore Database ID</span>
+                  <input value={sqlProfile.database||''} onChange={e=>setSqlProfile(prev=>({...prev,database:e.target.value}))} placeholder="(default)"/>
+                </label>
+                <label className="sql-field">
+                  <span>Service Account JSON 경로</span>
+                  <input value={sqlProfile.service_account_json||''} onChange={e=>setSqlProfile(prev=>({...prev,service_account_json:e.target.value}))} placeholder="serviceAccountKey.json · 비워두면 GOOGLE_APPLICATION_CREDENTIALS/ADC 사용"/>
+                </label>
+                <div className="sql-connection-info">
+                  <div><span>드라이버</span><code>google-cloud-firestore</code></div>
+                  <div><span>구조</span><code>Collection → Document → Field</code></div>
+                  <small>Service Account JSON 파일 자체의 내용은 AgentStudio 설정에 저장하지 않고 파일 경로만 저장합니다.</small>
+                </div>
+              </>
+            : sqlProfile.db_type==='sqlite3'
             ? <>
                 <label className="sql-field">
                   <span>SQLite DB 파일</span>
@@ -14391,6 +14459,22 @@ function IDE() {
                 </div>
               </>
             : <>
+                {sqlProfile.db_type==='supabase'&&<>
+                  <label className="sql-field">
+                    <span>Supabase Connection URL</span>
+                    <input
+                      type="password"
+                      value={sqlSupabaseConnectionUrl}
+                      onChange={e=>setSqlSupabaseConnectionUrl(e.target.value)}
+                      placeholder="postgresql://USER:PASSWORD@HOST:5432/postgres"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <div className="sql-profile-manager-actions">
+                    <button type="button" onClick={applySupabaseConnectionUrl} disabled={!String(sqlSupabaseConnectionUrl||'').trim()}>Connection URL 적용</button>
+                  </div>
+                  <small className="muted">Dashboard에서 복사한 URL은 저장하지 않고 아래 연결 필드로만 분해합니다.</small>
+                </>}
                 <div className="sql-field-grid two">
                   <label className="sql-field"><span>Host</span><input value={sqlProfile.host||''} onChange={e=>setSqlProfile(prev=>({...prev,host:e.target.value}))}/></label>
                   <label className="sql-field"><span>Port</span><input type="number" value={sqlProfile.port||''} onChange={e=>setSqlProfile(prev=>({...prev,port:Number(e.target.value)||0}))}/></label>
@@ -14441,6 +14525,8 @@ function IDE() {
                   <label className="sql-field"><span>ODBC Driver</span><input value={sqlProfile.driver||''} onChange={e=>setSqlProfile(prev=>({...prev,driver:e.target.value}))}/></label>
                   <label className="sql-check-field"><input type="checkbox" checked={!!sqlProfile.trust_server_certificate} onChange={e=>setSqlProfile(prev=>({...prev,trust_server_certificate:e.target.checked}))}/><span>Trust Server Certificate</span></label>
                 </>}
+                {sqlProfile.db_type==='supabase'&&
+                  <label className="sql-field"><span>SSL Mode</span><input value={sqlProfile.ssl_mode||'require'} onChange={e=>setSqlProfile(prev=>({...prev,ssl_mode:e.target.value}))} placeholder="require"/></label>}
               </>}
 
           <div className="sql-connection-actions">
@@ -14448,6 +14534,8 @@ function IDE() {
             <button type="button" className="primary" onClick={connectSqlWorkspace} disabled={sqlConnectionBusy}>{sqlConnectionBusy?'처리 중...':'연결 / 테스트'}</button>
             <button type="button" onClick={disconnectSqlWorkspace} disabled={sqlConnectionBusy||!sqlConnectionStatus?.connected}>현재 연결 해제</button>
             <button type="button" onClick={loadSqlWorkspaceStatus} disabled={sqlConnectionBusy}>상태 새로고침</button>
+            {sqlProfile.db_type==='supabase'&&<button type="button" onClick={()=>window.open('https://supabase.com/dashboard','_blank','noopener,noreferrer')}>Supabase Dashboard</button>}
+            {sqlProfile.db_type==='firestore'&&<button type="button" onClick={()=>window.open('https://console.cloud.google.com/firestore/databases','_blank','noopener,noreferrer')}>Google Cloud Firestore</button>}
           </div>
 
           <div className="sql-connection-info">
@@ -14459,30 +14547,37 @@ function IDE() {
             {sqlConnectionStatus?.connected_at&&<div><span>연결 시각</span><code>{sqlConnectionStatus.connected_at}</code></div>}
             {!!(sqlConnectionStatus?.saved_db_types||[]).length&&<div><span>등록된 DB 종류</span><code>{sqlConnectionStatus.saved_db_types.map(v=>String(v).toUpperCase()).join(', ')}</code></div>}
             {sqlConnectionStatus?.profile_storage_path&&<div><span>연결 정보 저장 위치</span><code title={sqlConnectionStatus.profile_storage_path}>{sqlConnectionStatus.profile_storage_path}</code></div>}
-            {sqlProfile.db_type!=='sqlite3'&&<div><span>비밀번호 저장</span><code>{sqlConnectionStatus?.credential_storage||'Windows DPAPI'}</code></div>}
+            {!['sqlite3','firestore'].includes(sqlProfile.db_type)&&<div><span>비밀번호 저장</span><code>{sqlConnectionStatus?.credential_storage||'Windows DPAPI'}</code></div>}
+            {sqlProfile.db_type==='firestore'&&<div><span>인증</span><code>{sqlProfile.service_account_json?'Service Account JSON':'GOOGLE_APPLICATION_CREDENTIALS / ADC'}</code></div>}
             <small>{sqlProfile.db_type==='sqlite3'
               ? 'SQLite3도 여러 DB 파일을 각각 별도의 연결로 등록할 수 있습니다.'
-              : '동일한 DB 종류도 연결 이름을 다르게 하여 여러 개 등록할 수 있습니다. Windows에서는 비밀번호를 DPAPI 현재 사용자 범위로 암호화하여 저장하며 평문으로 기록하지 않습니다.'}</small>
+              : sqlProfile.db_type==='firestore'
+                ? 'Firestore는 NoSQL 문서형 DB입니다. AgentStudio에서는 Project/Database/Service Account 경로를 저장하고 연결을 테스트합니다.'
+                : sqlProfile.db_type==='supabase'
+                  ? 'Supabase는 PostgreSQL 기반 관리형 플랫폼으로 psycopg와 SSL(require)을 사용해 SQL Workspace에 연결합니다.'
+                  : '동일한 DB 종류도 연결 이름을 다르게 하여 여러 개 등록할 수 있습니다. Windows에서는 비밀번호를 DPAPI 현재 사용자 범위로 암호화하여 저장하며 평문으로 기록하지 않습니다.'}</small>
           </div>
 
           <div className="sql-object-explorer">
             <div className="sql-object-explorer-head">
               <div>
-                <strong>DB Object Explorer</strong>
-                <small>테이블 · 뷰 · 프로시저 · 함수 · 인덱스 · 시퀀스 · 트리거</small>
-                <small className="sql-object-doubleclick-help">더블클릭: 테이블은 전체 컬럼 SELECT 조회 · 기타 객체는 수정용 임시 SQL 생성</small>
+                <strong>{sqlProfile.db_type==='firestore'?'Firestore 연결':'DB Object Explorer'}</strong>
+                <small>{sqlProfile.db_type==='firestore'?'NoSQL Document Database · Collection → Document → Field':'테이블 · 뷰 · 프로시저 · 함수 · 인덱스 · 시퀀스 · 트리거'}</small>
+                <small className="sql-object-doubleclick-help">{sqlProfile.db_type==='firestore'?'현재 버전에서는 Firestore 인증/연결 테스트를 지원하며 SQL 실행은 사용하지 않습니다.':'더블클릭: 테이블은 전체 컬럼 SELECT 조회 · 기타 객체는 수정용 임시 SQL 생성'}</small>
               </div>
               <button
                 type="button"
                 onClick={()=>loadSqlDbObjects()}
-                disabled={!sqlConnectionStatus?.connected||sqlDbObjectsBusy}
+                disabled={sqlProfile.db_type==='firestore'||!sqlConnectionStatus?.connected||sqlDbObjectsBusy}
                 title="DB 객체 목록 새로고침"
               >
                 {sqlDbObjectsBusy?'…':'↻'}
               </button>
             </div>
 
-            {!sqlConnectionStatus?.connected
+            {sqlProfile.db_type==='firestore'
+              ? <div className="sql-object-empty">{sqlConnectionStatus?.connected?'Firestore 인증 및 연결 테스트가 성공했습니다. 컬렉션/문서 작업은 프로젝트 코드에서 Google Cloud Firestore SDK를 사용하세요.':'Project ID와 인증 정보를 입력한 뒤 연결 / 테스트를 실행하세요.'}</div>
+              : !sqlConnectionStatus?.connected
               ? <div className="sql-object-empty">DB에 연결하면 개발 객체 목록이 표시됩니다.</div>
               : sqlDbObjectsBusy&&!sqlDbObjects
                 ? <div className="sql-object-empty">DB 객체를 읽고 있습니다...</div>

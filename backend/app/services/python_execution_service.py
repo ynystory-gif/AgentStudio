@@ -75,6 +75,10 @@ for raw in sys.stdin:
         code = str(request.get("code") or "")
         filename = str(request.get("filename") or "<agentstudio>")
         root = str(request.get("root") or os.getcwd())
+        # v5.276: Notebook 셀은 일반 Jupyter와 동일하게 현재 .ipynb 파일이
+        # 들어 있는 폴더를 작업 디렉터리(CWD)로 사용한다. 프로젝트 root는
+        # 인터프리터/세션/sys.path 기준으로 계속 유지한다.
+        working_directory = str(request.get("working_directory") or root)
         reset = bool(request.get("reset"))
         capture_last_expression = bool(request.get("capture_last_expression"))
         notebook_mode = bool(request.get("notebook_mode"))
@@ -93,10 +97,11 @@ for raw in sys.stdin:
         namespace["__name__"] = "__main__"
         namespace["__package__"] = None
 
-        if root:
-            os.chdir(root)
-            if root not in sys.path:
-                sys.path.insert(0, root)
+        if working_directory:
+            os.chdir(working_directory)
+
+        if root and root not in sys.path:
+            sys.path.insert(0, root)
 
         file_parent = os.path.dirname(filename) if filename and not filename.startswith("<") else ""
         if file_parent and os.path.isdir(file_parent) and file_parent not in sys.path:
@@ -391,13 +396,19 @@ class PythonExecutionManager:
         # Use a non-existent cell-specific pseudo filename for compile()/traceback so
         # SyntaxError never renders notebook JSON such as `"cells": [` as source.
         execution_filename = str(filename_path)
+        execution_working_directory = project_root
         if notebook_mode and relative.lower().endswith(".ipynb"):
             display_cell = (int(cell_index) + 1) if cell_index is not None else 1
             execution_filename = f"{filename_path}.cell-{display_cell}.py"
+            # 상대 경로(Path/open/CSV/JSON/Firebase key 등)는 Notebook 파일
+            # 위치를 기준으로 해석한다. Worker 프로세스 자체는 프로젝트별로
+            # 재사용하므로 매 셀 실행 요청마다 CWD를 이 경로로 다시 맞춘다.
+            execution_working_directory = filename_path.parent
 
         session = self._get_or_create(str(project_root), session_id)
         request = {
             "root": str(project_root),
+            "working_directory": str(execution_working_directory),
             "code": str(code or ""),
             "filename": execution_filename,
             "reset": bool(reset),
@@ -494,6 +505,7 @@ class PythonExecutionManager:
             "session_id": session.session_id,
             "root": str(project_root),
             "relative_path": relative,
+            "working_directory": str(execution_working_directory),
             "persistent": True,
             "reset": bool(reset),
             "capture_last_expression": bool(capture_last_expression),
