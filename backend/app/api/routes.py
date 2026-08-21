@@ -17,6 +17,12 @@ from app.services.connection_test_service import (
 )
 from app.services.llm_runtime_status_service import get_llm_runtime_status
 from app.services.connection_import_service import analyze_connection_file
+from app.services.database_runtime_service import (
+    runtime_status as get_database_runtime_status,
+    activate_database_provider,
+    initialize_supabase_schema,
+    schema_script_path as get_supabase_schema_script_path,
+)
 from app.services.weather_service import build_weather_dashboard, weather_config
 from app.services.llm_catalog_service import build_llm_catalog
 from app.services.project_root_registry import ensure_persisted_project_root
@@ -516,6 +522,17 @@ class DatabaseProvisionRequest(BaseModel):
     app_password: str = ""
     database_name: str = "theanova_agentstudio"
 
+class DatabaseRuntimeActivateRequest(BaseModel):
+    provider: str = "local"
+    supabase_database_url: str = ""
+    supabase_langgraph_database_url: str = ""
+    initialize_schema: bool = True
+
+
+class SupabaseSchemaInitializeRequest(BaseModel):
+    database_url: str = ""
+    langgraph_database_url: str = ""
+
 class RequirementSaveRequest(BaseModel):
     project_id: int | None = None
     key: str
@@ -748,6 +765,44 @@ async def save_database_environment(req: DatabaseEnvSettingsRequest):
         })
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/settings/database-runtime")
+async def settings_database_runtime_status():
+    return await get_database_runtime_status()
+
+
+@router.post("/settings/database-runtime/activate")
+async def settings_database_runtime_activate(req: DatabaseRuntimeActivateRequest):
+    try:
+        return await activate_database_provider(
+            req.provider,
+            supabase_database_url=req.supabase_database_url,
+            supabase_langgraph_database_url=req.supabase_langgraph_database_url,
+            initialize_schema=req.initialize_schema,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Runtime DB 전환 실패: {exc}") from exc
+
+
+@router.post("/settings/database-runtime/supabase/initialize-schema")
+async def settings_supabase_initialize_schema(req: SupabaseSchemaInitializeRequest):
+    try:
+        return await initialize_supabase_schema(req.database_url, req.langgraph_database_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Supabase 스키마 생성 실패: {exc}") from exc
+
+
+@router.get("/settings/database-runtime/supabase/schema-script")
+async def settings_supabase_schema_script():
+    path = get_supabase_schema_script_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Supabase 전체 스키마 SQL 파일을 찾을 수 없습니다.")
+    return FileResponse(path, media_type="application/sql", filename=path.name)
 
 
 @router.post("/settings/test/postgresql")
@@ -1852,7 +1907,7 @@ async def sql_workspace_postgresql_admin_script(req: SqlWorkspaceDatabaseAdminSc
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.282", "build": "RedisScratchExecutionCredentialFix"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.284", "build": "SupabaseIdempotentSchemaProvisioningFix"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -4267,7 +4322,7 @@ async def workflow_start_job(req: WorkflowStartRequest):
 
 @router.post("/workflow/start")
 async def workflow_start(req: WorkflowStartRequest):
-    """호환용 동기 Endpoint. Frontend v5.282는 /workflow/start-job을 사용하며 시작 전 Backend 버전을 검증합니다."""
+    """호환용 동기 Endpoint. Frontend v5.284는 /workflow/start-job을 사용하며 시작 전 Backend 버전을 검증합니다."""
     thread_id = req.thread_id or uuid.uuid4().hex
     return await _execute_workflow_with_diagnostics(
         req=req,

@@ -19,6 +19,7 @@ from app.services.settings_service import migrate_env_settings_to_db, load_db_se
 from app.core.machine_identity import ensure_pc_name_env
 from app.services.project_root_registry import restore_registered_project_roots
 from app.services.llm_usage_service import prune_llm_history
+from app.services.database_runtime_service import apply_saved_database_provider
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -39,7 +40,18 @@ async def lifespan(app: FastAPI):
         migration = await migrate_env_settings_to_db()
         runtime = await load_db_settings_into_runtime()
 
+        # v5.284: local PostgreSQL remains the bootstrap/control DB; Supabase activation is verified before switch.
+        # If Supabase was selected on this PC, switch the runtime DB only after
+        # local settings have been restored safely.
+        runtime_db = await apply_saved_database_provider()
+
         print("[완료되었습니다] PostgreSQL/pgvector 초기화")
+        print(
+            f"[완료되었습니다] Runtime DB: {runtime_db.get('active_provider', 'local')} "
+            f"· {runtime_db.get('target', '')}"
+        )
+        if not runtime_db.get("ok", True):
+            print(f"[경고] Runtime DB 전환: {runtime_db.get('message', '')}")
 
         if migration.get("migrated"):
             print(f"[완료되었습니다] 설정 DB 이관: {migration['migrated']}개")
@@ -86,7 +98,7 @@ async def lifespan(app: FastAPI):
         await mcp_registry_monitor.stop()
         await agent_graph_runtime.stop()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.282", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.284", lifespan=lifespan)
 
 # Frontend 개발 서버(Vite)와 Backend API 간 CORS 허용
 app.add_middleware(

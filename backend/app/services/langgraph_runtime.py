@@ -24,13 +24,20 @@ class AgentGraphRuntime:
         self.graph = None
         self.persistent = False
         self._active_url = ""
+        self._override_url = ""
         self._lock = asyncio.Lock()
         self._last_attempt_monotonic = 0.0
         self.last_error = ""
 
-    @staticmethod
-    def _current_url() -> str:
-        return str(get_settings().langgraph_database_url or "").strip()
+    def _current_url(self) -> str:
+        return str(self._override_url or get_settings().langgraph_database_url or "").strip()
+
+    async def set_database_url(self, url: str, *, restart: bool = False) -> bool:
+        """Set a runtime-only LangGraph PostgreSQL URL without overwriting the local bootstrap URL."""
+        self._override_url = str(url or "").strip()
+        if restart:
+            return await self.start(force=True)
+        return True
 
     async def _close_checkpointer_locked(self) -> None:
         if self._cm is not None:
@@ -131,6 +138,7 @@ class AgentGraphRuntime:
             self.graph = None
             self.persistent = False
             self._active_url = ""
+            self._override_url = ""
             self.last_error = ""
 
 

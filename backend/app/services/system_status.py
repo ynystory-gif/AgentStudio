@@ -4,6 +4,7 @@ from app.core.machine_identity import current_pc_name, detect_system_pc_name
 from app.services.langgraph_runtime import agent_graph_runtime
 from app.services.model_router import routing_table
 from app.services.connection_test_service import test_postgresql
+from app.services.database_runtime_service import current_runtime_database_url, runtime_status as get_database_runtime_status
 
 def _port_open(host: str, port: int) -> bool:
     try:
@@ -17,7 +18,8 @@ async def get_status():
     # DB URL이 실행 중 변경되었거나 시작 시 영속화 연결이 실패했으면 자동 복구를 시도합니다.
     await agent_graph_runtime.ensure_current()
     postgres_port_open = _port_open("127.0.0.1", 5432)
-    postgres_test = await test_postgresql()
+    postgres_test = await test_postgresql(current_runtime_database_url())
+    database_runtime = await get_database_runtime_status()
     return {
         "pc_name": current_pc_name(),
         "system_host_name": detect_system_pc_name(),
@@ -28,6 +30,8 @@ async def get_status():
         "postgres": bool(postgres_test.get("ok")),
         "postgres_port_open": postgres_port_open,
         "postgres_message": postgres_test.get("message", ""),
+        "database_runtime_provider": database_runtime.get("active_provider", "local"),
+        "database_runtime_target": database_runtime.get("supabase_target") if database_runtime.get("active_provider")=="supabase" else database_runtime.get("local_target"),
         "fastapi": True,
         "ollama": _port_open("127.0.0.1", 11434),
         "openai_key": bool(s.openai_api_key),

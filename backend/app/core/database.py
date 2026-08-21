@@ -83,12 +83,23 @@ async def init_db():
 
 
 async def migrate_agentstudio_schema() -> dict:
-    """
-    기존 AgentStudio DB를 삭제하지 않고 필요한 컬럼/기본값을 안전하게 보정합니다.
+    """현재 AgentStudio runtime engine의 스키마를 안전하게 보정합니다."""
+    return await migrate_agentstudio_schema_on_engine(engine)
 
-    SQLAlchemy create_all()은 기존 테이블에 새 컬럼을 추가하지 않으므로,
-    버전 업 시 필요한 ALTER TABLE을 별도로 실행합니다.
+
+async def migrate_agentstudio_schema_on_engine(target_engine) -> dict:
     """
+    지정한 PostgreSQL engine의 AgentStudio 스키마를 삭제 없이 보정합니다.
+
+    v5.284에서는 신규/기존 Supabase 모두 같은 migration을 반복 실행할 수 있도록
+    실제 SQL 적용부를 connection 단위 함수로 분리했습니다.
+    """
+    async with target_engine.begin() as conn:
+        return await migrate_agentstudio_schema_on_connection(conn)
+
+
+async def migrate_agentstudio_schema_on_connection(conn) -> dict:
+    """이미 열린 transaction 안에서 AgentStudio 호환 migration을 적용합니다."""
     # Project ORM이 요구하는 전체 컬럼을 보정합니다.
     # create_all()은 이미 존재하는 projects 테이블에 새 컬럼을 추가하지 않으므로
     # 과거 버전 DB에서도 현재 ORM SELECT가 실패하지 않도록 모두 IF NOT EXISTS로 관리합니다.
@@ -182,26 +193,23 @@ async def migrate_agentstudio_schema() -> dict:
 
     applied = []
 
-    async with engine.begin() as conn:
-        # 기존 로컬 DB의 app_settings는 현재 PC 설정으로 귀속시켜 보존합니다.
-        # 먼저 pc_name 컬럼만 만든 뒤 기존 빈 값을 현재 PC 이름으로 채웁니다.
-        await conn.execute(text(machine_setting_statements[0]))
-        applied.append(" ".join(machine_setting_statements[0].strip().split()))
-        await conn.execute(
-            text("UPDATE app_settings SET pc_name = :pc_name WHERE COALESCE(pc_name, '') = ''"),
-            {"pc_name": pc_name},
-        )
-        applied.append(f"app_settings legacy rows -> pc_name={pc_name}")
+    # 기존 DB의 app_settings는 현재 PC 설정으로 귀속시켜 보존합니다.
+    # 먼저 pc_name 컬럼만 만든 뒤 기존 빈 값을 현재 PC 이름으로 채웁니다.
+    await conn.execute(text(machine_setting_statements[0]))
+    applied.append(" ".join(machine_setting_statements[0].strip().split()))
+    await conn.execute(
+        text("UPDATE app_settings SET pc_name = :pc_name WHERE COALESCE(pc_name, '') = ''"),
+        {"pc_name": pc_name},
+    )
+    applied.append(f"app_settings legacy rows -> pc_name={pc_name}")
 
-        for sql in machine_setting_statements[1:]:
-            await conn.execute(text(sql))
-            applied.append(" ".join(sql.strip().split()))
+    for sql in machine_setting_statements[1:]:
+        await conn.execute(text(sql))
+        applied.append(" ".join(sql.strip().split()))
 
-        for sql in statements:
-            await conn.execute(text(sql))
-            applied.append(
-                " ".join(sql.strip().split())
-            )
+    for sql in statements:
+        await conn.execute(text(sql))
+        applied.append(" ".join(sql.strip().split()))
 
     return {
         "ok": True,

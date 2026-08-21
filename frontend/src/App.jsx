@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { api, connectJobs, runtimeInfo } from './api'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.282'
+const AGENTSTUDIO_FRONTEND_VERSION='5.284'
 
 const joinWin = (root, file) => `${root}\\${file}`.replaceAll('\\\\', '\\')
 const localIsoDate = () => {
@@ -916,6 +916,12 @@ function SystemPage() {
   const [portCheckBusy,setPortCheckBusy]=useState(false)
   const [machineName,setMachineName]=useState('')
   const [machineNameBusy,setMachineNameBusy]=useState(false)
+  const [databaseRuntime,setDatabaseRuntime]=useState(null)
+  const [databaseProviderChoice,setDatabaseProviderChoice]=useState('local')
+  const [supabaseRuntimeUrl,setSupabaseRuntimeUrl]=useState('')
+  const [supabaseLanggraphRuntimeUrl,setSupabaseLanggraphRuntimeUrl]=useState('')
+  const [databaseRuntimeBusy,setDatabaseRuntimeBusy]=useState(false)
+  const [databaseRuntimeResult,setDatabaseRuntimeResult]=useState(null)
   const pgAdminPasswordRef=useRef(null)
   const agentDbPasswordRef=useRef(null)
 
@@ -931,6 +937,14 @@ function SystemPage() {
         setOllamaRuntime(await api('/settings/ollama/runtime/status'))
       }catch{
         setOllamaRuntime(null)
+      }
+
+      try{
+        const dbRuntime=await api('/settings/database-runtime')
+        setDatabaseRuntime(dbRuntime)
+        setDatabaseProviderChoice(dbRuntime?.selected_provider||dbRuntime?.active_provider||'local')
+      }catch{
+        setDatabaseRuntime(null)
       }
 
       const backendPort=Number(cfg.AGENTSTUDIO_BACKEND_PORT||8000)
@@ -1002,6 +1016,56 @@ function SystemPage() {
     }catch(e){
       setError(String(e))
     }finally{setBusy(false)}
+  }
+
+  const activateRuntimeDatabase=async()=>{
+    setDatabaseRuntimeBusy(true); setMessage(''); setError(''); setDatabaseRuntimeResult(null)
+    try{
+      const payload={
+        provider:databaseProviderChoice,
+        supabase_database_url:String(supabaseRuntimeUrl||'').trim(),
+        supabase_langgraph_database_url:String(supabaseLanggraphRuntimeUrl||'').trim(),
+        initialize_schema:databaseProviderChoice==='supabase'
+      }
+      const r=await api('/settings/database-runtime/activate',{method:'POST',body:JSON.stringify(payload)})
+      setDatabaseRuntimeResult(r)
+      setMessage(r?.message||'Runtime DB 전환을 완료했습니다.')
+      const next=await api('/settings/database-runtime')
+      setDatabaseRuntime(next)
+      setDatabaseProviderChoice(next?.selected_provider||next?.active_provider||databaseProviderChoice)
+      await refresh()
+    }catch(e){
+      setError(String(e))
+      setDatabaseRuntimeResult({ok:false,message:String(e)})
+    }finally{
+      setDatabaseRuntimeBusy(false)
+    }
+  }
+
+  const initializeSupabaseRuntimeSchema=async()=>{
+    setDatabaseRuntimeBusy(true); setMessage(''); setError(''); setDatabaseRuntimeResult(null)
+    try{
+      const r=await api('/settings/database-runtime/supabase/initialize-schema',{
+        method:'POST',
+        body:JSON.stringify({
+          database_url:String(supabaseRuntimeUrl||'').trim(),
+          langgraph_database_url:String(supabaseLanggraphRuntimeUrl||'').trim()
+        })
+      })
+      setDatabaseRuntimeResult(r)
+      setMessage(r?.message||'Supabase 스키마 준비/검증을 완료했습니다.')
+      setDatabaseRuntime(await api('/settings/database-runtime'))
+    }catch(e){
+      setError(String(e))
+      setDatabaseRuntimeResult({ok:false,message:String(e)})
+    }finally{
+      setDatabaseRuntimeBusy(false)
+    }
+  }
+
+  const downloadSupabaseSchemaScript=()=>{
+    const base=runtimeInfo().apiBase
+    window.open(`${base}/settings/database-runtime/supabase/schema-script`,'_blank','noopener,noreferrer')
   }
 
   const saveMachineName=async()=>{
@@ -1674,8 +1738,67 @@ function SystemPage() {
         <div className="settings-column settings-column-left">
       <section className="settings-panel">
         <h2>PostgreSQL / LangGraph</h2>
-        {renderField("DATABASE URL","DATABASE_URL","text","")}
-        {renderField("LangGraph DB URL","LANGGRAPH_DATABASE_URL","text","")}
+
+        <div className="database-runtime-switch-box">
+          <h3>AgentStudio Runtime DB 선택</h3>
+          <div className="hint-box">
+            기본은 <b>기존 로컬 PostgreSQL</b>입니다. Supabase PostgreSQL을 선택하면 먼저 로컬 PostgreSQL의
+            <b> app_settings</b>에 선택 상태를 기록한 뒤 AgentStudio runtime DB와 LangGraph Checkpointer를 Supabase로 전환합니다.
+            Supabase 비밀번호가 포함된 URL은 로컬 DB에 저장하지 않고 <b>backend/.env</b>에만 저장합니다.
+          </div>
+          <div className="database-provider-choice">
+            <label className={databaseProviderChoice==='local'?'active':''}>
+              <input type="radio" name="agentstudio-db-provider" value="local" checked={databaseProviderChoice==='local'} onChange={()=>setDatabaseProviderChoice('local')}/>
+              <span><b>로컬 PostgreSQL</b><small>기본 / Control DB</small></span>
+            </label>
+            <label className={databaseProviderChoice==='supabase'?'active':''}>
+              <input type="radio" name="agentstudio-db-provider" value="supabase" checked={databaseProviderChoice==='supabase'} onChange={()=>setDatabaseProviderChoice('supabase')}/>
+              <span><b>Supabase PostgreSQL</b><small>선택 사용</small></span>
+            </label>
+          </div>
+          <div className="database-runtime-summary">
+            <div><b>현재 사용:</b> {databaseRuntime?.active_provider==='supabase'?'Supabase PostgreSQL':'로컬 PostgreSQL'}</div>
+            <div><b>로컬 DB:</b> {databaseRuntime?.local_target||'-'}</div>
+            <div><b>Supabase:</b> {databaseRuntime?.supabase_target||'아직 설정되지 않음'}</div>
+            {databaseRuntime?.last_error&&<div className="runtime-db-warning">{databaseRuntime.last_error}</div>}
+          </div>
+          {databaseProviderChoice==='supabase'&&<>
+            <label className="setting-field">
+              <span>Supabase DATABASE URL</span>
+              <input value={supabaseRuntimeUrl} onChange={e=>setSupabaseRuntimeUrl(e.target.value)} placeholder={databaseRuntime?.supabase_configured?'저장된 Supabase URL 사용 가능 · 변경할 때만 입력':'postgresql+psycopg://USER:PASSWORD@HOST:5432/postgres'}/>
+            </label>
+            <label className="setting-field">
+              <span>Supabase LangGraph DB URL</span>
+              <input value={supabaseLanggraphRuntimeUrl} onChange={e=>setSupabaseLanggraphRuntimeUrl(e.target.value)} placeholder={databaseRuntime?.supabase_configured?'비우면 저장된 값 또는 DATABASE URL 기준 자동 사용':'postgresql://USER:PASSWORD@HOST:5432/postgres'}/>
+            </label>
+            <div className="hint-box">
+              최초/업그레이드 모두 <b>Supabase 스키마 준비/검증</b>을 사용할 수 있습니다. pgvector와 AgentStudio 테이블은 transaction으로 멱등 보정하고, LangGraph 테이블은 설치된 Checkpointer의 공식 setup()으로 migration한 뒤 필수 구조를 재검증합니다.
+              <b> Supabase 사용 적용</b>은 모든 검증이 성공한 경우에만 전환하며 실패하면 로컬 PostgreSQL을 유지합니다.
+            </div>
+          </>}
+          <div className="panel-actions database-runtime-actions">
+            {databaseProviderChoice==='supabase'&&<button disabled={databaseRuntimeBusy} onClick={initializeSupabaseRuntimeSchema}>Supabase 스키마 준비/검증</button>}
+            {databaseProviderChoice==='supabase'&&<button disabled={databaseRuntimeBusy} onClick={downloadSupabaseSchemaScript}>Supabase 스키마 SQL 다운로드</button>}
+            <button className="primary-install" disabled={databaseRuntimeBusy} onClick={activateRuntimeDatabase}>
+              {databaseRuntimeBusy?'DB 전환 중...':databaseProviderChoice==='supabase'?'Supabase PostgreSQL 사용 적용':'로컬 PostgreSQL 사용 적용'}
+            </button>
+          </div>
+          {databaseRuntimeResult&&<div className={databaseRuntimeResult.ok===false?'test-result badbox':'test-result okbox'}>
+            <div>{databaseRuntimeResult.message||'-'}</div>
+            {databaseRuntimeResult.target&&<div>대상: {databaseRuntimeResult.target}</div>}
+            {databaseRuntimeResult.local_settings_updated&&<div>로컬 DB 설정 업데이트: 완료</div>}
+            {databaseRuntimeResult.schema?.agentstudio_table_count!==undefined&&<div>AgentStudio 테이블 확인: {databaseRuntimeResult.schema.agentstudio_table_count}개</div>}
+            {(databaseRuntimeResult.schema?.verification?.ok===true||databaseRuntimeResult.verification?.ok===true)&&<div>테이블/컬럼/PK/UNIQUE/INDEX/FK 재검증: 정상</div>}
+            {(databaseRuntimeResult.schema?.vector||databaseRuntimeResult.vector)&&<div>pgvector: {(databaseRuntimeResult.schema?.vector||databaseRuntimeResult.vector)==='already_installed'?'이미 설치됨':'설치/확인 완료'}</div>}
+            {(databaseRuntimeResult.schema?.langgraph?.migration_count!==undefined||databaseRuntimeResult.langgraph?.migration_count!==undefined)&&<div>LangGraph migration 기록: {databaseRuntimeResult.schema?.langgraph?.migration_count??databaseRuntimeResult.langgraph?.migration_count}개</div>}
+            {(databaseRuntimeResult.schema?.rolled_back===true||databaseRuntimeResult.rolled_back===true)&&<div>실패 단계 변경사항: rollback 완료</div>}
+            {databaseRuntimeResult.langgraph_ok===false&&databaseRuntimeResult.langgraph_error&&<details><summary>LangGraph 확인 필요</summary><pre>{databaseRuntimeResult.langgraph_error}</pre></details>}
+            {databaseRuntimeResult.schema?.langgraph?.ok===false&&<details><summary>LangGraph migration/검증 실패</summary><pre>{databaseRuntimeResult.schema?.langgraph?.message||'-'}</pre></details>}
+          </div>}
+        </div>
+
+        {renderField("로컬 DATABASE URL (기본 / Control DB)","DATABASE_URL","text","")}
+        {renderField("로컬 LangGraph DB URL","LANGGRAPH_DATABASE_URL","text","")}
         {renderPathField("PostgreSQL 18 설치 경로","POSTGRESQL18_ROOT","PostgreSQL 18이 설치된 폴더를 입력하세요.")}
         <label className="setting-field">
           <span>PostgreSQL 관리자 사용자</span>

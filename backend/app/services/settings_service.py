@@ -198,6 +198,12 @@ def _write_env_values(values: dict[str, str]) -> None:
         )
 
 
+
+
+def write_env_values(values: dict[str, str]) -> None:
+    """Public wrapper for local bootstrap/runtime settings that must stay in backend/.env."""
+    _write_env_values(values)
+
 def _write_bootstrap_values(values: dict[str, str]) -> None:
     filtered = {key: value for key, value in values.items() if key in BOOTSTRAP_KEYS}
     if filtered:
@@ -609,6 +615,13 @@ async def save_database_env_settings(values: dict[str, Any]) -> dict[str, Any]:
     if not env_values:
         raise ValueError("저장할 DB 환경 설정이 없습니다.")
 
+    # v5.284: DATABASE_URL/LANGGRAPH_DATABASE_URL은 항상 기본 로컬 PostgreSQL을 뜻합니다.
+    # Supabase runtime을 선택해도 이 값을 덮어쓰지 않고 별도 SUPABASE_* 키를 사용합니다.
+    if "DATABASE_URL" in env_values:
+        env_values["AGENTSTUDIO_LOCAL_DATABASE_URL"] = env_values["DATABASE_URL"]
+    if "LANGGRAPH_DATABASE_URL" in env_values:
+        env_values["AGENTSTUDIO_LOCAL_LANGGRAPH_DATABASE_URL"] = env_values["LANGGRAPH_DATABASE_URL"]
+
     # DB 접속 없이 파일에 먼저 확정 저장합니다.
     _write_env_values(env_values)
     get_settings.cache_clear()
@@ -622,7 +635,8 @@ async def save_database_env_settings(values: dict[str, Any]) -> dict[str, Any]:
     database_rebound = False
     database_rebind_error = ""
     database_url = str(env_values.get("DATABASE_URL") or actual.get("DATABASE_URL") or "").strip()
-    if database_url:
+    active_provider = str(actual.get("AGENTSTUDIO_DATABASE_PROVIDER") or "local").strip().lower()
+    if database_url and active_provider != "supabase":
         try:
             from app.core.database import rebind_database
             await rebind_database(database_url)
@@ -636,9 +650,10 @@ async def save_database_env_settings(values: dict[str, Any]) -> dict[str, Any]:
     # Backend 재시작 없이 LangGraph 영속화를 복구할 수 있습니다.
     langgraph_rebound = False
     langgraph_rebind_error = ""
-    if "LANGGRAPH_DATABASE_URL" in env_values:
+    if "LANGGRAPH_DATABASE_URL" in env_values and active_provider != "supabase":
         try:
             from app.services.langgraph_runtime import agent_graph_runtime
+            await agent_graph_runtime.set_database_url(str(env_values["LANGGRAPH_DATABASE_URL"]), restart=False)
             langgraph_rebound = bool(await agent_graph_runtime.restart())
             if not langgraph_rebound:
                 langgraph_rebind_error = agent_graph_runtime.last_error
@@ -729,6 +744,11 @@ async def update_settings(
 
     # 모든 설정을 PC 로컬 .env fallback cache에 먼저 저장합니다.
     # 공용 DB가 죽어 있어도 시스템 관리 화면에서 설정을 잃지 않습니다.
+    if "DATABASE_URL" in bootstrap_values:
+        bootstrap_values["AGENTSTUDIO_LOCAL_DATABASE_URL"] = bootstrap_values["DATABASE_URL"]
+    if "LANGGRAPH_DATABASE_URL" in bootstrap_values:
+        bootstrap_values["AGENTSTUDIO_LOCAL_LANGGRAPH_DATABASE_URL"] = bootstrap_values["LANGGRAPH_DATABASE_URL"]
+
     local_values = {**bootstrap_values, **db_values}
     database_rebound = False
     database_rebind_error = ""
@@ -739,7 +759,8 @@ async def update_settings(
     # DATABASE_URL 저장은 파일 기록만으로 끝내지 않고 현재 Backend DB Engine에도
     # 즉시 반영합니다. 테스트가 성공한 화면 값과 실제 프로젝트/설정 DB가 달라지는
     # 문제를 방지합니다. 실패하더라도 .env 저장값은 유지하여 재시작 후 복구할 수 있습니다.
-    if "DATABASE_URL" in bootstrap_values and str(bootstrap_values.get("DATABASE_URL") or "").strip():
+    active_provider = str(read_env_dict().get("AGENTSTUDIO_DATABASE_PROVIDER") or "local").strip().lower()
+    if active_provider != "supabase" and "DATABASE_URL" in bootstrap_values and str(bootstrap_values.get("DATABASE_URL") or "").strip():
         try:
             from app.core.database import rebind_database
             await rebind_database(str(bootstrap_values["DATABASE_URL"]).strip())

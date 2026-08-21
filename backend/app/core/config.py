@@ -9,6 +9,12 @@ class Settings(BaseSettings):
     agentstudio_system_host_name: str = ""
     database_url: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/theanova_agentstudio"
     langgraph_database_url: str = "postgresql://postgres:postgres@127.0.0.1:5432/theanova_agentstudio"
+    # v5.284: local PostgreSQL remains the bootstrap/control DB. Supabase is optional after schema verification.
+    local_database_url: str = ""
+    local_langgraph_database_url: str = ""
+    agentstudio_database_provider: str = "local"
+    supabase_database_url: str = ""
+    supabase_langgraph_database_url: str = ""
 
     openai_api_key: str = ""
     openai_model: str = "gpt-5-mini"
@@ -75,6 +81,11 @@ def _read_backend_env_overrides() -> dict:
         "AGENTSTUDIO_SYSTEM_HOST_NAME": "agentstudio_system_host_name",
         "DATABASE_URL": "database_url",
         "LANGGRAPH_DATABASE_URL": "langgraph_database_url",
+        "AGENTSTUDIO_LOCAL_DATABASE_URL": "local_database_url",
+        "AGENTSTUDIO_LOCAL_LANGGRAPH_DATABASE_URL": "local_langgraph_database_url",
+        "AGENTSTUDIO_DATABASE_PROVIDER": "agentstudio_database_provider",
+        "SUPABASE_DATABASE_URL": "supabase_database_url",
+        "SUPABASE_LANGGRAPH_DATABASE_URL": "supabase_langgraph_database_url",
         "POSTGRESQL18_ROOT": "postgresql18_root",
     }
     found = {}

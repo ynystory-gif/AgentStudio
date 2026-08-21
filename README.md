@@ -1,3 +1,26 @@
+## v5.284 Supabase 멱등 스키마 준비 + 검증 후 안전 전환
+
+- 신규/기존 Supabase 모두 같은 `Supabase 스키마 준비/검증` 작업을 반복 실행할 수 있습니다.
+- pgvector + AgentStudio DDL/호환 migration/index 보정을 하나의 transaction으로 처리합니다.
+- 테이블/컬럼/PK/UNIQUE/INDEX/FK를 재검증하고 실패 시 해당 DDL transaction을 rollback합니다.
+- LangGraph 테이블은 수동 SQL 정의 대신 설치된 `AsyncPostgresSaver.setup()` 공식 migration을 사용합니다.
+- Supabase Runtime DB는 AgentStudio + LangGraph 검증이 모두 성공한 뒤에만 활성화합니다.
+- 전환 실패 시 기본 로컬 PostgreSQL로 복귀하고 기존 데이터를 삭제하지 않습니다.
+- 실행 진입점은 기존 `SYSTEM_ADMIN.cmd` 하나를 그대로 사용합니다.
+
+## v5.283 로컬 PostgreSQL 기본 + Supabase PostgreSQL Runtime 선택
+
+- AgentStudio의 기본/Control DB는 기존 로컬 PostgreSQL을 유지합니다.
+- 시스템 관리 `PostgreSQL / LangGraph` 영역에 `로컬 PostgreSQL` / `Supabase PostgreSQL` Runtime 선택 UI를 추가했습니다.
+- Supabase 선택 시 먼저 로컬 PostgreSQL `app_settings`에 현재 PC의 DB Provider 선택 상태를 기록한 뒤 AgentStudio Runtime DB Engine을 Supabase PostgreSQL로 재연결합니다.
+- Supabase 비밀번호가 포함될 수 있는 DATABASE URL/LangGraph URL은 로컬 DB에 평문 저장하지 않고 `backend/.env`의 `SUPABASE_DATABASE_URL`, `SUPABASE_LANGGRAPH_DATABASE_URL`에만 저장합니다.
+- Backend 시작 시 항상 로컬 PostgreSQL을 먼저 bootstrap/control DB로 초기화한 뒤, 로컬 설정에서 Supabase 선택 상태를 확인하여 Supabase Runtime으로 자동 전환합니다. Supabase 자동 전환 실패 시 AgentStudio가 기동 불능이 되지 않도록 로컬 PostgreSQL로 안전 복귀합니다.
+- `backend/sql/supabase_agentstudio_full_schema.sql`을 추가했습니다. v5.284부터 이 SQL은 pgvector + AgentStudio ORM 스키마만 멱등 관리하고 LangGraph는 공식 `setup()` migration으로 분리합니다.
+- 시스템 관리에서 Supabase 스키마 준비/검증, 스키마 SQL 다운로드, Supabase/로컬 Runtime 전환 기능을 제공합니다.
+- Supabase 사용 적용 시 AgentStudio ORM `create_all` + 호환 마이그레이션 + LangGraph `AsyncPostgresSaver.setup()`을 실행하여 필요한 테이블을 준비한 후 Runtime DB를 전환합니다.
+- 기존 `DATABASE_URL` / `LANGGRAPH_DATABASE_URL`은 로컬 기본 DB를 계속 의미하며 Supabase 선택으로 덮어쓰지 않습니다.
+- 별도 패치 CMD를 추가하지 않으며 기존처럼 `SYSTEM_ADMIN.cmd`만 사용합니다.
+
 # THEANOVA AgentStudio
 
 ## v5.282 Redis 임시 Python 실행/자격증명 주입 수정
