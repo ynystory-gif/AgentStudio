@@ -181,9 +181,34 @@ def notebook_source_lines(text: str) -> list[str]:
     return result
 
 
+def _normalize_notebook_cell_magic_source(replacement: str) -> str:
+    """Keep supported Jupyter cell magics at the physical first line.
+
+    LLM responses occasionally contain one or more blank lines before
+    ``%%writefile`` even when instructed not to.  Real Jupyter-style cell
+    magics belong at the top of a cell, so remove only those leading blank
+    lines when the first meaningful line is a supported cell magic.
+    """
+    text = str(replacement or "")
+    lines = text.splitlines(True)
+    first_meaningful = None
+    for index, line in enumerate(lines):
+        if line.strip("\ufeff \t\r\n"):
+            first_meaningful = index
+            break
+    if first_meaningful is None:
+        return text
+
+    first = lines[first_meaningful].lstrip("\ufeff \t").casefold()
+    if first.startswith("%%writefile"):
+        return "".join(lines[first_meaningful:])
+    return text
+
+
 def merge_notebook_cell(context: NotebookEditContext, replacement: str) -> str:
     notebook = json.loads(json.dumps(context.notebook, ensure_ascii=False))
     cell = notebook["cells"][context.active_cell_index]
+    replacement = _normalize_notebook_cell_magic_source(replacement)
     cell["source"] = notebook_source_lines(replacement)
     # A changed code cell no longer has a valid execution result.
     cell["execution_count"] = None

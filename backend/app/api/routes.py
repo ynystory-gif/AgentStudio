@@ -20,6 +20,7 @@ from app.services.connection_import_service import analyze_connection_file
 from app.services.database_runtime_service import (
     runtime_status as get_database_runtime_status,
     activate_database_provider,
+    save_supabase_runtime_settings,
     initialize_supabase_schema,
     schema_script_path as get_supabase_schema_script_path,
 )
@@ -29,10 +30,15 @@ from app.services.project_root_registry import ensure_persisted_project_root
 from app.services.terminal_completion_service import complete_terminal_input
 from app.services.managed_process_service import managed_process_service
 from app.services.python_execution_service import python_execution_manager
+from app.services.presentation_preview_service import (
+    PresentationPreviewError,
+    prepare_presentation_preview,
+)
 from app.services.sql_workspace_service import (
     get_profile as get_sql_workspace_profile,
     list_profiles as list_sql_workspace_profiles,
     save_profile as save_sql_workspace_profile,
+    rename_profile as rename_sql_workspace_profile,
     delete_profile as delete_sql_workspace_profile,
     activate_profile as activate_sql_workspace_profile,
     profile_storage_info as get_sql_workspace_profile_storage_info,
@@ -45,7 +51,11 @@ from app.services.sql_workspace_service import (
     list_database_objects as list_sql_workspace_objects,
     list_redis_keys as list_sql_workspace_redis_keys,
     get_redis_key as get_sql_workspace_redis_key,
+    list_firestore_collections as list_sql_workspace_firestore_collections,
+    list_firestore_documents as list_sql_workspace_firestore_documents,
+    get_firestore_document as get_sql_workspace_firestore_document,
     create_redis_python_script as create_sql_workspace_redis_python_script,
+    create_firestore_python_script as create_sql_workspace_firestore_python_script,
     redis_python_script_runtime_env as get_redis_python_script_runtime_env,
     sqlite_project_status as get_sqlite_project_status,
     open_database_object as open_sql_workspace_object,
@@ -526,12 +536,20 @@ class DatabaseRuntimeActivateRequest(BaseModel):
     provider: str = "local"
     supabase_database_url: str = ""
     supabase_langgraph_database_url: str = ""
+    supabase_db_schema: str = "theanova_agentstudio"
     initialize_schema: bool = True
+
+
+class SupabaseRuntimeSettingsSaveRequest(BaseModel):
+    database_url: str = ""
+    langgraph_database_url: str = ""
+    schema: str = "theanova_agentstudio"
 
 
 class SupabaseSchemaInitializeRequest(BaseModel):
     database_url: str = ""
     langgraph_database_url: str = ""
+    schema: str = "theanova_agentstudio"
 
 class RequirementSaveRequest(BaseModel):
     project_id: int | None = None
@@ -555,6 +573,7 @@ class SqlWorkspaceProfileRequest(BaseModel):
     host: str = "127.0.0.1"
     port: int = 5432
     database: str = ""
+    schema_name: str = ""
     username: str = ""
     password: str = ""
     driver: str = "ODBC Driver 18 for SQL Server"
@@ -576,6 +595,12 @@ class SqlWorkspaceConnectionFileImportRequest(BaseModel):
 class SqlWorkspaceConnectionRequest(BaseModel):
     root: str
     connection_id: str = ""
+
+
+class SqlWorkspaceRenameRequest(BaseModel):
+    root: str
+    connection_id: str
+    name: str
 
 
 class SqlWorkspaceExecuteRequest(BaseModel):
@@ -611,6 +636,13 @@ class SqlWorkspaceRedisScriptRequest(BaseModel):
     key_type: str = ""
     prefix: str = ""
     node_kind: str = "key"
+
+
+class SqlWorkspaceFirestoreScriptRequest(BaseModel):
+    root: str
+    action: str
+    path: str = ""
+    node_kind: str = "collection"
 
 
 class UsageSaveRequest(BaseModel):
@@ -779,6 +811,7 @@ async def settings_database_runtime_activate(req: DatabaseRuntimeActivateRequest
             req.provider,
             supabase_database_url=req.supabase_database_url,
             supabase_langgraph_database_url=req.supabase_langgraph_database_url,
+            supabase_db_schema=req.supabase_db_schema,
             initialize_schema=req.initialize_schema,
         )
     except ValueError as exc:
@@ -787,10 +820,24 @@ async def settings_database_runtime_activate(req: DatabaseRuntimeActivateRequest
         raise HTTPException(status_code=500, detail=f"Runtime DB 전환 실패: {exc}") from exc
 
 
+@router.post("/settings/database-runtime/supabase/save")
+async def settings_supabase_runtime_save(req: SupabaseRuntimeSettingsSaveRequest):
+    try:
+        return await save_supabase_runtime_settings(
+            req.database_url,
+            req.langgraph_database_url,
+            req.schema,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Supabase 정보 저장 실패: {exc}") from exc
+
+
 @router.post("/settings/database-runtime/supabase/initialize-schema")
 async def settings_supabase_initialize_schema(req: SupabaseSchemaInitializeRequest):
     try:
-        return await initialize_supabase_schema(req.database_url, req.langgraph_database_url)
+        return await initialize_supabase_schema(req.database_url, req.langgraph_database_url, req.schema)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -1694,6 +1741,14 @@ async def sql_workspace_profile(req: SqlWorkspaceProfileRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/sql/profile/rename")
+async def sql_workspace_profile_rename(req: SqlWorkspaceRenameRequest):
+    try:
+        return await asyncio.to_thread(rename_sql_workspace_profile, req.root, req.connection_id, req.name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/sql/profile/delete")
 async def sql_workspace_profile_delete(req: SqlWorkspaceConnectionRequest):
     try:
@@ -1763,6 +1818,49 @@ async def sql_workspace_objects(root: str = Query(...)):
         }) from exc
 
 
+@router.get("/sql/firestore/collections")
+async def sql_workspace_firestore_collections(
+    root: str = Query(...),
+    limit: int = Query(500, ge=1, le=2000),
+):
+    try:
+        return await asyncio.to_thread(list_sql_workspace_firestore_collections, root, limit)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={
+            "message": f"Firestore Collection 목록 조회 실패: {exc}",
+            "exception": type(exc).__name__,
+        }) from exc
+
+
+@router.get("/sql/firestore/documents")
+async def sql_workspace_firestore_documents(
+    root: str = Query(...),
+    collection: str = Query(...),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    try:
+        return await asyncio.to_thread(list_sql_workspace_firestore_documents, root, collection, limit)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={
+            "message": f"Firestore Document 목록 조회 실패: {exc}",
+            "exception": type(exc).__name__,
+        }) from exc
+
+
+@router.get("/sql/firestore/document")
+async def sql_workspace_firestore_document(
+    root: str = Query(...),
+    path: str = Query(...),
+):
+    try:
+        return await asyncio.to_thread(get_sql_workspace_firestore_document, root, path)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={
+            "message": f"Firestore Document 상세 조회 실패: {exc}",
+            "exception": type(exc).__name__,
+        }) from exc
+
+
 @router.get("/sql/redis/keys")
 async def sql_workspace_redis_keys(
     root: str = Query(...),
@@ -1808,6 +1906,23 @@ async def sql_workspace_redis_script(req: SqlWorkspaceRedisScriptRequest):
     except Exception as exc:
         raise HTTPException(status_code=400, detail={
             "message": f"Redis 임시 Python 코드 생성 실패: {exc}",
+            "exception": type(exc).__name__,
+        }) from exc
+
+
+@router.post("/sql/firestore/script")
+async def sql_workspace_firestore_script(req: SqlWorkspaceFirestoreScriptRequest):
+    try:
+        return await asyncio.to_thread(
+            create_sql_workspace_firestore_python_script,
+            req.root,
+            req.action,
+            req.path,
+            req.node_kind,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={
+            "message": f"Firestore 임시 Python 코드 생성 실패: {exc}",
             "exception": type(exc).__name__,
         }) from exc
 
@@ -1907,7 +2022,7 @@ async def sql_workspace_postgresql_admin_script(req: SqlWorkspaceDatabaseAdminSc
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.284", "build": "SupabaseIdempotentSchemaProvisioningFix"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.306", "build": "TypeScriptTerminalWebSocketMigration"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -2179,6 +2294,138 @@ async def project_pdf_view(root: str = Query(...), relative_path: str = Query(..
     )
 
 
+@router.post("/files/presentation/prepare")
+async def project_presentation_prepare(payload: dict):
+    """PPT/PPTX 원본은 수정하지 않고 임시 PDF 미리보기를 준비합니다.
+
+    Windows에서는 Microsoft PowerPoint COM Export를 우선 사용하고, 사용할 수
+    없거나 변환에 실패하면 LibreOffice headless를 fallback으로 사용합니다.
+    결과 PDF는 프로젝트의 `.agentstudio/preview/presentations` 아래에만 캐시됩니다.
+    """
+    project_root = Path(str(payload.get("root") or "")).expanduser().resolve()
+    relative = str(payload.get("relative_path") or "").strip()
+    force = bool(payload.get("force"))
+    if not relative:
+        raise HTTPException(status_code=400, detail="relative_path가 필요합니다.")
+
+    try:
+        await get_file_meta(str(project_root), relative)
+    except PermissionError as exc:
+        restored = await ensure_persisted_project_root(str(project_root))
+        if not restored.get("registered"):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "PROJECT_ROOT_NOT_ALLOWED",
+                    "message": str(exc),
+                    "project_root": str(project_root),
+                    "recovery": restored,
+                },
+            ) from exc
+        await get_file_meta(str(project_root), relative)
+
+    target = (project_root / Path(relative.replace("\\", "/"))).resolve()
+    try:
+        target.relative_to(project_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="프로젝트 밖의 PowerPoint 파일은 열 수 없습니다.") from exc
+
+    if target.suffix.casefold() not in {".ppt", ".pptx"}:
+        raise HTTPException(status_code=415, detail="PPT/PPTX 파일만 PowerPoint 미리보기를 사용할 수 있습니다.")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail=f"PowerPoint 파일을 찾을 수 없습니다: {target}")
+
+    try:
+        result = await asyncio.to_thread(
+            prepare_presentation_preview,
+            project_root,
+            target,
+            force=force,
+        )
+    except PresentationPreviewError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PRESENTATION_PREVIEW_CONVERSION_FAILED",
+                "message": str(exc),
+                "attempts": exc.attempts,
+                "recovery": [
+                    "Windows에서는 Microsoft PowerPoint가 설치되어 있는지 확인하세요.",
+                    "PowerPoint가 없으면 LibreOffice를 설치하면 자동 fallback 변환을 사용합니다.",
+                    "원본 PPT/PPTX 파일은 수정되지 않습니다.",
+                ],
+            },
+        ) from exc
+
+    return {
+        "ok": True,
+        "relative_path": result.source_relative_path,
+        "source_sha256": result.source_sha256,
+        "source_mtime_ns": result.source_mtime_ns,
+        "source_size": result.source_size,
+        "preview_size": result.preview_size,
+        "converter": result.converter,
+        "cache_hit": result.cache_hit,
+        "generated_at": result.generated_at,
+        "original_modified": False,
+    }
+
+
+@router.get("/files/presentation/pdf")
+async def project_presentation_pdf_view(
+    root: str = Query(...),
+    relative_path: str = Query(...),
+):
+    """준비된 PPT/PPTX PDF 미리보기를 기존 브라우저 PDF Viewer에 inline 전송합니다."""
+    project_root = Path(str(root or "")).expanduser().resolve()
+    relative = str(relative_path or "").strip()
+    if not relative:
+        raise HTTPException(status_code=400, detail="relative_path가 필요합니다.")
+
+    try:
+        await get_file_meta(str(project_root), relative)
+    except PermissionError as exc:
+        restored = await ensure_persisted_project_root(str(project_root))
+        if not restored.get("registered"):
+            raise HTTPException(status_code=403, detail="프로젝트 root가 등록되어 있지 않습니다.") from exc
+        await get_file_meta(str(project_root), relative)
+
+    target = (project_root / Path(relative.replace("\\", "/"))).resolve()
+    try:
+        target.relative_to(project_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="프로젝트 밖의 PowerPoint 파일은 열 수 없습니다.") from exc
+
+    try:
+        result = await asyncio.to_thread(prepare_presentation_preview, project_root, target)
+    except PresentationPreviewError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PRESENTATION_PREVIEW_CONVERSION_FAILED",
+                "message": str(exc),
+                "attempts": exc.attempts,
+            },
+        ) from exc
+
+    preview = Path(result.preview_path)
+    if not preview.exists() or not preview.is_file():
+        raise HTTPException(status_code=404, detail="PowerPoint 미리보기 PDF를 찾을 수 없습니다.")
+
+    return FileResponse(
+        path=str(preview),
+        media_type="application/pdf",
+        filename=f"{target.stem}.preview.pdf",
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-AgentStudio-Presentation-Converter": result.converter,
+        },
+    )
+
+
 @router.post("/files/read")
 async def project_file_read(payload: dict):
     """프로젝트 root + relative_path 기반 파일 읽기 API."""
@@ -2203,6 +2450,14 @@ async def project_file_read(payload: dict):
             detail={
                 "code": "PDF_BINARY_VIEWER_REQUIRED",
                 "message": "PDF는 텍스트 파일이 아닙니다. /api/files/pdf Viewer를 사용하세요.",
+            },
+        )
+    if target.suffix.casefold() in {".ppt", ".pptx"}:
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "code": "PRESENTATION_BINARY_VIEWER_REQUIRED",
+                "message": "PPT/PPTX는 바이너리 문서입니다. /api/files/presentation/prepare 미리보기를 사용하세요.",
             },
         )
 
@@ -2285,6 +2540,14 @@ async def project_file_content(root: str, relative_path: str):
             detail={
                 "code": "PDF_BINARY_VIEWER_REQUIRED",
                 "message": "PDF는 텍스트 파일이 아닙니다. /api/files/pdf Viewer를 사용하세요.",
+            },
+        )
+    if target.suffix.casefold() in {".ppt", ".pptx"}:
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "code": "PRESENTATION_BINARY_VIEWER_REQUIRED",
+                "message": "PPT/PPTX는 바이너리 문서입니다. /api/files/presentation/prepare 미리보기를 사용하세요.",
             },
         )
 
@@ -2551,7 +2814,8 @@ async def ai_edit_code(req: CodeEditRequest):
 6. 기존 동작을 불필요하게 변경하지 않습니다.
 7. 사용자가 명시적으로 주석 삭제/수정 또는 셀 전체 교체를 요청하지 않았다면 TARGET 셀의 기존 주석, 학습용 힌트, TODO를 삭제하거나 치환하지 않습니다.
 8. 기존 주석 아래에 코드를 작성하라는 요청이면 주석을 그대로 남기고 바로 아래에 코드를 추가합니다.
-9. Python Notebook 문법으로 실행 가능한 코드를 작성합니다.
+9. Python/Jupyter Notebook 문법으로 실행 가능한 코드를 작성합니다.
+10. `%%writefile` 같은 Cell Magic을 사용할 경우 반드시 셀의 물리적 첫 줄에 배치하고, 그 앞에 빈 줄/주석/설명을 추가하지 않습니다.
 """
 
             if len(prompt) > MAX_FILE_EDIT_PROMPT_CHARS:
@@ -4322,7 +4586,7 @@ async def workflow_start_job(req: WorkflowStartRequest):
 
 @router.post("/workflow/start")
 async def workflow_start(req: WorkflowStartRequest):
-    """호환용 동기 Endpoint. Frontend v5.284는 /workflow/start-job을 사용하며 시작 전 Backend 버전을 검증합니다."""
+    """호환용 동기 Endpoint. Frontend v5.297는 /workflow/start-job을 사용하며 시작 전 Backend 버전을 검증합니다."""
     thread_id = req.thread_id or uuid.uuid4().hex
     return await _execute_workflow_with_diagnostics(
         req=req,

@@ -437,28 +437,66 @@ class TerminalManager:
                     pids.append(pid)
         return pids
 
-    def _terminate_windows_child_trees(self, parent_pid: int) -> int:
-        """Terminate foreground child process trees, preserving PowerShell."""
+    def _terminate_windows_child_trees(self, parent_pid: int) -> dict[str, object]:
+        """Terminate foreground child process trees, preserving PowerShell.
+
+        ``taskkill /T /F`` is used only for children of the persistent shell.
+        After the first pass we verify that no direct child remains and retry
+        any survivor once.  This matters for servers such as Streamlit that
+        may still be unwinding when the first termination command returns.
+        """
         child_pids = self._windows_direct_child_pids(parent_pid)
-        killed = 0
-        for pid in child_pids:
+        attempted: list[int] = []
+        completed: list[int] = []
+
+        def _kill(pid: int) -> None:
+            attempted.append(pid)
             try:
-                subprocess.run(
+                result = subprocess.run(
                     ["taskkill", "/PID", str(pid), "/T", "/F"],
                     capture_output=True,
                     text=True,
                     timeout=8,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
-                killed += 1
+                if result.returncode == 0:
+                    completed.append(pid)
             except Exception:
-                continue
-        return killed
+                pass
+
+        for pid in child_pids:
+            _kill(pid)
+
+        # Verify once more.  Keeping this inside the worker thread avoids
+        # blocking FastAPI's event loop while Windows retires the process tree.
+        if child_pids:
+            import time
+
+            time.sleep(0.15)
+            remaining = self._windows_direct_child_pids(parent_pid)
+            for pid in remaining:
+                if pid not in attempted:
+                    _kill(pid)
+                else:
+                    # A process with the same PID is still visible: retry once.
+                    _kill(pid)
+            time.sleep(0.10)
+        else:
+            remaining = []
+
+        final_remaining = self._windows_direct_child_pids(parent_pid)
+        return {
+            "method": "taskkill_child_tree",
+            "child_pids": child_pids,
+            "attempted_pids": attempted,
+            "completed_pids": completed,
+            "remaining_child_pids": final_remaining,
+        }
 
     async def interrupt(
         self,
         session_id: str,
-    ) -> None:
+    ) -> dict[str, object]:
         session = self.sessions.get(session_id)
 
         if not session:
@@ -467,19 +505,22 @@ class TerminalManager:
             )
 
         if session.process.poll() is not None:
-            return
+            return {"method": "already_exited", "session_id": session_id}
 
         if sys.platform == "win32":
             # Do NOT use CTRL_BREAK_EVENT here. In a persistent PowerShell
             # host it can enter the PowerShell debugger instead of stopping
             # the foreground npm/node/python command. Prefer terminating only
             # direct child process trees so the shell/session survives.
-            killed = await asyncio.to_thread(
+            termination = await asyncio.to_thread(
                 self._terminate_windows_child_trees,
                 session.process.pid,
             )
-            if killed:
-                return
+            if termination.get("child_pids"):
+                return {
+                    "session_id": session_id,
+                    **termination,
+                }
 
             # Built-in PowerShell commands (for example Start-Sleep) may have
             # no child process. Fall back to CTRL_C_EVENT for the process group,
@@ -488,13 +529,22 @@ class TerminalManager:
                 session.process.send_signal(
                     signal.CTRL_C_EVENT  # type: ignore[name-defined]
                 )
-                return
-            except Exception:
+                return {
+                    "method": "ctrl_c_event",
+                    "session_id": session_id,
+                    "remaining_child_pids": [],
+                }
+            except Exception as exc:
                 # Preserve the persistent shell even if Ctrl+C delivery is not
                 # available; never taskkill the root PowerShell process here.
-                return
+                return {
+                    "method": "ctrl_c_unavailable",
+                    "session_id": session_id,
+                    "error": str(exc),
+                }
         else:
             session.process.send_signal(signal.SIGINT)
+            return {"method": "sigint", "session_id": session_id}
 
     async def close(
         self,

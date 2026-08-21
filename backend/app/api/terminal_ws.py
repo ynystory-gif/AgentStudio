@@ -164,11 +164,15 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
                 )
 
             elif msg_type == "interrupt":
-                await terminal_manager.interrupt(session_id)
+                interrupt_result = await terminal_manager.interrupt(session_id)
 
+                # This acknowledgement means the stop signal/child-tree
+                # termination request was delivered.  The frontend must keep
+                # the command busy until the normal prompt marker arrives.
                 await websocket.send_json({
                     "type": "interrupted",
                     "session_id": session_id,
+                    "result": interrupt_result,
                 })
 
             elif msg_type == "clear":

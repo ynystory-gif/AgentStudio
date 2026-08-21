@@ -1,22 +1,43 @@
 -- ============================================================
 -- THEANOVA AgentStudio - Supabase PostgreSQL Full Schema
--- v5.284 SupabaseIdempotentSchemaProvisioningFix
+-- v5.297 SupabaseRuntimeSearchPathPinFix
 --
--- Supabase SQL Editor에서 실행할 수 있는 전체 초기 스키마입니다.
--- AgentStudio ORM 테이블 + pgvector를 멱등 방식으로 준비합니다.
--- LangGraph Checkpointer는 설치된 Python 패키지의 AsyncPostgresSaver.setup()이
--- authoritative migration source이므로 이 SQL에서 수동 정의하지 않습니다.
+-- Target layout:
+--   theanova_agentstudio : AgentStudio ORM + LangGraph Checkpointer
+--   extensions           : pgvector(vector)
+--   public               : AgentStudio가 소유하지 않는 일반 사용자 데이터
+--
+-- 이 SQL은 AgentStudio ORM 스키마를 멱등 방식으로 준비합니다.
+-- LangGraph Checkpointer 테이블은 AgentStudio Backend가 같은
+-- theanova_agentstudio search_path에서 AsyncPostgresSaver.setup()을 실행해 생성합니다.
 -- ============================================================
 
 BEGIN;
 
-CREATE EXTENSION IF NOT EXISTS vector;
+CREATE SCHEMA IF NOT EXISTS theanova_agentstudio;
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;
+
+DO $$
+DECLARE vector_schema TEXT;
+BEGIN
+  SELECT n.nspname INTO vector_schema
+  FROM pg_extension e
+  JOIN pg_namespace n ON n.oid = e.extnamespace
+  WHERE e.extname = 'vector';
+
+  IF vector_schema IS DISTINCT FROM 'extensions' THEN
+    RAISE EXCEPTION 'pgvector(vector)는 extensions 스키마에 있어야 합니다. 현재 스키마=%', vector_schema;
+  END IF;
+END $$;
+
+SET LOCAL search_path TO theanova_agentstudio, extensions, public;
 
 -- ------------------------------------------------------------
 -- AgentStudio core tables
 -- ------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS projects (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.projects (
     id SERIAL PRIMARY KEY,
     name VARCHAR(200) NOT NULL,
     root_path VARCHAR(1000) NOT NULL UNIQUE,
@@ -31,24 +52,24 @@ CREATE TABLE IF NOT EXISTS projects (
     is_favorite BOOLEAN NOT NULL DEFAULT FALSE
 );
 
-CREATE TABLE IF NOT EXISTS conversation_messages (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.conversation_messages (
     id SERIAL PRIMARY KEY,
-    project_id INTEGER NULL REFERENCES projects(id),
+    project_id INTEGER NULL REFERENCES theanova_agentstudio.projects(id),
     thread_id VARCHAR(100) NOT NULL DEFAULT 'default',
     role VARCHAR(30) NOT NULL,
     content TEXT NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS requirements (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.requirements (
     id SERIAL PRIMARY KEY,
-    project_id INTEGER NULL REFERENCES projects(id),
+    project_id INTEGER NULL REFERENCES theanova_agentstudio.projects(id),
     key VARCHAR(150) NOT NULL,
     value TEXT NOT NULL,
     confirmed BOOLEAN NOT NULL DEFAULT TRUE
 );
 
-CREATE TABLE IF NOT EXISTS mcp_servers (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.mcp_servers (
     id SERIAL PRIMARY KEY,
     name VARCHAR(200) NOT NULL UNIQUE,
     transport VARCHAR(50) NOT NULL DEFAULT 'streamable_http',
@@ -66,9 +87,9 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS tool_registry (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.tool_registry (
     id SERIAL PRIMARY KEY,
-    mcp_server_id INTEGER NULL REFERENCES mcp_servers(id),
+    mcp_server_id INTEGER NULL REFERENCES theanova_agentstudio.mcp_servers(id),
     provider VARCHAR(200) NOT NULL,
     name VARCHAR(300) NOT NULL,
     description TEXT NOT NULL DEFAULT '',
@@ -84,7 +105,7 @@ CREATE TABLE IF NOT EXISTS tool_registry (
     CONSTRAINT uq_mcp_tool UNIQUE (mcp_server_id, name)
 );
 
-CREATE TABLE IF NOT EXISTS approval_requests (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.approval_requests (
     id SERIAL PRIMARY KEY,
     thread_id VARCHAR(100) NOT NULL,
     action_type VARCHAR(100) NOT NULL,
@@ -96,20 +117,20 @@ CREATE TABLE IF NOT EXISTS approval_requests (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS memory_records (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.memory_records (
     id SERIAL PRIMARY KEY,
-    project_id INTEGER NULL REFERENCES projects(id),
+    project_id INTEGER NULL REFERENCES theanova_agentstudio.projects(id),
     memory_type VARCHAR(30) NOT NULL,
     key VARCHAR(250) NOT NULL,
     content TEXT NOT NULL,
     metadata_json JSON NOT NULL DEFAULT '{}'::json,
-    embedding vector NULL,
+    embedding extensions.vector NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS project_file_index (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.project_file_index (
     id SERIAL PRIMARY KEY,
-    project_id INTEGER NULL REFERENCES projects(id),
+    project_id INTEGER NULL REFERENCES theanova_agentstudio.projects(id),
     path VARCHAR(1200) NOT NULL,
     language VARCHAR(50) NOT NULL DEFAULT '',
     size_bytes INTEGER NOT NULL DEFAULT 0,
@@ -119,18 +140,18 @@ CREATE TABLE IF NOT EXISTS project_file_index (
     CONSTRAINT uq_project_file UNIQUE (project_id, path)
 );
 
-CREATE TABLE IF NOT EXISTS evaluation_records (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.evaluation_records (
     id SERIAL PRIMARY KEY,
-    project_id INTEGER NULL REFERENCES projects(id),
+    project_id INTEGER NULL REFERENCES theanova_agentstudio.projects(id),
     metric VARCHAR(100) NOT NULL,
     score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     details JSON NOT NULL DEFAULT '{}'::json,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS usage_records (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.usage_records (
     id SERIAL PRIMARY KEY,
-    project_id INTEGER NULL REFERENCES projects(id),
+    project_id INTEGER NULL REFERENCES theanova_agentstudio.projects(id),
     provider VARCHAR(100) NOT NULL,
     model VARCHAR(150) NOT NULL,
     input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -139,7 +160,7 @@ CREATE TABLE IF NOT EXISTS usage_records (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS jobs (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.jobs (
     id VARCHAR(64) PRIMARY KEY,
     kind VARCHAR(100) NOT NULL,
     status VARCHAR(30) NOT NULL DEFAULT 'QUEUED',
@@ -149,7 +170,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS agentstudio_machines (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.agentstudio_machines (
     id SERIAL PRIMARY KEY,
     pc_name VARCHAR(255) NOT NULL UNIQUE,
     host_name VARCHAR(255) NOT NULL DEFAULT '',
@@ -158,7 +179,7 @@ CREATE TABLE IF NOT EXISTS agentstudio_machines (
     last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS app_settings (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.app_settings (
     id SERIAL PRIMARY KEY,
     pc_name VARCHAR(255) NOT NULL DEFAULT '',
     key VARCHAR(150) NOT NULL,
@@ -168,13 +189,16 @@ CREATE TABLE IF NOT EXISTS app_settings (
     CONSTRAINT uq_app_settings_pc_name_key UNIQUE (pc_name, key)
 );
 
-CREATE INDEX IF NOT EXISTS ix_app_settings_key ON app_settings(key);
-CREATE INDEX IF NOT EXISTS ix_app_settings_pc_name ON app_settings(pc_name);
-CREATE INDEX IF NOT EXISTS ix_agentstudio_machines_pc_name ON agentstudio_machines(pc_name);
+CREATE INDEX IF NOT EXISTS ix_app_settings_key
+    ON theanova_agentstudio.app_settings(key);
+CREATE INDEX IF NOT EXISTS ix_app_settings_pc_name
+    ON theanova_agentstudio.app_settings(pc_name);
+CREATE INDEX IF NOT EXISTS ix_agentstudio_machines_pc_name
+    ON theanova_agentstudio.agentstudio_machines(pc_name);
 
-CREATE TABLE IF NOT EXISTS project_analyses (
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.project_analyses (
     id SERIAL PRIMARY KEY,
-    project_id INTEGER NOT NULL REFERENCES projects(id),
+    project_id INTEGER NOT NULL REFERENCES theanova_agentstudio.projects(id),
     project_root VARCHAR(1200) NOT NULL,
     project_name VARCHAR(300) NOT NULL DEFAULT '',
     summary TEXT NOT NULL DEFAULT '',
@@ -189,34 +213,32 @@ CREATE TABLE IF NOT EXISTS project_analyses (
 );
 
 -- ------------------------------------------------------------
--- Compatibility upgrades for existing AgentStudio databases
+-- Compatibility upgrades for existing AgentStudio schema
 -- ------------------------------------------------------------
 
-ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS cache_path VARCHAR(1000) NOT NULL DEFAULT '';
-ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS temp_path VARCHAR(1000) NOT NULL DEFAULT '';
-ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS output_path VARCHAR(1000) NOT NULL DEFAULT '';
-ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS venv_path VARCHAR(1000) NOT NULL DEFAULT '';
-ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS models_path VARCHAR(1000) NOT NULL DEFAULT '';
-ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
-ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
-ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS last_opened_at TIMESTAMP NULL;
-ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE IF EXISTS theanova_agentstudio.projects ADD COLUMN IF NOT EXISTS cache_path VARCHAR(1000) NOT NULL DEFAULT '';
+ALTER TABLE IF EXISTS theanova_agentstudio.projects ADD COLUMN IF NOT EXISTS temp_path VARCHAR(1000) NOT NULL DEFAULT '';
+ALTER TABLE IF EXISTS theanova_agentstudio.projects ADD COLUMN IF NOT EXISTS output_path VARCHAR(1000) NOT NULL DEFAULT '';
+ALTER TABLE IF EXISTS theanova_agentstudio.projects ADD COLUMN IF NOT EXISTS venv_path VARCHAR(1000) NOT NULL DEFAULT '';
+ALTER TABLE IF EXISTS theanova_agentstudio.projects ADD COLUMN IF NOT EXISTS models_path VARCHAR(1000) NOT NULL DEFAULT '';
+ALTER TABLE IF EXISTS theanova_agentstudio.projects ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+ALTER TABLE IF EXISTS theanova_agentstudio.projects ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE IF EXISTS theanova_agentstudio.projects ADD COLUMN IF NOT EXISTS last_opened_at TIMESTAMP NULL;
+ALTER TABLE IF EXISTS theanova_agentstudio.projects ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN NOT NULL DEFAULT FALSE;
 
-ALTER TABLE IF EXISTS app_settings
+ALTER TABLE IF EXISTS theanova_agentstudio.app_settings
     ADD COLUMN IF NOT EXISTS pc_name VARCHAR(255) NOT NULL DEFAULT '';
 
--- Older AgentStudio builds could have UNIQUE(key). Remove only that legacy one-column
--- unique constraint so shared DB settings can use (pc_name, key) instead.
 DO $$
 DECLARE r RECORD;
 BEGIN
-  IF to_regclass('public.app_settings') IS NOT NULL THEN
+  IF to_regclass('theanova_agentstudio.app_settings') IS NOT NULL THEN
     FOR r IN
       SELECT c.conname
       FROM pg_constraint c
       JOIN pg_class t ON t.oid = c.conrelid
       JOIN pg_namespace n ON n.oid = t.relnamespace
-      WHERE n.nspname = current_schema()
+      WHERE n.nspname = 'theanova_agentstudio'
         AND t.relname = 'app_settings'
         AND c.contype = 'u'
         AND array_length(c.conkey, 1) = 1
@@ -228,16 +250,19 @@ BEGIN
           WHERE a.attname = 'key'
         )
     LOOP
-      EXECUTE format('ALTER TABLE app_settings DROP CONSTRAINT %I', r.conname);
+      EXECUTE format(
+        'ALTER TABLE %I.%I DROP CONSTRAINT %I',
+        'theanova_agentstudio', 'app_settings', r.conname
+      );
     END LOOP;
   END IF;
 END $$;
 
-DROP INDEX IF EXISTS ix_app_settings_key;
-CREATE INDEX IF NOT EXISTS ix_app_settings_key ON app_settings(key);
-CREATE INDEX IF NOT EXISTS ix_app_settings_pc_name ON app_settings(pc_name);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_app_settings_pc_name_key ON app_settings(pc_name, key);
-CREATE INDEX IF NOT EXISTS ix_agentstudio_machines_pc_name ON agentstudio_machines(pc_name);
+DROP INDEX IF EXISTS theanova_agentstudio.ix_app_settings_key;
+CREATE INDEX IF NOT EXISTS ix_app_settings_key ON theanova_agentstudio.app_settings(key);
+CREATE INDEX IF NOT EXISTS ix_app_settings_pc_name ON theanova_agentstudio.app_settings(pc_name);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_app_settings_pc_name_key ON theanova_agentstudio.app_settings(pc_name, key);
+CREATE INDEX IF NOT EXISTS ix_agentstudio_machines_pc_name ON theanova_agentstudio.agentstudio_machines(pc_name);
 
 COMMIT;
 
@@ -245,10 +270,12 @@ COMMIT;
 -- LangGraph PostgreSQL Checkpointer
 -- ============================================================
 -- checkpoint_migrations / checkpoints / checkpoint_blobs / checkpoint_writes는
--- 수동 SQL로 고정하지 않습니다. AgentStudio가 Supabase 스키마 준비 직후 현재 설치된
--- langgraph-checkpoint-postgres의 AsyncPostgresSaver.setup()을 실행하여 공식 migration을
--- 적용하고, 네 필수 테이블과 migration 기록을 다시 검증합니다.
+-- 수동 정의하지 않습니다. v5.297 Backend가 SUPABASE_DB_SCHEMA=theanova_agentstudio를
+-- PostgreSQL search_path에 적용한 뒤 현재 설치된 langgraph-checkpoint-postgres의
+-- AsyncPostgresSaver.setup()을 실행합니다.
 --
--- 따라서 이 파일은 여러 번 실행해도 기존 데이터를 DROP/TRUNCATE/DELETE하지 않으며,
--- LangGraph 패키지 버전이 바뀌어도 수동 테이블 정의와 충돌하지 않습니다.
+-- Python LangGraph Checkpointer는 현재 explicit schema 옵션 대신 unqualified SQL을
+-- 사용하므로 AgentStudio는 저장 URL을 변경하지 않고 연결 시 search_path를 주입합니다.
+-- Supabase에서는 direct/session pooler 연결을 권장하며 transaction pooler(일반적으로 6543)는
+-- session search_path 보장이 약할 수 있으므로 LangGraph runtime 연결에는 권장하지 않습니다.
 -- ============================================================

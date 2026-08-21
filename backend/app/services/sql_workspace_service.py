@@ -79,6 +79,7 @@ def _default_profile(db_type: str = "postgresql") -> dict[str, Any]:
         "host": "",
         "port": 0,
         "database": "",
+        "schema_name": "",
         "username": "",
         "driver": "",
         "service_name": "",
@@ -112,6 +113,7 @@ def _default_profile(db_type: str = "postgresql") -> dict[str, Any]:
             "host": "",
             "port": 5432,
             "database": "postgres",
+            "schema_name": "public",
             "username": "postgres",
             "driver": "psycopg",
             "dashboard_url": "https://supabase.com/dashboard",
@@ -166,6 +168,7 @@ def _sanitized_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
     result["db_type"] = kind
     result["connection_id"] = str(result.get("connection_id") or "").strip()
     result["name"] = str(result.get("name") or _default_connection_name(kind)).strip() or _default_connection_name(kind)
+    result["schema_name"] = str(result.get("schema_name") or ("public" if kind == "supabase" else "")).strip()
     return result
 
 
@@ -547,6 +550,48 @@ def save_profile(root: str, profile: dict[str, Any], password: str | None = None
     return _public_profile(clean)
 
 
+def rename_profile(root: str, connection_id: str, name: str) -> dict[str, Any]:
+    """Rename a saved connection without changing its id, credential or live DB session."""
+    key = _project_key(root)
+    cid = str(connection_id or "").strip()
+    requested = str(name or "").strip()
+    if not cid:
+        raise ValueError("이름을 변경할 DB 연결 ID가 필요합니다.")
+    if not requested:
+        raise ValueError("DB 연결 이름은 비워둘 수 없습니다.")
+
+    with _LOCK:
+        profiles = _load_profiles()
+        entry = profiles.get(key)
+        connections = (entry or {}).get("connections") or {}
+        stored = connections.get(cid)
+        if not isinstance(stored, dict):
+            raise ValueError("저장된 DB 연결을 찾을 수 없습니다.")
+
+        used_names = {
+            str(item.get("name") or "").strip().casefold()
+            for other_id, item in connections.items()
+            if other_id != cid and isinstance(item, dict)
+        }
+        candidate = requested
+        suffix = 2
+        while candidate.casefold() in used_names:
+            candidate = f"{requested} {suffix}"
+            suffix += 1
+
+        stored["name"] = candidate
+        stored["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        entry["updated_at"] = stored["updated_at"]
+        _write_profiles(profiles)
+
+        runtime = _runtime_bucket(key).get(cid)
+        if runtime and isinstance(runtime.get("profile"), dict):
+            runtime["profile"]["name"] = candidate
+            runtime["profile"]["updated_at"] = stored["updated_at"]
+
+    return status(root)
+
+
 def delete_profile(root: str, connection_id: str) -> dict[str, Any]:
     key = _project_key(root)
     cid = str(connection_id or "").strip()
@@ -732,7 +777,41 @@ def _connect_postgresql(profile: dict[str, Any], password: str):
     ssl_mode = str(profile.get("ssl_mode") or "").strip()
     if ssl_mode:
         kwargs["sslmode"] = ssl_mode
-    return psycopg.connect(**kwargs)
+    conn = psycopg.connect(**kwargs)
+    if str(profile.get("db_type") or "").lower() == "supabase":
+        schema_name = str(profile.get("schema_name") or "public").strip() or "public"
+        try:
+            from psycopg import sql as psycopg_sql
+            with conn.cursor() as cur:
+                cur.execute("SELECT to_regnamespace(%s) IS NOT NULL", (schema_name,))
+                exists = bool(cur.fetchone()[0])
+                if not exists:
+                    raise RuntimeError(f"Supabase Schema를 찾을 수 없습니다: {schema_name}")
+                if schema_name == "public":
+                    cur.execute("SET search_path TO public, extensions")
+                else:
+                    cur.execute(
+                        psycopg_sql.SQL("SET search_path TO {}, extensions, public").format(
+                            psycopg_sql.Identifier(schema_name)
+                        )
+                    )
+                cur.execute("SELECT current_schema()")
+                active_schema = str(cur.fetchone()[0] or "")
+                if active_schema != schema_name:
+                    raise RuntimeError(
+                        f"Supabase Schema 적용 확인 실패: 기대={schema_name}, 실제={active_schema or '-'}"
+                    )
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Supabase Schema search_path 적용 실패: {schema_name}. "
+                f"스키마 이름/USAGE 권한을 확인하세요. ({exc})"
+            ) from exc
+    return conn
 
 
 def _resolve_firestore_service_account_path(root: str, raw_path: str) -> Path | None:
@@ -1889,6 +1968,439 @@ def _redis_memory_usage(conn: Any, key: str) -> int | None:
         return int(value) if value is not None else None
     except Exception:
         return None
+
+
+def _firestore_runtime(root: str) -> tuple[Any, dict[str, Any]]:
+    runtime = _require_active_runtime(root)
+    profile = _sanitized_profile(runtime.get("profile"))
+    if profile.get("db_type") != "firestore":
+        raise RuntimeError("현재 선택된 연결은 Google Cloud Firestore가 아닙니다.")
+    return runtime["connection"], profile
+
+
+def _firestore_path_parts(path: str) -> list[str]:
+    return [part for part in str(path or "").strip().strip("/").split("/") if part]
+
+
+def _firestore_value_type(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "BOOLEAN"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "INTEGER"
+    if isinstance(value, float):
+        return "NUMBER"
+    if isinstance(value, str):
+        return "STRING"
+    if isinstance(value, (datetime, date, dt_time)):
+        return "TIMESTAMP"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "BYTES"
+    if isinstance(value, dict):
+        return "MAP"
+    if isinstance(value, (list, tuple)):
+        return "ARRAY"
+    class_name = type(value).__name__.casefold()
+    if "documentreference" in class_name:
+        return "REFERENCE"
+    if "geopoint" in class_name:
+        return "GEOPOINT"
+    return type(value).__name__.upper()
+
+
+def list_firestore_collections(root: str, limit: int = 500) -> dict[str, Any]:
+    """Return top-level Firestore collections without reading every document.
+
+    Firestore has no cheap database-wide document-count API.  The browser therefore
+    lists collection identifiers first and only reads documents after the user selects
+    one, avoiding accidental large read charges.
+    """
+    conn, profile = _firestore_runtime(root)
+    try:
+        max_items = max(1, min(int(limit or 500), 2000))
+    except Exception:
+        max_items = 500
+
+    collections: list[dict[str, Any]] = []
+    for ref in conn.collections():
+        collection_id = str(getattr(ref, "id", "") or "")
+        path = str(getattr(ref, "path", "") or collection_id)
+        if not collection_id:
+            continue
+        collections.append({"id": collection_id, "path": path})
+        if len(collections) >= max_items:
+            break
+    collections.sort(key=lambda item: str(item.get("id") or "").casefold())
+    return {
+        "ok": True,
+        "db_type": "firestore",
+        "project_id": str(profile.get("project_id") or ""),
+        "database": str(profile.get("database") or "(default)"),
+        "collections": collections,
+        "returned_count": len(collections),
+        "limit": max_items,
+        "refreshed_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def list_firestore_documents(root: str, collection_path: str, limit: int = 200) -> dict[str, Any]:
+    conn, profile = _firestore_runtime(root)
+    parts = _firestore_path_parts(collection_path)
+    if not parts or len(parts) % 2 == 0:
+        raise RuntimeError("Firestore Collection 경로가 올바르지 않습니다.")
+    try:
+        max_items = max(1, min(int(limit or 200), 1000))
+    except Exception:
+        max_items = 200
+
+    collection_ref = conn.collection(*parts)
+    snapshots = collection_ref.limit(max_items).stream()
+    documents: list[dict[str, Any]] = []
+    for snapshot in snapshots:
+        data = snapshot.to_dict() or {}
+        documents.append({
+            "id": str(getattr(snapshot, "id", "") or ""),
+            "path": str(getattr(getattr(snapshot, "reference", None), "path", "") or ""),
+            "field_count": len(data) if isinstance(data, dict) else 0,
+            "field_names": [str(key) for key in list(data.keys())[:8]] if isinstance(data, dict) else [],
+            "create_time": _json_safe(getattr(snapshot, "create_time", None)),
+            "update_time": _json_safe(getattr(snapshot, "update_time", None)),
+        })
+    documents.sort(key=lambda item: str(item.get("id") or "").casefold())
+    return {
+        "ok": True,
+        "db_type": "firestore",
+        "project_id": str(profile.get("project_id") or ""),
+        "database": str(profile.get("database") or "(default)"),
+        "collection": "/".join(parts),
+        "documents": documents,
+        "returned_count": len(documents),
+        "limit": max_items,
+        "truncated": len(documents) >= max_items,
+        "refreshed_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def get_firestore_document(root: str, document_path: str) -> dict[str, Any]:
+    conn, profile = _firestore_runtime(root)
+    parts = _firestore_path_parts(document_path)
+    if not parts or len(parts) % 2 != 0:
+        raise RuntimeError("Firestore Document 경로가 올바르지 않습니다.")
+
+    snapshot = conn.document(*parts).get()
+    if not bool(getattr(snapshot, "exists", False)):
+        raise RuntimeError("선택한 Firestore Document가 존재하지 않습니다.")
+    data = snapshot.to_dict() or {}
+    fields = []
+    for name, value in data.items():
+        fields.append({
+            "name": str(name),
+            "type": _firestore_value_type(value),
+            "value": _json_safe(value),
+        })
+
+    subcollections: list[dict[str, str]] = []
+    try:
+        for ref in snapshot.reference.collections():
+            cid = str(getattr(ref, "id", "") or "")
+            path = str(getattr(ref, "path", "") or "")
+            if cid:
+                subcollections.append({"id": cid, "path": path})
+    except Exception:
+        # A document can still be inspected when the account lacks list-collection-ids.
+        subcollections = []
+
+    return {
+        "ok": True,
+        "db_type": "firestore",
+        "project_id": str(profile.get("project_id") or ""),
+        "database": str(profile.get("database") or "(default)"),
+        "id": str(getattr(snapshot, "id", "") or parts[-1]),
+        "path": str(getattr(getattr(snapshot, "reference", None), "path", "") or "/".join(parts)),
+        "field_count": len(fields),
+        "fields": fields,
+        "subcollections": subcollections,
+        "create_time": _json_safe(getattr(snapshot, "create_time", None)),
+        "update_time": _json_safe(getattr(snapshot, "update_time", None)),
+        "read_time": _json_safe(getattr(snapshot, "read_time", None)),
+        "refreshed_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+
+def _firestore_python_connection_block(root: str, profile: dict[str, Any]) -> str:
+    """Build a safe google-cloud-firestore connection block for a scratch script.
+
+    Only the configured JSON path is embedded. Service-account private-key content
+    is never copied into the generated Python file.
+    """
+    project_id = str(profile.get("project_id") or "").strip()
+    database_id = str(profile.get("database") or "(default)").strip() or "(default)"
+    raw_service_account = str(profile.get("service_account_json") or "").strip()
+    service_account = raw_service_account
+    if raw_service_account:
+        try:
+            resolved = _resolve_firestore_service_account_path(root, raw_service_account)
+            if resolved:
+                service_account = str(resolved)
+        except Exception:
+            # Keep the configured path in the generated code so the user can inspect/fix it.
+            service_account = raw_service_account
+
+    lines = [
+        "from pathlib import Path",
+        "from google.cloud import firestore",
+        "",
+        f"PROJECT_ID = {project_id!r}",
+        f"DATABASE_ID = {database_id!r}",
+        f"SERVICE_ACCOUNT_JSON = {service_account!r}",
+        "",
+        "client_kwargs = {}",
+        "if PROJECT_ID:",
+        "    client_kwargs['project'] = PROJECT_ID",
+        "if DATABASE_ID and DATABASE_ID != '(default)':",
+        "    client_kwargs['database'] = DATABASE_ID",
+        "",
+        "if SERVICE_ACCOUNT_JSON:",
+        "    credential_path = Path(SERVICE_ACCOUNT_JSON).expanduser()",
+        "    if not credential_path.is_absolute():",
+        "        credential_path = (Path.cwd() / credential_path).resolve()",
+        "    if not credential_path.exists():",
+        "        raise FileNotFoundError(f'Firestore Service Account JSON 파일을 찾을 수 없습니다: {credential_path}')",
+        "    db = firestore.Client.from_service_account_json(str(credential_path), **client_kwargs)",
+        "else:",
+        "    # GOOGLE_APPLICATION_CREDENTIALS 또는 Application Default Credentials 사용",
+        "    db = firestore.Client(**client_kwargs)",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _firestore_collection_ref_snippet(collection_path: str) -> str:
+    path_literal = repr(str(collection_path or "").strip("/"))
+    return (
+        f"COLLECTION_PATH = {path_literal}\n"
+        "COLLECTION_PARTS = [part for part in COLLECTION_PATH.split('/') if part]\n"
+        "if not COLLECTION_PARTS or len(COLLECTION_PARTS) % 2 == 0:\n"
+        "    raise ValueError('Collection 경로가 올바르지 않습니다: ' + COLLECTION_PATH)\n"
+        "collection_ref = db.collection(*COLLECTION_PARTS)\n"
+    )
+
+
+def _firestore_document_ref_snippet(document_path: str) -> str:
+    path_literal = repr(str(document_path or "").strip("/"))
+    return (
+        f"DOCUMENT_PATH = {path_literal}\n"
+        "DOCUMENT_PARTS = [part for part in DOCUMENT_PATH.split('/') if part]\n"
+        "if not DOCUMENT_PARTS or len(DOCUMENT_PARTS) % 2 != 0:\n"
+        "    raise ValueError('Document 경로가 올바르지 않습니다: ' + DOCUMENT_PATH)\n"
+        "doc_ref = db.document(*DOCUMENT_PARTS)\n"
+    )
+
+
+def _firestore_list_snippet(path: str, node_kind: str) -> str:
+    if str(node_kind or "").lower() == "document":
+        ref = _firestore_document_ref_snippet(path)
+        return ref + (
+            "snapshot = doc_ref.get()\n"
+            "if not snapshot.exists:\n"
+            "    raise RuntimeError('Document가 존재하지 않습니다: ' + DOCUMENT_PATH)\n"
+            "print('Document:', DOCUMENT_PATH)\n"
+            "print('Fields:')\n"
+            "for field_name, field_value in (snapshot.to_dict() or {}).items():\n"
+            "    print(' -', field_name, '=', field_value)\n"
+            "print('Subcollections:')\n"
+            "for subcollection in doc_ref.collections():\n"
+            "    print(' -', subcollection.id)\n"
+        )
+    ref = _firestore_collection_ref_snippet(path)
+    return ref + (
+        "print('Collection:', COLLECTION_PATH)\n"
+        "print('Documents:')\n"
+        "for doc_ref_item in collection_ref.list_documents(page_size=100):\n"
+        "    print(' -', doc_ref_item.id)\n"
+    )
+
+
+def _firestore_read_snippet(path: str, node_kind: str) -> str:
+    if str(node_kind or "").lower() == "document":
+        ref = _firestore_document_ref_snippet(path)
+        return ref + (
+            "snapshot = doc_ref.get()\n"
+            "if not snapshot.exists:\n"
+            "    raise RuntimeError('Document가 존재하지 않습니다: ' + DOCUMENT_PATH)\n"
+            "print('Document ID:', snapshot.id)\n"
+            "print('Data:', snapshot.to_dict())\n"
+            "print('Create time:', snapshot.create_time)\n"
+            "print('Update time:', snapshot.update_time)\n"
+        )
+    ref = _firestore_collection_ref_snippet(path)
+    return ref + (
+        "LIMIT = 100\n"
+        "for snapshot in collection_ref.limit(LIMIT).stream():\n"
+        "    print(snapshot.id, snapshot.to_dict())\n"
+    )
+
+
+def _firestore_create_snippet(path: str, node_kind: str) -> str:
+    if str(node_kind or "").lower() == "document":
+        ref = _firestore_document_ref_snippet(path)
+        return ref + (
+            "# 선택 Document에 새 필드를 병합합니다. 실행 전에 필드명/값을 수정하세요.\n"
+            "NEW_FIELDS = {'new_field': '새 값'}\n"
+            "doc_ref.set(NEW_FIELDS, merge=True)\n"
+            "print('필드 등록 완료:', DOCUMENT_PATH, NEW_FIELDS)\n"
+        )
+    ref = _firestore_collection_ref_snippet(path)
+    return ref + (
+        "# 새 Document ID와 데이터를 수정한 뒤 실행하세요.\n"
+        "NEW_DOCUMENT_ID = 'new-document-001'\n"
+        "DATA = {\n"
+        "    'name': '새 데이터',\n"
+        "    'created_by': 'AgentStudio',\n"
+        "}\n"
+        "new_ref = collection_ref.document(NEW_DOCUMENT_ID)\n"
+        "new_ref.set(DATA)\n"
+        "print('Document 등록 완료:', new_ref.path)\n"
+    )
+
+
+def _firestore_update_snippet(path: str, node_kind: str) -> str:
+    if str(node_kind or "").lower() == "document":
+        ref = _firestore_document_ref_snippet(path)
+        return ref + (
+            "# 존재하는 필드명과 새 값을 지정하세요.\n"
+            "UPDATES = {'field_name': '수정할 값'}\n"
+            "doc_ref.update(UPDATES)\n"
+            "print('Document 수정 완료:', DOCUMENT_PATH, UPDATES)\n"
+        )
+    ref = _firestore_collection_ref_snippet(path)
+    return ref + (
+        "# 수정할 Document ID와 필드 값을 지정하세요.\n"
+        "TARGET_DOCUMENT_ID = 'document-id'\n"
+        "UPDATES = {'field_name': '수정할 값'}\n"
+        "target_ref = collection_ref.document(TARGET_DOCUMENT_ID)\n"
+        "target_ref.update(UPDATES)\n"
+        "print('Document 수정 완료:', target_ref.path, UPDATES)\n"
+    )
+
+
+def _firestore_delete_snippet(path: str, node_kind: str) -> str:
+    if str(node_kind or "").lower() == "document":
+        ref = _firestore_document_ref_snippet(path)
+        return ref + (
+            "snapshot = doc_ref.get()\n"
+            "print('삭제 대상:', DOCUMENT_PATH, 'exists=', snapshot.exists)\n"
+            "if snapshot.exists:\n"
+            "    print('현재 데이터:', snapshot.to_dict())\n"
+            "\n"
+            "CONFIRM_DELETE = False\n"
+            "if not CONFIRM_DELETE:\n"
+            "    raise RuntimeError('삭제 대상을 확인한 뒤 CONFIRM_DELETE = True로 변경하세요.')\n"
+            "doc_ref.delete()\n"
+            "print('Document 삭제 완료:', DOCUMENT_PATH)\n"
+        )
+    ref = _firestore_collection_ref_snippet(path)
+    return ref + (
+        "# ⚠ Firestore Collection은 단일 API로 삭제되지 않습니다.\n"
+        "# 아래 코드는 현재 Collection의 Document를 최대 DELETE_LIMIT개까지 개별 삭제합니다.\n"
+        "DELETE_LIMIT = 100\n"
+        "targets = list(collection_ref.limit(DELETE_LIMIT).stream())\n"
+        "print('삭제 대상 Collection:', COLLECTION_PATH)\n"
+        "print('삭제 대상 Document 수:', len(targets))\n"
+        "for snapshot in targets:\n"
+        "    print(' -', snapshot.reference.path)\n"
+        "\n"
+        "CONFIRM_DELETE = False\n"
+        "if not CONFIRM_DELETE:\n"
+        "    raise RuntimeError('삭제 대상을 확인한 뒤 CONFIRM_DELETE = True로 변경하세요.')\n"
+        "for snapshot in targets:\n"
+        "    snapshot.reference.delete()\n"
+        "print('삭제 완료:', len(targets), 'documents')\n"
+    )
+
+
+def create_firestore_python_script(
+    root: str,
+    action: str,
+    path: str = "",
+    node_kind: str = "collection",
+) -> dict[str, Any]:
+    """Generate a Firestore operation as a temporary Python file; never execute it."""
+    runtime = _require_active_runtime(root)
+    profile = _sanitized_profile(runtime.get("profile"))
+    if profile.get("db_type") != "firestore":
+        raise RuntimeError("현재 선택된 연결은 Google Cloud Firestore가 아닙니다.")
+
+    normalized_action = str(action or "").strip().lower()
+    allowed = {"connection", "list", "read", "create", "update", "delete"}
+    if normalized_action not in allowed:
+        raise ValueError("지원하지 않는 Firestore Python 코드 메뉴입니다.")
+
+    normalized_kind = "document" if str(node_kind or "").strip().lower() == "document" else "collection"
+    target_path = str(path or "").strip().strip("/")
+    if normalized_action != "connection" and not target_path:
+        raise ValueError("Firestore Collection/Document 경로가 필요합니다.")
+    parts = _firestore_path_parts(target_path)
+    if target_path:
+        if normalized_kind == "collection" and len(parts) % 2 == 0:
+            raise ValueError("Collection 경로가 올바르지 않습니다.")
+        if normalized_kind == "document" and len(parts) % 2 != 0:
+            raise ValueError("Document 경로가 올바르지 않습니다.")
+
+    labels = {
+        "connection": "Google Cloud Firestore 연결코드",
+        "list": "리스트 조회",
+        "read": "조회",
+        "create": "등록",
+        "update": "수정",
+        "delete": "삭제",
+    }
+    connection = _firestore_python_connection_block(root, profile)
+    if normalized_action == "connection":
+        body = "print('Firestore Project:', db.project)\nprint('Firestore Database:', getattr(db, '_database', DATABASE_ID))\nprint('Collections:', [ref.id for ref in db.collections()])\n"
+    elif normalized_action == "list":
+        body = _firestore_list_snippet(target_path, normalized_kind)
+    elif normalized_action == "read":
+        body = _firestore_read_snippet(target_path, normalized_kind)
+    elif normalized_action == "create":
+        body = _firestore_create_snippet(target_path, normalized_kind)
+    elif normalized_action == "update":
+        body = _firestore_update_snippet(target_path, normalized_kind)
+    else:
+        body = _firestore_delete_snippet(target_path, normalized_kind)
+
+    project_root = Path(_project_key(root)).resolve()
+    scratch_dir = project_root / ".agentstudio" / "firestore_scratch"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    target_name = target_path or "firestore"
+    scratch_name = f"firestore_{normalized_action}_{_scratch_safe_name(target_name)}_{timestamp}.py"
+    scratch_path = scratch_dir / scratch_name
+    header = (
+        "# THEANOVA AgentStudio · Google Cloud Firestore 임시 Python 코드\n"
+        f"# 메뉴: {labels[normalized_action]}\n"
+        f"# 연결: {profile.get('name') or 'Google Cloud Firestore 연결'}\n"
+        f"# 대상: {target_path or 'Firestore'}\n"
+        f"# 노드: {normalized_kind}\n"
+        f"# 생성 시각: {datetime.now().isoformat(timespec='seconds')}\n"
+        "# 이 파일은 자동 실행되지 않습니다. 실행 전에 Document/Field/삭제 조건을 반드시 확인하세요.\n"
+        "# Service Account Private Key 내용은 이 파일에 복사하지 않습니다.\n\n"
+    )
+    content = header + connection + "\n" + body
+    scratch_path.write_text(content, encoding="utf-8", newline="\n")
+    return {
+        "ok": True,
+        "action": normalized_action,
+        "label": labels[normalized_action],
+        "db_type": "firestore",
+        "node_kind": normalized_kind,
+        "path": target_path,
+        "relative_path": scratch_path.relative_to(project_root).as_posix(),
+        "content": content,
+        "message": f"{labels[normalized_action]}를 Firestore 임시 Python 파일로 생성했습니다. 자동 실행되지 않습니다.",
+    }
 
 
 def _redis_key_summary(conn: Any, key: str) -> dict[str, Any]:

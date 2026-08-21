@@ -15,3 +15,5 @@ serviceAccountKey.json
 google-credentials*.json
 .agentstudio/sql_scratch/
 .agentstudio/redis_scratch/
+.agentstudio/firestore_scratch/
+.agentstudio/preview/

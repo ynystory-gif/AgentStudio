@@ -1,8 +1,16 @@
-from sqlalchemy import text
+import re
+from typing import Any
+
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
+
 from app.core.config import get_settings
 from app.core.machine_identity import current_pc_name
+
+
+_SCHEMA_NAME_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+DEFAULT_EXTENSION_SCHEMA = "extensions"
 
 
 def normalize_async_database_url(url: str) -> str:
@@ -14,13 +22,103 @@ def normalize_async_database_url(url: str) -> str:
     return value
 
 
+def normalize_schema_name(value: str | None, *, default: str = "") -> str:
+    schema = str(value or default or "").strip()
+    if not schema:
+        return ""
+    if not _SCHEMA_NAME_RE.fullmatch(schema):
+        raise ValueError(
+            "PostgreSQL 스키마 이름은 소문자 영문/숫자/_만 사용할 수 있고 영문 또는 _로 시작해야 합니다."
+        )
+    return schema
+
+
+def quote_identifier(value: str) -> str:
+    """Quote an already validated PostgreSQL identifier."""
+    normalized = normalize_schema_name(value)
+    return '"' + normalized.replace('"', '""') + '"'
+
+
+def postgres_search_path(schema: str) -> str:
+    target = normalize_schema_name(schema)
+    if not target:
+        return ""
+    # target first prevents AgentStudio from accidentally resolving public tables.
+    ordered = [target, DEFAULT_EXTENSION_SCHEMA, "public"]
+    unique: list[str] = []
+    for item in ordered:
+        if item not in unique:
+            unique.append(item)
+    return ",".join(unique)
+
+
+def _pin_search_path_on_checkout(async_engine, target_schema: str) -> None:
+    """Pin PostgreSQL search_path on every SQLAlchemy pool checkout.
+
+    Supabase Session Pooler can accept a PostgreSQL startup ``options`` value while the
+    server session still reports ``public`` as ``current_schema()``.  AgentStudio therefore
+    applies the session setting on the exact DBAPI connection that SQLAlchemy checks out.
+
+    The SET is executed in autocommit mode so a later transaction rollback cannot undo the
+    session-level search_path.  ``schema_translate_map`` remains enabled as a second guard
+    so ORM-owned AgentStudio tables are explicitly schema-qualified as well.
+    """
+    target = normalize_schema_name(target_schema)
+    if not target:
+        return
+
+    qschema = quote_identifier(target)
+    statement = f'SET search_path TO {qschema}, "{DEFAULT_EXTENSION_SCHEMA}", "public"'
+
+    @event.listens_for(async_engine.sync_engine, "checkout")
+    def _set_search_path(dbapi_connection, connection_record, connection_proxy) -> None:  # noqa: ARG001
+        _apply_dbapi_search_path(dbapi_connection, statement)
+
+
+def _apply_dbapi_search_path(dbapi_connection, statement: str) -> None:
+    """Apply one session-level search_path statement without leaving a transaction open."""
+    previous_autocommit = bool(getattr(dbapi_connection, "autocommit", False))
+    cursor = None
+    try:
+        if not previous_autocommit:
+            dbapi_connection.autocommit = True
+        cursor = dbapi_connection.cursor()
+        cursor.execute(statement)
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if not previous_autocommit:
+            dbapi_connection.autocommit = False
+
+
+def create_agentstudio_async_engine(database_url_value: str, *, schema: str = ""):
+    """
+    Build the SQLAlchemy async engine used by AgentStudio.
+
+    For a custom Supabase schema we use both:
+    - schema_translate_map: SQLAlchemy ORM tables are explicitly schema-qualified.
+    - DBAPI checkout pinning: every pooled PostgreSQL connection executes an explicit
+      session-level search_path on the exact connection before AgentStudio uses it.
+    """
+    normalized_url = normalize_async_database_url(database_url_value)
+    target_schema = normalize_schema_name(schema)
+    kwargs: dict[str, Any] = {"pool_pre_ping": True}
+    if target_schema:
+        kwargs["execution_options"] = {"schema_translate_map": {None: target_schema}}
+    candidate = create_async_engine(normalized_url, **kwargs)
+    if target_schema:
+        _pin_search_path_on_checkout(candidate, target_schema)
+    return candidate
+
+
 settings = get_settings()
 database_url = normalize_async_database_url(settings.database_url)
+runtime_schema = ""
 
-engine = create_async_engine(
-    database_url,
-    pool_pre_ping=True,
-)
+engine = create_agentstudio_async_engine(database_url)
 
 SessionLocal = async_sessionmaker(
     engine,
@@ -29,21 +127,34 @@ SessionLocal = async_sessionmaker(
 )
 
 
-async def rebind_database(new_database_url: str) -> dict:
+async def rebind_database(new_database_url: str, *, schema: str = "") -> dict:
     """
     저장된 DATABASE_URL을 현재 Backend 프로세스에 즉시 적용합니다.
 
-    새 Engine으로 SELECT 1 연결 검증에 성공한 경우에만 전역 engine과
-    기존 SessionLocal async_sessionmaker의 bind를 교체합니다. 따라서
-    settings_service 등에서 이미 import한 SessionLocal 참조도 새 DB를 사용합니다.
+    v5.297: Supabase custom schema가 지정된 경우 새 Engine의 모든 ORM SQL은
+    schema_translate_map으로 해당 스키마를 명시하고, SQLAlchemy pool checkout마다
+    실제 DBAPI 연결에 search_path를 직접 적용해 스키마 -> extensions -> public 순서로 고정합니다.
     """
-    global engine, database_url
+    global engine, database_url, runtime_schema
 
     normalized = normalize_async_database_url(new_database_url)
-    candidate = create_async_engine(normalized, pool_pre_ping=True)
+    target_schema = normalize_schema_name(schema)
+    candidate = create_agentstudio_async_engine(normalized, schema=target_schema)
     try:
         async with candidate.connect() as conn:
             await conn.execute(text("SELECT 1"))
+            if target_schema:
+                exists = bool((await conn.execute(
+                    text("SELECT to_regnamespace(:schema_name) IS NOT NULL"),
+                    {"schema_name": target_schema},
+                )).scalar())
+                if not exists:
+                    raise RuntimeError(f"PostgreSQL 스키마 '{target_schema}'가 존재하지 않습니다.")
+                active_schema = str((await conn.execute(text("SELECT current_schema()"))).scalar() or "")
+                if active_schema != target_schema:
+                    raise RuntimeError(
+                        f"PostgreSQL search_path 적용 실패: 기대={target_schema}, 실제={active_schema or '-'}"
+                    )
     except Exception:
         await candidate.dispose()
         raise
@@ -51,6 +162,7 @@ async def rebind_database(new_database_url: str) -> dict:
     old_engine = engine
     engine = candidate
     database_url = normalized
+    runtime_schema = target_schema
     SessionLocal.configure(bind=candidate)
     try:
         await old_engine.dispose()
@@ -61,6 +173,7 @@ async def rebind_database(new_database_url: str) -> dict:
         "ok": True,
         "database_url": new_database_url,
         "runtime_database_url": normalized,
+        "schema": target_schema or "public/default",
     }
 
 
@@ -84,35 +197,37 @@ async def init_db():
 
 async def migrate_agentstudio_schema() -> dict:
     """현재 AgentStudio runtime engine의 스키마를 안전하게 보정합니다."""
-    return await migrate_agentstudio_schema_on_engine(engine)
+    return await migrate_agentstudio_schema_on_engine(engine, schema=runtime_schema)
 
 
-async def migrate_agentstudio_schema_on_engine(target_engine) -> dict:
-    """
-    지정한 PostgreSQL engine의 AgentStudio 스키마를 삭제 없이 보정합니다.
-
-    v5.284에서는 신규/기존 Supabase 모두 같은 migration을 반복 실행할 수 있도록
-    실제 SQL 적용부를 connection 단위 함수로 분리했습니다.
-    """
+async def migrate_agentstudio_schema_on_engine(target_engine, *, schema: str = "") -> dict:
+    """지정한 PostgreSQL engine의 AgentStudio 스키마를 삭제 없이 보정합니다."""
     async with target_engine.begin() as conn:
-        return await migrate_agentstudio_schema_on_connection(conn)
+        return await migrate_agentstudio_schema_on_connection(conn, schema=schema)
 
 
-async def migrate_agentstudio_schema_on_connection(conn) -> dict:
+async def _resolve_connection_schema(conn, requested_schema: str = "") -> str:
+    target = normalize_schema_name(requested_schema)
+    if target:
+        return target
+    current = str((await conn.execute(text("SELECT current_schema()"))).scalar() or "public")
+    return normalize_schema_name(current, default="public")
+
+
+async def migrate_agentstudio_schema_on_connection(conn, *, schema: str = "") -> dict:
     """이미 열린 transaction 안에서 AgentStudio 호환 migration을 적용합니다."""
-    # Project ORM이 요구하는 전체 컬럼을 보정합니다.
-    # create_all()은 이미 존재하는 projects 테이블에 새 컬럼을 추가하지 않으므로
-    # 과거 버전 DB에서도 현재 ORM SELECT가 실패하지 않도록 모두 IF NOT EXISTS로 관리합니다.
     pc_name = current_pc_name()
+    target_schema = await _resolve_connection_schema(conn, schema)
+    qschema = quote_identifier(target_schema)
+    app_settings = f'{qschema}."app_settings"'
+    projects = f'{qschema}."projects"'
 
-    # v5.264: shared PostgreSQL DB에서도 PC별 환경 설정이 섞이지 않도록
-    # app_settings를 (pc_name, key) 복합키 구조로 보정합니다.
     machine_setting_statements = [
-        """
-        ALTER TABLE app_settings
+        f"""
+        ALTER TABLE {app_settings}
         ADD COLUMN IF NOT EXISTS pc_name VARCHAR(255) NOT NULL DEFAULT ''
         """,
-        """
+        f"""
         DO $$
         DECLARE r RECORD;
         BEGIN
@@ -120,7 +235,9 @@ async def migrate_agentstudio_schema_on_connection(conn) -> dict:
             SELECT c.conname
             FROM pg_constraint c
             JOIN pg_class t ON t.oid = c.conrelid
-            WHERE t.relname = 'app_settings'
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = '{target_schema}'
+              AND t.relname = 'app_settings'
               AND c.contype = 'u'
               AND array_length(c.conkey, 1) = 1
               AND EXISTS (
@@ -131,77 +248,36 @@ async def migrate_agentstudio_schema_on_connection(conn) -> dict:
                 WHERE a.attname = 'key'
               )
           LOOP
-            EXECUTE format('ALTER TABLE app_settings DROP CONSTRAINT %I', r.conname);
+            EXECUTE format('ALTER TABLE %I.%I DROP CONSTRAINT %I', '{target_schema}', 'app_settings', r.conname);
           END LOOP;
         END $$
         """,
-        """
-        DROP INDEX IF EXISTS ix_app_settings_key
-        """,
-        """
-        CREATE INDEX IF NOT EXISTS ix_app_settings_key
-        ON app_settings(key)
-        """,
-        """
-        CREATE INDEX IF NOT EXISTS ix_app_settings_pc_name
-        ON app_settings(pc_name)
-        """,
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_app_settings_pc_name_key
-        ON app_settings(pc_name, key)
-        """,
+        f"DROP INDEX IF EXISTS {qschema}.\"ix_app_settings_key\"",
+        f"CREATE INDEX IF NOT EXISTS ix_app_settings_key ON {app_settings}(key)",
+        f"CREATE INDEX IF NOT EXISTS ix_app_settings_pc_name ON {app_settings}(pc_name)",
+        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_app_settings_pc_name_key ON {app_settings}(pc_name, key)",
     ]
 
     statements = [
-        """
-        ALTER TABLE projects
-        ADD COLUMN IF NOT EXISTS cache_path VARCHAR(1000) NOT NULL DEFAULT ''
-        """,
-        """
-        ALTER TABLE projects
-        ADD COLUMN IF NOT EXISTS temp_path VARCHAR(1000) NOT NULL DEFAULT ''
-        """,
-        """
-        ALTER TABLE projects
-        ADD COLUMN IF NOT EXISTS output_path VARCHAR(1000) NOT NULL DEFAULT ''
-        """,
-        """
-        ALTER TABLE projects
-        ADD COLUMN IF NOT EXISTS venv_path VARCHAR(1000) NOT NULL DEFAULT ''
-        """,
-        """
-        ALTER TABLE projects
-        ADD COLUMN IF NOT EXISTS models_path VARCHAR(1000) NOT NULL DEFAULT ''
-        """,
-        """
-        ALTER TABLE projects
-        ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''
-        """,
-        """
-        ALTER TABLE projects
-        ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        """,
-        """
-        ALTER TABLE projects
-        ADD COLUMN IF NOT EXISTS last_opened_at TIMESTAMP NULL
-        """,
-        """
-        ALTER TABLE projects
-        ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN NOT NULL DEFAULT FALSE
-        """,
+        f"ALTER TABLE {projects} ADD COLUMN IF NOT EXISTS cache_path VARCHAR(1000) NOT NULL DEFAULT ''",
+        f"ALTER TABLE {projects} ADD COLUMN IF NOT EXISTS temp_path VARCHAR(1000) NOT NULL DEFAULT ''",
+        f"ALTER TABLE {projects} ADD COLUMN IF NOT EXISTS output_path VARCHAR(1000) NOT NULL DEFAULT ''",
+        f"ALTER TABLE {projects} ADD COLUMN IF NOT EXISTS venv_path VARCHAR(1000) NOT NULL DEFAULT ''",
+        f"ALTER TABLE {projects} ADD COLUMN IF NOT EXISTS models_path VARCHAR(1000) NOT NULL DEFAULT ''",
+        f"ALTER TABLE {projects} ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''",
+        f"ALTER TABLE {projects} ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        f"ALTER TABLE {projects} ADD COLUMN IF NOT EXISTS last_opened_at TIMESTAMP NULL",
+        f"ALTER TABLE {projects} ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN NOT NULL DEFAULT FALSE",
     ]
 
     applied = []
-
-    # 기존 DB의 app_settings는 현재 PC 설정으로 귀속시켜 보존합니다.
-    # 먼저 pc_name 컬럼만 만든 뒤 기존 빈 값을 현재 PC 이름으로 채웁니다.
     await conn.execute(text(machine_setting_statements[0]))
     applied.append(" ".join(machine_setting_statements[0].strip().split()))
     await conn.execute(
-        text("UPDATE app_settings SET pc_name = :pc_name WHERE COALESCE(pc_name, '') = ''"),
+        text(f"UPDATE {app_settings} SET pc_name = :pc_name WHERE COALESCE(pc_name, '') = ''"),
         {"pc_name": pc_name},
     )
-    applied.append(f"app_settings legacy rows -> pc_name={pc_name}")
+    applied.append(f"{target_schema}.app_settings legacy rows -> pc_name={pc_name}")
 
     for sql in machine_setting_statements[1:]:
         await conn.execute(text(sql))
@@ -213,6 +289,7 @@ async def migrate_agentstudio_schema_on_connection(conn) -> dict:
 
     return {
         "ok": True,
+        "schema": target_schema,
         "applied": applied,
         "count": len(applied),
     }
@@ -227,22 +304,11 @@ def current_event_loop_name() -> str:
         return "no-running-loop"
 
 
-
 async def verify_project_schema() -> dict:
     """현재 projects 테이블의 필수 컬럼 존재 여부를 확인합니다."""
     required = {
-        "id",
-        "name",
-        "root_path",
-        "cache_path",
-        "temp_path",
-        "output_path",
-        "venv_path",
-        "models_path",
-        "description",
-        "created_at",
-        "last_opened_at",
-        "is_favorite",
+        "id", "name", "root_path", "cache_path", "temp_path", "output_path",
+        "venv_path", "models_path", "description", "created_at", "last_opened_at", "is_favorite",
     }
 
     async with engine.begin() as conn:
@@ -256,14 +322,9 @@ async def verify_project_schema() -> dict:
                 """
             )
         )
-
-        existing = {
-            str(row[0])
-            for row in result.fetchall()
-        }
+        existing = {str(row[0]) for row in result.fetchall()}
 
     missing = sorted(required - existing)
-
     return {
         "ok": not missing,
         "required": sorted(required),

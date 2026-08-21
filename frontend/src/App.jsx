@@ -4,8 +4,19 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { api, connectJobs, runtimeInfo } from './api'
+import { NotebookEditor } from './components/notebook/NotebookEditor'
+import { PdfViewer, PresentationViewer } from './components/viewers/DocumentViewers'
+import { MiniBadge, SectionTitle, StatusDot, StudioIcon } from './components/common/CommonUi'
+import { FileChangeList, KeyValueGrid, MetricCard, ReportSection, StatusBadge, WorkflowMiniMap } from './components/reports/ReportComponents'
+import { AgentStudioArchitecturePanel, GeneratedAgentArchitecturePanel } from './components/architecture/ArchitecturePanels'
+import { LlmCatalogPanel } from './components/llm/LlmCatalogPanel'
+import { DatabaseBrowserContextMenus, FirestoreBrowserPanel, RedisBrowserPanel, SqlObjectTreePanel } from './components/database/DatabaseBrowsers'
+import { TerminalPanel } from './components/terminal/TerminalPanel'
+import { parseTerminalServerMessage, serializeTerminalClientMessage, terminalCellWidth, terminalNextCharacter, terminalPreviousCharacter } from './utils/terminal'
+import { getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isNotebookFile, isPdfFile, isPresentationFile } from './utils/editor'
+import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSqlCode } from './utils/notebook'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.284'
+const AGENTSTUDIO_FRONTEND_VERSION='5.306'
 
 const joinWin = (root, file) => `${root}\\${file}`.replaceAll('\\\\', '\\')
 const localIsoDate = () => {
@@ -15,883 +26,6 @@ const localIsoDate = () => {
 }
 const localIsoMonth = () => localIsoDate().slice(0,7)
 const normalizeProjectRelativePath=(value='')=>String(value||'').replace(/\\/g,'/').replace(/^\/+/, '')
-const formatRedisBytes=(value)=>{
-  const bytes=Number(value)
-  if(!Number.isFinite(bytes)||bytes<0) return '-'
-  if(bytes<1024) return `${bytes} B`
-  if(bytes<1024*1024) return `${(bytes/1024).toFixed(bytes<10240?1:0)} KB`
-  return `${(bytes/(1024*1024)).toFixed(1)} MB`
-}
-const redisTtlLabel=(ttl)=>{
-  const value=Number(ttl)
-  if(value===-1) return 'No limit'
-  if(value===-2||!Number.isFinite(value)) return '-'
-  if(value<60) return `${value}s`
-  if(value<3600) return `${Math.floor(value/60)}m ${value%60}s`
-  if(value<86400) return `${Math.floor(value/3600)}h ${Math.floor((value%3600)/60)}m`
-  return `${Math.floor(value/86400)}d ${Math.floor((value%86400)/3600)}h`
-}
-const buildRedisKeyTree=(keys=[])=>{
-  const root={name:'',path:'',children:new Map(),items:[]}
-  for(const item of Array.isArray(keys)?keys:[]){
-    const full=String(item?.key||'')
-    if(!full) continue
-    const parts=full.split(':')
-    const leaf=parts.pop()||full
-    let node=root
-    let path=''
-    for(const part of parts){
-      path=path?`${path}:${part}`:part
-      if(!node.children.has(part)) node.children.set(part,{name:part,path,children:new Map(),items:[]})
-      node=node.children.get(part)
-    }
-    node.items.push({...item,label:leaf})
-  }
-  const finalize=(node)=>({
-    name:node.name,
-    path:node.path,
-    children:[...node.children.values()].sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base'})).map(finalize),
-    items:node.items.sort((a,b)=>String(a.label||'').localeCompare(String(b.label||''),undefined,{sensitivity:'base'}))
-  })
-  return finalize(root)
-}
-const countRedisTreeKeys=(node)=>(node?.items||[]).length+(node?.children||[]).reduce((sum,child)=>sum+countRedisTreeKeys(child),0)
-
-const getEditorLanguage=(filePath='')=>{
-  const normalized=String(filePath||'').replace(/\\/g,'/').toLowerCase()
-  const fileName=normalized.split('/').pop()||''
-
-  if(fileName==='dockerfile'||fileName.startsWith('dockerfile.')) return 'dockerfile'
-  if(fileName==='.env'||fileName.startsWith('.env.')) return 'ini'
-  if(fileName==='.gitignore'||fileName==='.dockerignore'||fileName==='.npmignore') return 'plaintext'
-  if(fileName==='makefile') return 'plaintext'
-
-  const dot=fileName.lastIndexOf('.')
-  const ext=dot>=0?fileName.slice(dot+1):''
-
-  return ({
-    ts:'typescript',
-    tsx:'typescript',
-    mts:'typescript',
-    cts:'typescript',
-    js:'javascript',
-    jsx:'javascript',
-    mjs:'javascript',
-    cjs:'javascript',
-    py:'python',
-    pyw:'python',
-    json:'json',
-    jsonc:'json',
-    ipynb:'json',
-    md:'markdown',
-    markdown:'markdown',
-    html:'html',
-    htm:'html',
-    css:'css',
-    scss:'scss',
-    less:'less',
-    sql:'sql',
-    yaml:'yaml',
-    yml:'yaml',
-    xml:'xml',
-    svg:'xml',
-    sh:'shell',
-    bash:'shell',
-    zsh:'shell',
-    ps1:'powershell',
-    psm1:'powershell',
-    psd1:'powershell',
-    bat:'bat',
-    cmd:'bat',
-    cs:'csharp',
-    java:'java',
-    c:'cpp',
-    h:'cpp',
-    cc:'cpp',
-    cpp:'cpp',
-    cxx:'cpp',
-    hpp:'cpp',
-    go:'go',
-    rs:'rust',
-    php:'php',
-    rb:'ruby',
-    ini:'ini',
-    toml:'ini',
-    txt:'plaintext',
-    log:'plaintext',
-    prisma:'plaintext'
-  })[ext]||'plaintext'
-}
-
-const getEditorModelPath=(projectRoot='',filePath='')=>{
-  const rootKey=encodeURIComponent(String(projectRoot||'workspace').replace(/\\/g,'/'))
-  const relative=String(filePath||'untitled').replace(/\\/g,'/').replace(/^\/+/, '')
-  return `agentstudio://model/${rootKey}/${encodeURIComponent(relative)}`
-}
-
-
-const isNotebookFile=(filePath='')=>String(filePath||'').toLowerCase().endsWith('.ipynb')
-const isPdfFile=(filePath='')=>String(filePath||'').toLowerCase().endsWith('.pdf')
-
-const notebookSourceToText=(source)=>{
-  if(Array.isArray(source)) return source.join('')
-  return String(source??'')
-}
-
-// v5.267: Python 커널 Notebook 안에 교육용 raw SQL 셀이 들어 있는 경우
-// Python ast.parse()로 보내지 않고 기존 DB Workspace 실행기로 라우팅합니다.
-// Jupyter의 %%sql 표기도 함께 허용하며, 교재에서 Python 주석 형태로 붙인
-// '# ...' 안내 줄은 SQL 주석 '-- ...'로 바꿔 DB에 전달합니다.
-const normalizeNotebookSqlCode=(source='')=>{
-  const lines=String(source??'').replace(/\r\n|\r/g,'\n').split('\n')
-  let magicRemoved=false
-  const normalized=[]
-  for(const raw of lines){
-    const trimmed=raw.trim()
-    if(!magicRemoved&&/^%%sql(?:\s|$)/i.test(trimmed)){
-      magicRemoved=true
-      const rest=trimmed.replace(/^%%sql(?:\s+)?/i,'')
-      if(rest) normalized.push(rest)
-      continue
-    }
-    const match=raw.match(/^(\s*)#(.*)$/)
-    if(match){
-      normalized.push(`${match[1]}--${match[2]}`)
-    }else{
-      normalized.push(raw)
-    }
-  }
-  return normalized.join('\n')
-}
-
-const looksLikeNotebookSqlCode=(source='')=>{
-  const raw=String(source??'')
-  if(/^\s*%%sql(?:\s|$)/i.test(raw)) return true
-  const normalized=normalizeNotebookSqlCode(raw)
-  const lines=normalized.split('\n')
-  let inBlockComment=false
-  for(const rawLine of lines){
-    let line=rawLine.trim()
-    if(!line) continue
-    if(inBlockComment){
-      if(line.includes('*/')) inBlockComment=false
-      continue
-    }
-    if(line.startsWith('/*')){
-      if(!line.includes('*/')) inBlockComment=true
-      continue
-    }
-    if(line.startsWith('--')) continue
-    return /^(?:BEGIN\s*(?:;|TRANSACTION\b)|START\s+TRANSACTION\b|COMMIT\s*;|ROLLBACK\s*;|SELECT\s+|INSERT\s+INTO\s+|UPDATE\s+[\w"`\[]+\s+SET\s+|DELETE\s+FROM\s+|CREATE\s+(?:TABLE|VIEW|INDEX|SCHEMA|DATABASE|SEQUENCE|FUNCTION|PROCEDURE)\b|ALTER\s+(?:TABLE|VIEW|SCHEMA|DATABASE|SEQUENCE)\b|DROP\s+(?:TABLE|VIEW|INDEX|SCHEMA|DATABASE|SEQUENCE|FUNCTION|PROCEDURE)\b|TRUNCATE\s+(?:TABLE\s+)?|MERGE\s+INTO\s+|GRANT\s+|REVOKE\s+|EXPLAIN\s+|VACUUM(?:\s|;|$)|ANALYZE(?:\s|;|$))/i.test(line)
-  }
-  return false
-}
-
-const formatNotebookSqlResult=(result)=>{
-  const lines=[]
-  if(result?.message) lines.push(String(result.message))
-  const columns=Array.isArray(result?.columns)?result.columns:[]
-  const rows=Array.isArray(result?.rows)?result.rows:[]
-  if(columns.length){
-    const displayRows=rows.slice(0,50)
-    lines.push(columns.join(' | '))
-    lines.push(columns.map(()=> '---').join(' | '))
-    for(const row of displayRows){
-      lines.push((Array.isArray(row)?row:[]).map(value=>value===null?'NULL':String(value)).join(' | '))
-    }
-    if(rows.length>displayRows.length) lines.push(`... Notebook 출력은 ${displayRows.length}행까지만 표시합니다. 전체 조회 ${rows.length}행`)
-  }
-  return (lines.join('\n')||'SQL 실행 완료')+'\n'
-}
-
-const textToNotebookSource=(text='')=>{
-  const normalized=String(text??'').replace(/\r\n|\r/g,'\n')
-  if(!normalized) return []
-  const parts=normalized.split('\n')
-  return parts.map((line,index)=>index<parts.length-1?`${line}\n`:line).filter((line,index)=>line!==''||index<parts.length-1)
-}
-
-const parseNotebookDocument=(value='')=>{
-  try{
-    const notebook=JSON.parse(String(value||''))
-    if(!notebook||!Array.isArray(notebook.cells)){
-      return {ok:false,error:'유효한 Jupyter Notebook 형식이 아닙니다. cells 배열을 찾을 수 없습니다.',notebook:null}
-    }
-    return {ok:true,error:'',notebook}
-  }catch(error){
-    return {ok:false,error:`Notebook JSON 해석 실패: ${String(error?.message||error)}`,notebook:null}
-  }
-}
-
-const notebookKernelLanguage=(notebook)=>{
-  const metadata=notebook?.metadata||{}
-  const kernelspec=metadata.kernelspec||{}
-  const languageInfo=metadata.language_info||{}
-  return String(kernelspec.language||languageInfo.name||kernelspec.name||'python').toLowerCase()
-}
-
-const notebookAttachmentDataUrl=(attachments,name)=>{
-  const key=decodeURIComponent(String(name||'').replace(/^attachment:/i,''))
-  const item=attachments&&typeof attachments==='object'?attachments[key]:null
-  if(!item||typeof item!=='object') return ''
-  const preferred=['image/png','image/jpeg','image/jpg','image/gif','image/webp','image/svg+xml']
-  const mime=preferred.find(type=>item[type]!==undefined)||Object.keys(item).find(type=>String(type).startsWith('image/'))
-  if(!mime) return ''
-  const raw=notebookSourceToText(item[mime])
-  if(!raw) return ''
-  if(mime==='image/svg+xml'){
-    const trimmed=raw.trim()
-    if(trimmed.startsWith('<svg')||trimmed.startsWith('<?xml')){
-      return `data:${mime};charset=utf-8,${encodeURIComponent(raw)}`
-    }
-  }
-  return `data:${mime};base64,${raw.replace(/\s/g,'')}`
-}
-
-const renderNotebookInline=(text,keyPrefix='inline',attachments={})=>{
-  const source=String(text??'')
-  const token=/(!\[[^\]]*\]\((?:attachment:[^)]+|https?:\/\/[^)\s]+)\)|`[^`]*`|\*\*[^*]+\*\*|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g
-  const nodes=[]
-  let last=0
-  let match
-  let index=0
-  while((match=token.exec(source))){
-    if(match.index>last) nodes.push(source.slice(last,match.index))
-    const value=match[0]
-    const key=`${keyPrefix}-${index++}`
-    if(value.startsWith('![')){
-      const image=value.match(/^!\[([^\]]*)\]\((attachment:[^)]+|https?:\/\/[^)\s]+)\)$/)
-      if(image){
-        const src=image[2].startsWith('attachment:')
-          ? notebookAttachmentDataUrl(attachments,image[2])
-          : image[2]
-        if(src){
-          nodes.push(<img key={key} className="notebook-markdown-inline-image" alt={image[1]||'Notebook attachment'} src={src}/>)
-        }else{
-          nodes.push(<span key={key} className="notebook-attachment-missing" title={image[2]}>⚠ 첨부 이미지를 찾을 수 없습니다: {image[1]||image[2]}</span>)
-        }
-      }else{
-        nodes.push(value)
-      }
-    }else if(value.startsWith('`')){
-      nodes.push(<code key={key}>{value.slice(1,-1)}</code>)
-    }else if(value.startsWith('**')){
-      nodes.push(<strong key={key}>{value.slice(2,-2)}</strong>)
-    }else if(value.startsWith('[')){
-      const link=value.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/)
-      if(link){
-        nodes.push(<a key={key} href={link[2]} target="_blank" rel="noreferrer">{link[1]}</a>)
-      }else{
-        nodes.push(value)
-      }
-    }else{
-      nodes.push(value)
-    }
-    last=match.index+value.length
-  }
-  if(last<source.length) nodes.push(source.slice(last))
-  return nodes
-}
-
-function NotebookMarkdown({text,attachments={}}){
-  const lines=String(text||'').replace(/\r\n|\r/g,'\n').split('\n')
-  const blocks=[]
-  let i=0
-  let blockKey=0
-
-  const isBlockStart=(line,index)=>{
-    const trimmed=line.trim()
-    if(!trimmed) return true
-    if(/^```/.test(trimmed)) return true
-    if(/^#{1,6}\s+/.test(trimmed)) return true
-    if(/^>\s?/.test(trimmed)) return true
-    if(/^[-*+]\s+/.test(trimmed)) return true
-    if(/^\d+[.)]\s+/.test(trimmed)) return true
-    if(/^([-*_])(?:\s*\1){2,}\s*$/.test(trimmed)) return true
-    const next=lines[index+1]||''
-    if(trimmed.includes('|')&&/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(next)) return true
-    return false
-  }
-
-  while(i<lines.length){
-    const raw=lines[i]
-    const trimmed=raw.trim()
-    if(!trimmed){ i++; continue }
-
-    const fence=trimmed.match(/^```\s*([^\s`]*)/)
-    if(fence){
-      const language=fence[1]||''
-      const codeLines=[]
-      i++
-      while(i<lines.length&&!/^```/.test(lines[i].trim())){
-        codeLines.push(lines[i]); i++
-      }
-      if(i<lines.length) i++
-      blocks.push(<pre className="notebook-markdown-code" key={`md-${blockKey++}`}><code data-language={language}>{codeLines.join('\n')}</code></pre>)
-      continue
-    }
-
-    const heading=trimmed.match(/^(#{1,6})\s+(.+)$/)
-    if(heading){
-      const level=Math.min(6,heading[1].length)
-      const Tag=`h${level}`
-      blocks.push(<Tag key={`md-${blockKey++}`}>{renderNotebookInline(heading[2],`h-${blockKey}`,attachments)}</Tag>)
-      i++; continue
-    }
-
-    if(trimmed.includes('|')&&/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[i+1]||'')){
-      const splitRow=(line)=>line.trim().replace(/^\||\|$/g,'').split('|').map(cell=>cell.trim())
-      const headers=splitRow(raw)
-      i+=2
-      const rows=[]
-      while(i<lines.length&&lines[i].trim()&&lines[i].includes('|')){
-        rows.push(splitRow(lines[i])); i++
-      }
-      blocks.push(
-        <div className="notebook-markdown-table-wrap" key={`md-${blockKey++}`}>
-          <table className="notebook-markdown-table">
-            <thead><tr>{headers.map((cell,idx)=><th key={idx}>{renderNotebookInline(cell,`th-${blockKey}-${idx}`,attachments)}</th>)}</tr></thead>
-            <tbody>{rows.map((row,rowIndex)=><tr key={rowIndex}>{headers.map((_,cellIndex)=><td key={cellIndex}>{renderNotebookInline(row[cellIndex]||'',`td-${blockKey}-${rowIndex}-${cellIndex}`,attachments)}</td>)}</tr>)}</tbody>
-          </table>
-        </div>
-      )
-      continue
-    }
-
-    if(/^>\s?/.test(trimmed)){
-      const quote=[]
-      while(i<lines.length&&/^\s*>\s?/.test(lines[i])){
-        quote.push(lines[i].replace(/^\s*>\s?/,'')); i++
-      }
-      blocks.push(<blockquote key={`md-${blockKey++}`}>{quote.map((line,idx)=><React.Fragment key={idx}>{renderNotebookInline(line,`q-${blockKey}-${idx}`,attachments)}{idx<quote.length-1&&<br/>}</React.Fragment>)}</blockquote>)
-      continue
-    }
-
-    if(/^[-*+]\s+/.test(trimmed)){
-      const items=[]
-      while(i<lines.length&&/^\s*[-*+]\s+/.test(lines[i])){
-        items.push(lines[i].replace(/^\s*[-*+]\s+/,'')); i++
-      }
-      blocks.push(<ul key={`md-${blockKey++}`}>{items.map((item,idx)=><li key={idx}>{renderNotebookInline(item,`ul-${blockKey}-${idx}`,attachments)}</li>)}</ul>)
-      continue
-    }
-
-    if(/^\d+[.)]\s+/.test(trimmed)){
-      const items=[]
-      while(i<lines.length&&/^\s*\d+[.)]\s+/.test(lines[i])){
-        items.push(lines[i].replace(/^\s*\d+[.)]\s+/,'')); i++
-      }
-      blocks.push(<ol key={`md-${blockKey++}`}>{items.map((item,idx)=><li key={idx}>{renderNotebookInline(item,`ol-${blockKey}-${idx}`,attachments)}</li>)}</ol>)
-      continue
-    }
-
-    if(/^([-*_])(?:\s*\1){2,}\s*$/.test(trimmed)){
-      blocks.push(<hr key={`md-${blockKey++}`}/>); i++; continue
-    }
-
-    const paragraph=[trimmed]
-    i++
-    while(i<lines.length&&lines[i].trim()&&!isBlockStart(lines[i],i)){
-      paragraph.push(lines[i].trim()); i++
-    }
-    blocks.push(<p key={`md-${blockKey++}`}>{renderNotebookInline(paragraph.join(' '),`p-${blockKey}`,attachments)}</p>)
-  }
-
-  return <div className="notebook-markdown-rendered">{blocks}</div>
-}
-
-function NotebookOutput({output}){
-  if(!output) return null
-  const outputType=String(output.output_type||'')
-  if(outputType==='stream'){
-    return <pre className={output.name==='stderr'?'notebook-output-stream error':'notebook-output-stream'}>{notebookSourceToText(output.text)}</pre>
-  }
-  if(outputType==='error'){
-    const trace=Array.isArray(output.traceback)?output.traceback.join('\n'):String(output.traceback||'')
-    const fallback=`${output.ename||'Error'}${output.evalue?`: ${output.evalue}`:''}`
-    return <pre className="notebook-output-stream error">{trace||fallback}</pre>
-  }
-  if(outputType==='display_data'||outputType==='execute_result'){
-    const data=output.data||{}
-    const image=notebookSourceToText(data['image/png'])
-    if(image){
-      return <div className="notebook-output-rich"><img alt="Notebook output" src={`data:image/png;base64,${image.replace(/\s/g,'')}`}/></div>
-    }
-    const plain=notebookSourceToText(data['text/plain']||data['application/json']||data['text/markdown']||data['text/html'])
-    return plain?<pre className="notebook-output-stream">{plain}</pre>:null
-  }
-  return <pre className="notebook-output-stream">{JSON.stringify(output,null,2)}</pre>
-}
-
-function PdfViewer({filePath,projectRoot,revision=0}){
-  const apiBase=runtimeInfo().apiBase
-  const src=`${apiBase}/files/pdf?root=${encodeURIComponent(projectRoot||'')}&relative_path=${encodeURIComponent(filePath||'')}&v=${encodeURIComponent(revision||0)}`
-  return <div className="pdf-viewer-shell">
-    <div className="pdf-viewer-toolbar">
-      <div>
-        <strong>PDF 미리보기</strong>
-        <span>{filePath||''}</span>
-      </div>
-      <small>PDF는 바이너리 파일이므로 코드 편집기 대신 브라우저 PDF Viewer로 표시됩니다.</small>
-    </div>
-    <iframe
-      key={`${filePath}:${revision}`}
-      className="pdf-viewer-frame"
-      src={src}
-      title={`PDF 미리보기 - ${filePath||'문서'}`}
-    />
-  </div>
-}
-
-function NotebookEditor({value,filePath,projectRoot,onChange,onExecutePython,onStopPython,controllerRef}){
-  const parsed=React.useMemo(()=>parseNotebookDocument(value),[value])
-  const cellEditorsRef=useRef({})
-  const cellSelectionsRef=useRef({})
-  const [editingMarkdown,setEditingMarkdown]=useState({})
-  const [activeCellIndex,setActiveCellIndex]=useState(0)
-  const [runningCells,setRunningCells]=useState({})
-  const [runAllBusy,setRunAllBusy]=useState(false)
-  const [stopBusy,setStopBusy]=useState(false)
-  const cancelRequestedRef=useRef(false)
-  const executionCounterRef=useRef(0)
-
-  useEffect(()=>{
-    if(!parsed.ok) return
-    const maxCount=(parsed.notebook.cells||[]).reduce((max,cell)=>{
-      const count=Number(cell?.execution_count)
-      return Number.isFinite(count)?Math.max(max,count):max
-    },0)
-    executionCounterRef.current=Math.max(executionCounterRef.current,maxCount)
-  },[filePath,parsed.ok])
-
-  useEffect(()=>{
-    cellSelectionsRef.current={}
-  },[filePath])
-
-  const commitNotebook=(notebook)=>{
-    const serialized=JSON.stringify(notebook,null,1)+'\n'
-    onChange?.(serialized)
-  }
-
-  const patchCell=(index,patch)=>{
-    if(!parsed.ok) return
-    const notebook=structuredClone(parsed.notebook)
-    const current=notebook.cells[index]
-    if(!current) return
-    notebook.cells[index]={...current,...patch}
-    commitNotebook(notebook)
-  }
-
-  const updateCellSource=(index,text)=>{
-    patchCell(index,{source:textToNotebookSource(text)})
-  }
-
-  const applyExecutionResult=(notebook,index,result)=>{
-    const next=structuredClone(notebook)
-    const cell=next.cells[index]
-    if(!cell) return next
-    const outputs=[]
-    const stdout=String(result?.stdout||'')
-    const stderr=String(result?.stderr||'')
-    const trace=String(result?.traceback||'')
-    if(stdout) outputs.push({name:'stdout',output_type:'stream',text:textToNotebookSource(stdout)})
-    if(stderr) outputs.push({name:'stderr',output_type:'stream',text:textToNotebookSource(stderr)})
-    if(result?.cancelled){
-      outputs.push({name:'stderr',output_type:'stream',text:textToNotebookSource('[실행 취소] 사용자가 Notebook 실행을 중지했습니다.\n')})
-    }else if(!result?.ok){
-      outputs.push({
-        output_type:'error',
-        ename:String(result?.error_type||'PythonError'),
-        evalue:String(result?.error_message||'실행 실패'),
-        traceback:trace?trace.replace(/\r\n|\r/g,'\n').split('\n'):[]
-      })
-      const dependency=result?.dependency_diagnostic
-      if(dependency?.code==='PYTHON_MODULE_NOT_FOUND'){
-        const diagnostic=[
-          `[패키지 설치 필요] ${dependency.message||''}`,
-          `설치 명령: ${dependency.install_command||''}`,
-          dependency.requirements_command?`requirements.txt 전체 설치: ${dependency.requirements_command}`:'',
-          '※ 에이전트 스튜디오는 프로젝트 가상환경을 자동 변경하지 않습니다.'
-        ].filter(Boolean).join('\n')
-        outputs.push({name:'stderr',output_type:'stream',text:textToNotebookSource(diagnostic+'\n')})
-      }
-    }
-    executionCounterRef.current+=1
-    next.cells[index]={
-      ...cell,
-      execution_count:executionCounterRef.current,
-      outputs,
-    }
-    return next
-  }
-
-  const executeCellFromNotebook=async(notebook,index,{selectionOnly=false,reset=false}={})=>{
-    const cell=notebook?.cells?.[index]
-    if(!cell||cell.cell_type!=='code') return notebook
-    const kernel=notebookKernelLanguage(notebook)
-    if(kernel&&!kernel.includes('python')){
-      window.alert(`현재 Notebook 실행은 Python 커널을 지원합니다. 이 파일의 커널은 '${kernel}'입니다.`)
-      return notebook
-    }
-
-    const editor=cellEditorsRef.current[index]
-    const fullCode=editor?.getValue?.()??notebookSourceToText(cell.source)
-    let pythonCode=fullCode
-    if(selectionOnly){
-      const model=editor?.getModel?.()
-      const liveSelection=editor?.getSelection?.()
-      const remembered=cellSelectionsRef.current[index]
-      const selection=(liveSelection&&!liveSelection.isEmpty?.())
-        ? liveSelection
-        : remembered?.selection
-      pythonCode=(selection&&model)?model.getValueInRange(selection):(remembered?.text||'')
-      if(!String(pythonCode||'').trim()){
-        window.alert('현재 Notebook Code 셀에서 선택된 Python 코드가 없습니다. 실행할 코드를 드래그한 뒤 다시 선택 실행을 눌러주세요.')
-        return notebook
-      }
-    }
-    if(!String(pythonCode||'').trim()) return notebook
-
-    setRunningCells(prev=>({...prev,[index]:true}))
-    try{
-      const result=await onExecutePython?.({
-        pythonCode,
-        filePath,
-        cellIndex:index,
-        mode:reset?'full':'selection',
-        selectionOnly,
-      })
-      if(!result) return notebook
-      return applyExecutionResult(notebook,index,result)
-    }catch(error){
-      const failed={
-        ok:false,
-        stdout:'',
-        stderr:'',
-        error_type:error?.name||'NotebookExecutionError',
-        error_message:String(error?.message||error),
-        traceback:String(error?.stack||error),
-      }
-      return applyExecutionResult(notebook,index,failed)
-    }finally{
-      setRunningCells(prev=>({...prev,[index]:false}))
-    }
-  }
-
-  const rememberCellSelection=(index)=>{
-    const editor=cellEditorsRef.current[index]
-    const model=editor?.getModel?.()
-    const selection=editor?.getSelection?.()
-    if(!model||!selection||selection.isEmpty?.()) return false
-    const selectedText=model.getValueInRange(selection)
-    if(!String(selectedText||'').trim()) return false
-    cellSelectionsRef.current[index]={
-      selection:{
-        startLineNumber:selection.startLineNumber,
-        startColumn:selection.startColumn,
-        endLineNumber:selection.endLineNumber,
-        endColumn:selection.endColumn,
-      },
-      text:selectedText,
-    }
-    setActiveCellIndex(index)
-    return true
-  }
-
-  const runCell=async(index,options={})=>{
-    if(!parsed.ok) return
-    cancelRequestedRef.current=false
-    setActiveCellIndex(index)
-    const next=await executeCellFromNotebook(parsed.notebook,index,options)
-    if(next!==parsed.notebook) commitNotebook(next)
-  }
-
-  const runAll=async()=>{
-    if(!parsed.ok||runAllBusy) return
-    cancelRequestedRef.current=false
-    setRunAllBusy(true)
-    try{
-      let working=structuredClone(parsed.notebook)
-      let firstCode=true
-      for(let index=0;index<working.cells.length;index++){
-        if(working.cells[index]?.cell_type!=='code') continue
-        if(!notebookSourceToText(working.cells[index]?.source).trim()) continue
-        setActiveCellIndex(index)
-        working=await executeCellFromNotebook(working,index,{selectionOnly:false,reset:firstCode})
-        firstCode=false
-        commitNotebook(working)
-        if(cancelRequestedRef.current) break
-        if(working.cells[index]?.outputs?.some(output=>output.output_type==='error')) break
-      }
-    }finally{
-      setRunAllBusy(false)
-    }
-  }
-
-  const runActiveCell=async()=>runCell(activeCellIndex,{selectionOnly:false,reset:false})
-  const runSelection=async()=>runCell(activeCellIndex,{selectionOnly:true,reset:false})
-  const stopExecution=async()=>{
-    if(stopBusy) return
-    cancelRequestedRef.current=true
-    setStopBusy(true)
-    try{
-      await onStopPython?.()
-    }finally{
-      setStopBusy(false)
-    }
-  }
-
-  useEffect(()=>{
-    if(!controllerRef) return
-    controllerRef.current={
-      runAll,
-      runActiveCell,
-      runSelection,
-      stopExecution,
-      isRunning:()=>runAllBusy||Object.values(runningCells).some(Boolean),
-      getActiveCellIndex:()=>activeCellIndex,
-    }
-    return()=>{
-      if(controllerRef.current?.runAll===runAll) controllerRef.current=null
-    }
-  })
-
-  const addCell=(cellType)=>{
-    if(!parsed.ok) return
-    const notebook=structuredClone(parsed.notebook)
-    const insertAt=Math.min(notebook.cells.length,Math.max(0,activeCellIndex+1))
-    const cell=cellType==='markdown'
-      ? {cell_type:'markdown',metadata:{},source:[]}
-      : {cell_type:'code',execution_count:null,metadata:{},outputs:[],source:[]}
-    notebook.cells.splice(insertAt,0,cell)
-    commitNotebook(notebook)
-    setActiveCellIndex(insertAt)
-    if(cellType==='markdown') setEditingMarkdown(prev=>({...prev,[insertAt]:true}))
-  }
-
-  const deleteCell=(index)=>{
-    if(!parsed.ok) return
-    const notebook=structuredClone(parsed.notebook)
-    if(!notebook.cells[index]) return
-    notebook.cells.splice(index,1)
-    commitNotebook(notebook)
-    setActiveCellIndex(Math.max(0,Math.min(index,notebook.cells.length-1)))
-  }
-
-  const clearAllOutputs=()=>{
-    if(!parsed.ok) return
-    const notebook=structuredClone(parsed.notebook)
-    notebook.cells=notebook.cells.map(cell=>cell?.cell_type==='code'?{...cell,execution_count:null,outputs:[]}:cell)
-    commitNotebook(notebook)
-  }
-
-  const handoffNotebookWheelAtBoundary=(index,event)=>{
-    if(event?.ctrlKey||!event?.deltaY) return
-    const editor=cellEditorsRef.current[index]
-    if(!editor) return
-
-    const domNode=editor.getDomNode?.()
-    const target=event?.target
-    if(!domNode||!target||!domNode.contains(target)) return
-
-    const scrollTop=Number(editor.getScrollTop?.()||0)
-    const scrollHeight=Number(editor.getScrollHeight?.()||0)
-    const viewportHeight=Number(editor.getLayoutInfo?.()?.height||0)
-    const maxScrollTop=Math.max(0,scrollHeight-viewportHeight)
-    const atTop=scrollTop<=1
-    const atBottom=scrollTop>=maxScrollTop-1
-    const wantsOuterScroll=(event.deltaY<0&&atTop)||(event.deltaY>0&&atBottom)
-    if(!wantsOuterScroll) return
-
-    const shell=domNode.closest?.('.notebook-editor-shell')
-    if(!shell) return
-
-    const multiplier=event.deltaMode===1?16:event.deltaMode===2?Math.max(120,shell.clientHeight):1
-    shell.scrollTop+=event.deltaY*multiplier
-    event.preventDefault?.()
-    event.stopPropagation?.()
-  }
-
-  if(!parsed.ok){
-    return <div className="notebook-editor-shell notebook-invalid">
-      <div className="notebook-invalid-banner">
-        <strong>Notebook 보기로 열 수 없습니다.</strong>
-        <span>{parsed.error}</span>
-        <small>원본 JSON을 수정하면 유효한 .ipynb 형식이 되는 즉시 Notebook 보기로 전환됩니다.</small>
-      </div>
-      <Editor
-        className="main-monaco-editor"
-        height="100%"
-        path={getEditorModelPath(projectRoot,filePath)}
-        language="json"
-        value={value}
-        onChange={v=>onChange?.(v??'')}
-        theme="vs-dark"
-        options={{minimap:{enabled:false},fontSize:13,automaticLayout:true,tabSize:2}}
-      />
-    </div>
-  }
-
-  const notebook=parsed.notebook
-  const kernel=notebookKernelLanguage(notebook)
-
-  return <div className="notebook-editor-shell">
-    <div className="notebook-toolbar">
-      <div className="notebook-toolbar-left">
-        <strong>Jupyter Notebook</strong>
-        <span className="notebook-kernel-chip">{kernel||'python'}</span>
-        <span className="notebook-cell-count">{notebook.cells.length} cells</span>
-      </div>
-      <div className="notebook-toolbar-actions">
-        <button type="button" onClick={()=>addCell('code')}>＋ 코드</button>
-        <button type="button" onClick={()=>addCell('markdown')}>＋ Markdown</button>
-        <button type="button" onClick={clearAllOutputs}>출력 모두 지우기</button>
-      </div>
-    </div>
-
-    <div className="notebook-cells">
-      {notebook.cells.map((cell,index)=>{
-        const cellType=String(cell?.cell_type||'raw')
-        const source=notebookSourceToText(cell?.source)
-        const active=index===activeCellIndex
-        const running=!!runningCells[index]
-        const lineCount=Math.max(1,source.replace(/\r\n|\r/g,'\n').split('\n').length)
-        const editorHeight=Math.min(520,Math.max(92,lineCount*20+30))
-
-        return <section
-          key={cell?.id||`cell-${index}`}
-          className={`notebook-cell ${cellType} ${active?'active':''}`}
-          onMouseDown={()=>setActiveCellIndex(index)}
-          onWheelCapture={(event)=>cellType==='code'&&handoffNotebookWheelAtBoundary(index,event)}
-        >
-          <div className="notebook-cell-gutter">
-            {cellType==='code'
-              ? <span>{cell.execution_count!=null?`[${cell.execution_count}]`:'[ ]'}</span>
-              : <span>{cellType==='markdown'?'M':'R'}</span>}
-          </div>
-
-          <div className="notebook-cell-main">
-            <div className="notebook-cell-toolbar">
-              <span>{cellType==='code'?'Code':cellType==='markdown'?'Markdown':'Raw'}</span>
-              <div>
-                {cellType==='code'&&<>
-                  <button type="button" disabled={running||runAllBusy} onClick={(event)=>{event.stopPropagation();runCell(index)}}>{running?'실행 중…':'▶ 셀 실행'}</button>
-                  <button
-                    type="button"
-                    disabled={running||runAllBusy}
-                    onMouseDown={(event)=>{
-                      event.preventDefault()
-                      event.stopPropagation()
-                      rememberCellSelection(index)
-                    }}
-                    onClick={(event)=>{
-                      event.stopPropagation()
-                      runCell(index,{selectionOnly:true})
-                    }}
-                  >▣ 선택 실행</button>
-                  {(running||runAllBusy)&&<button type="button" className="danger execution-stop-button" disabled={stopBusy} onClick={(event)=>{event.stopPropagation();stopExecution()}}>■ {stopBusy?'정지 중…':'실행 정지'}</button>}
-                </>}
-                {cellType==='markdown'&&<button type="button" onClick={(event)=>{event.stopPropagation();setEditingMarkdown(prev=>({...prev,[index]:!prev[index]}))}}>{editingMarkdown[index]?'미리보기':'편집'}</button>}
-                <button type="button" className="danger" onClick={(event)=>{event.stopPropagation();deleteCell(index)}}>삭제</button>
-              </div>
-            </div>
-
-            {cellType==='code'
-              ? <Editor
-                  height={`${editorHeight}px`}
-                  path={`${getEditorModelPath(projectRoot,filePath)}?cell=${index}`}
-                  language="python"
-                  value={source}
-                  onChange={v=>updateCellSource(index,v??'')}
-                  onMount={(editor)=>{
-                    cellEditorsRef.current[index]=editor
-                    editor.onDidFocusEditorText(()=>setActiveCellIndex(index))
-                    editor.onDidChangeCursorSelection((event)=>{
-                      const selection=event?.selection
-                      const model=editor.getModel?.()
-                      if(!selection||!model||selection.isEmpty?.()) return
-                      const selectedText=model.getValueInRange(selection)
-                      if(!String(selectedText||'').trim()) return
-                      cellSelectionsRef.current[index]={
-                        selection:{
-                          startLineNumber:selection.startLineNumber,
-                          startColumn:selection.startColumn,
-                          endLineNumber:selection.endLineNumber,
-                          endColumn:selection.endColumn,
-                        },
-                        text:selectedText,
-                      }
-                      setActiveCellIndex(index)
-                    })
-                  }}
-                  theme="vs-dark"
-                  options={{
-                    minimap:{enabled:false},
-                    fontSize:13,
-                    lineNumbers:'on',
-                    scrollBeyondLastLine:false,
-                    automaticLayout:true,
-                    tabSize:4,
-                    insertSpaces:true,
-                    folding:false,
-                    renderLineHighlight:'line',
-                    overviewRulerLanes:0,
-                    mouseWheelZoom:false,
-                    scrollbar:{
-                      vertical:'auto',
-                      horizontal:'auto',
-                      alwaysConsumeMouseWheel:false,
-                    }
-                  }}
-                />
-              : cellType==='markdown'
-                ? (editingMarkdown[index]
-                    ? <Editor
-                        height={`${Math.min(520,Math.max(100,lineCount*20+36))}px`}
-                        path={`${getEditorModelPath(projectRoot,filePath)}?markdown=${index}`}
-                        language="markdown"
-                        value={source}
-                        onChange={v=>updateCellSource(index,v??'')}
-                        theme="vs-dark"
-                        options={{
-                          minimap:{enabled:false},
-                          fontSize:13,
-                          lineNumbers:'off',
-                          scrollBeyondLastLine:false,
-                          automaticLayout:true,
-                          wordWrap:'on',
-                          overviewRulerLanes:0,
-                          mouseWheelZoom:false,
-                          scrollbar:{vertical:'auto',horizontal:'auto',alwaysConsumeMouseWheel:false},
-                        }}
-                      />
-                    : <div className="notebook-markdown-cell" onDoubleClick={()=>setEditingMarkdown(prev=>({...prev,[index]:true}))}><NotebookMarkdown text={source} attachments={cell.attachments||{}}/></div>)
-                : <pre className="notebook-raw-cell">{source}</pre>}
-
-            {cellType==='code'&&Array.isArray(cell.outputs)&&cell.outputs.length>0&&
-              <div className="notebook-cell-outputs">
-                {cell.outputs.map((output,outputIndex)=><NotebookOutput key={outputIndex} output={output}/>) }
-              </div>}
-          </div>
-        </section>
-      })}
-    </div>
-  </div>
-}
-
-function StatusDot({ ok }) { return <span className={ok ? 'dot ok' : 'dot bad'} /> }
-
-
-function StudioIcon({children, active=false, onClick}) {
-  return <button type="button" className={active?'studio-nav-icon active':'studio-nav-icon'} onClick={onClick}>{children}</button>
-}
-function MiniBadge({children, tone='blue'}) {
-  return <span className={`mini-badge ${tone}`}>{children}</span>
-}
-function SectionTitle({title, action=null}) {
-  return <div className="section-title-row"><strong>{title}</strong>{action}</div>
-}
-
 function SystemPage() {
   const [status,setStatus]=useState({})
   const [runtimeLoopStatus,setRuntimeLoopStatus]=useState(null)
@@ -920,7 +54,9 @@ function SystemPage() {
   const [databaseProviderChoice,setDatabaseProviderChoice]=useState('local')
   const [supabaseRuntimeUrl,setSupabaseRuntimeUrl]=useState('')
   const [supabaseLanggraphRuntimeUrl,setSupabaseLanggraphRuntimeUrl]=useState('')
+  const [supabaseRuntimeSchema,setSupabaseRuntimeSchema]=useState('theanova_agentstudio')
   const [databaseRuntimeBusy,setDatabaseRuntimeBusy]=useState(false)
+  const [supabaseInfoSaveBusy,setSupabaseInfoSaveBusy]=useState(false)
   const [databaseRuntimeResult,setDatabaseRuntimeResult]=useState(null)
   const pgAdminPasswordRef=useRef(null)
   const agentDbPasswordRef=useRef(null)
@@ -943,6 +79,7 @@ function SystemPage() {
         const dbRuntime=await api('/settings/database-runtime')
         setDatabaseRuntime(dbRuntime)
         setDatabaseProviderChoice(dbRuntime?.selected_provider||dbRuntime?.active_provider||'local')
+        setSupabaseRuntimeSchema(String(dbRuntime?.supabase_schema||'theanova_agentstudio'))
       }catch{
         setDatabaseRuntime(null)
       }
@@ -1018,6 +155,31 @@ function SystemPage() {
     }finally{setBusy(false)}
   }
 
+  const saveSupabaseRuntimeInfo=async()=>{
+    setSupabaseInfoSaveBusy(true); setMessage(''); setError(''); setDatabaseRuntimeResult(null)
+    try{
+      const r=await api('/settings/database-runtime/supabase/save',{
+        method:'POST',
+        body:JSON.stringify({
+          database_url:String(supabaseRuntimeUrl||'').trim(),
+          langgraph_database_url:String(supabaseLanggraphRuntimeUrl||'').trim(),
+          schema:String(supabaseRuntimeSchema||'theanova_agentstudio').trim()
+        })
+      })
+      setDatabaseRuntimeResult(r)
+      setMessage(r?.message||'Supabase PostgreSQL 연결 정보를 저장했습니다.')
+      // 비밀번호가 포함될 수 있는 URL 원문은 저장 성공 후 브라우저 입력 상태에서도 제거합니다.
+      setSupabaseRuntimeUrl('')
+      setSupabaseLanggraphRuntimeUrl('')
+      setDatabaseRuntime(await api('/settings/database-runtime'))
+    }catch(e){
+      setError(String(e))
+      setDatabaseRuntimeResult({ok:false,message:String(e)})
+    }finally{
+      setSupabaseInfoSaveBusy(false)
+    }
+  }
+
   const activateRuntimeDatabase=async()=>{
     setDatabaseRuntimeBusy(true); setMessage(''); setError(''); setDatabaseRuntimeResult(null)
     try{
@@ -1025,6 +187,7 @@ function SystemPage() {
         provider:databaseProviderChoice,
         supabase_database_url:String(supabaseRuntimeUrl||'').trim(),
         supabase_langgraph_database_url:String(supabaseLanggraphRuntimeUrl||'').trim(),
+        supabase_db_schema:String(supabaseRuntimeSchema||'theanova_agentstudio').trim(),
         initialize_schema:databaseProviderChoice==='supabase'
       }
       const r=await api('/settings/database-runtime/activate',{method:'POST',body:JSON.stringify(payload)})
@@ -1049,7 +212,8 @@ function SystemPage() {
         method:'POST',
         body:JSON.stringify({
           database_url:String(supabaseRuntimeUrl||'').trim(),
-          langgraph_database_url:String(supabaseLanggraphRuntimeUrl||'').trim()
+          langgraph_database_url:String(supabaseLanggraphRuntimeUrl||'').trim(),
+          schema:String(supabaseRuntimeSchema||'theanova_agentstudio').trim()
         })
       })
       setDatabaseRuntimeResult(r)
@@ -1760,6 +924,8 @@ function SystemPage() {
             <div><b>현재 사용:</b> {databaseRuntime?.active_provider==='supabase'?'Supabase PostgreSQL':'로컬 PostgreSQL'}</div>
             <div><b>로컬 DB:</b> {databaseRuntime?.local_target||'-'}</div>
             <div><b>Supabase:</b> {databaseRuntime?.supabase_target||'아직 설정되지 않음'}</div>
+            <div><b>Supabase 연결 정보:</b> {databaseRuntime?.supabase_configured?'저장됨 (backend/.env)':'미저장'}</div>
+            <div><b>Supabase Schema:</b> {databaseRuntime?.supabase_schema||supabaseRuntimeSchema||'theanova_agentstudio'}</div>
             {databaseRuntime?.last_error&&<div className="runtime-db-warning">{databaseRuntime.last_error}</div>}
           </div>
           {databaseProviderChoice==='supabase'&&<>
@@ -1771,21 +937,28 @@ function SystemPage() {
               <span>Supabase LangGraph DB URL</span>
               <input value={supabaseLanggraphRuntimeUrl} onChange={e=>setSupabaseLanggraphRuntimeUrl(e.target.value)} placeholder={databaseRuntime?.supabase_configured?'비우면 저장된 값 또는 DATABASE URL 기준 자동 사용':'postgresql://USER:PASSWORD@HOST:5432/postgres'}/>
             </label>
+            <label className="setting-field">
+              <span>Supabase AgentStudio Schema</span>
+              <input value={supabaseRuntimeSchema} onChange={e=>setSupabaseRuntimeSchema(e.target.value)} placeholder="theanova_agentstudio"/>
+            </label>
             <div className="hint-box">
-              최초/업그레이드 모두 <b>Supabase 스키마 준비/검증</b>을 사용할 수 있습니다. pgvector와 AgentStudio 테이블은 transaction으로 멱등 보정하고, LangGraph 테이블은 설치된 Checkpointer의 공식 setup()으로 migration한 뒤 필수 구조를 재검증합니다.
+              <b>Supabase 정보 저장</b>을 누르면 DATABASE URL, 선택적 LangGraph URL, Schema를 <b>backend/.env</b>에만 보관합니다. 저장 후 URL 입력칸은 비워도 이후 검증/적용에서 저장된 값을 자동 사용합니다.
+              최초/업그레이드 모두 <b>Supabase 스키마 준비/검증</b>을 사용할 수 있습니다. 기본 사용자 스키마는 <b>theanova_agentstudio</b>이며 AgentStudio ORM과 LangGraph Checkpointer 테이블을 public과 분리합니다. pgvector는 <b>extensions</b> 스키마를 사용합니다. LangGraph 테이블은 설치된 Checkpointer의 공식 setup()으로 migration한 뒤 같은 사용자 스키마에서 필수 구조를 재검증합니다.
               <b> Supabase 사용 적용</b>은 모든 검증이 성공한 경우에만 전환하며 실패하면 로컬 PostgreSQL을 유지합니다.
             </div>
           </>}
           <div className="panel-actions database-runtime-actions">
-            {databaseProviderChoice==='supabase'&&<button disabled={databaseRuntimeBusy} onClick={initializeSupabaseRuntimeSchema}>Supabase 스키마 준비/검증</button>}
-            {databaseProviderChoice==='supabase'&&<button disabled={databaseRuntimeBusy} onClick={downloadSupabaseSchemaScript}>Supabase 스키마 SQL 다운로드</button>}
-            <button className="primary-install" disabled={databaseRuntimeBusy} onClick={activateRuntimeDatabase}>
+            {databaseProviderChoice==='supabase'&&<button disabled={databaseRuntimeBusy||supabaseInfoSaveBusy} onClick={saveSupabaseRuntimeInfo}>{supabaseInfoSaveBusy?'Supabase 정보 저장 중...':'Supabase 정보 저장'}</button>}
+            {databaseProviderChoice==='supabase'&&<button disabled={databaseRuntimeBusy||supabaseInfoSaveBusy} onClick={initializeSupabaseRuntimeSchema}>Supabase 스키마 준비/검증</button>}
+            {databaseProviderChoice==='supabase'&&<button disabled={databaseRuntimeBusy||supabaseInfoSaveBusy} onClick={downloadSupabaseSchemaScript}>Supabase 스키마 SQL 다운로드</button>}
+            <button className="primary-install" disabled={databaseRuntimeBusy||supabaseInfoSaveBusy} onClick={activateRuntimeDatabase}>
               {databaseRuntimeBusy?'DB 전환 중...':databaseProviderChoice==='supabase'?'Supabase PostgreSQL 사용 적용':'로컬 PostgreSQL 사용 적용'}
             </button>
           </div>
           {databaseRuntimeResult&&<div className={databaseRuntimeResult.ok===false?'test-result badbox':'test-result okbox'}>
             <div>{databaseRuntimeResult.message||'-'}</div>
             {databaseRuntimeResult.target&&<div>대상: {databaseRuntimeResult.target}</div>}
+            {(databaseRuntimeResult.supabase_schema||databaseRuntimeResult.schema?.schema)&&<div>Schema: {databaseRuntimeResult.supabase_schema||databaseRuntimeResult.schema?.schema}</div>}
             {databaseRuntimeResult.local_settings_updated&&<div>로컬 DB 설정 업데이트: 완료</div>}
             {databaseRuntimeResult.schema?.agentstudio_table_count!==undefined&&<div>AgentStudio 테이블 확인: {databaseRuntimeResult.schema.agentstudio_table_count}개</div>}
             {(databaseRuntimeResult.schema?.verification?.ok===true||databaseRuntimeResult.verification?.ok===true)&&<div>테이블/컬럼/PK/UNIQUE/INDEX/FK 재검증: 정상</div>}
@@ -2523,445 +1696,6 @@ function TargetWorkflowDiagram({workflow}){
 }
 
 
-function MetricCard({label,value,sub='',tone='default',icon='◆'}){
-  return <div className={`metric-card ${tone}`}>
-    <div className="metric-icon">{icon}</div>
-    <div className="metric-copy">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      {sub&&<small>{sub}</small>}
-    </div>
-  </div>
-}
-
-function StatusBadge({status=''}){
-  const value=String(status||'UNKNOWN')
-  const normalized=value.toUpperCase()
-  const tone=
-    normalized.includes('COMPLETED')||normalized.includes('PASSED')||normalized.includes('SUCCESS')
-      ? 'success'
-      : normalized.includes('FAILED')||normalized.includes('ERROR')||normalized.includes('REJECTED')
-        ? 'danger'
-        : normalized.includes('APPROV')||normalized.includes('WAIT')
-          ? 'warning'
-          : 'info'
-
-  return <span className={`status-badge ${tone}`}>{value}</span>
-}
-
-function ReportSection({icon='◆',title,subtitle='',children,className=''}){
-  return <section className={`report-section ${className}`}>
-    <header>
-      <span className="report-section-icon">{icon}</span>
-      <div>
-        <strong>{title}</strong>
-        {subtitle&&<small>{subtitle}</small>}
-      </div>
-    </header>
-    <div className="report-section-body">{children}</div>
-  </section>
-}
-
-function KeyValueGrid({items=[]}){
-  return <div className="kv-grid">
-    {items.map((item,index)=><div className="kv-item" key={index}>
-      <span>{item.label}</span>
-      <strong>{item.value??'-'}</strong>
-    </div>)}
-  </div>
-}
-
-function FileChangeList({created=[],modified=[]}){
-  const rows=[
-    ...created.map(path=>({path,type:'CREATED'})),
-    ...modified.map(path=>({path,type:'MODIFIED'}))
-  ]
-
-  if(!rows.length){
-    return <div className="report-empty-mini">생성/수정된 파일 정보가 아직 없습니다.</div>
-  }
-
-  return <div className="file-change-list">
-    {rows.map((row,index)=><div className="file-change-row" key={`${row.path}-${index}`}>
-      <span className={`file-change-type ${row.type.toLowerCase()}`}>{row.type}</span>
-      <code>{row.path}</code>
-    </div>)}
-  </div>
-}
-
-function WorkflowMiniMap({workflow}){
-  const steps=workflow?.steps||[]
-  if(!steps.length){
-    return <div className="report-empty-mini">대상 Agent Workflow 정보가 없습니다.</div>
-  }
-
-  return <div className="workflow-mini-map">
-    {steps.map((step,index)=>{
-      const label=typeof step==='string'
-        ? step
-        : (step.label||step.name||step.title||`Step ${index+1}`)
-      return <div className="workflow-mini-step" key={index}>
-        <span>{String(index+1).padStart(2,'0')}</span>
-        <strong>{label}</strong>
-        {index<steps.length-1&&<b>→</b>}
-      </div>
-    })}
-  </div>
-}
-
-
-function normalizeArchitectureList(value){
-  if(Array.isArray(value)) return value.filter(Boolean)
-  if(value===null||value===undefined||value==='') return []
-  return [value]
-}
-
-function ArchitectureList({items=[], empty='정보가 없습니다.'}){
-  const rows=normalizeArchitectureList(items)
-  if(!rows.length) return <div className="report-empty-mini">{empty}</div>
-  return <div className="architecture-chip-list">
-    {rows.map((item,index)=>{
-      const label=typeof item==='string'
-        ? item
-        : (item?.label||item?.name||item?.component||item?.title||item?.path||JSON.stringify(item))
-      const detail=typeof item==='string'
-        ? ''
-        : (item?.description||item?.purpose||item?.reason||item?.type||'')
-      return <div className="architecture-chip-card" key={index}>
-        <strong>{label}</strong>
-        {detail&&<small>{detail}</small>}
-      </div>
-    })}
-  </div>
-}
-
-function ArchitectureNode({title, subtitle='', tone='default'}){
-  return <div className={`architecture-node ${tone}`}>
-    <strong>{title}</strong>
-    {subtitle&&<small>{subtitle}</small>}
-  </div>
-}
-
-function ArchitectureArrow({label=''}){
-  return <div className="architecture-arrow">
-    <span />
-    <b>→</b>
-    <span />
-    {label&&<small>{label}</small>}
-  </div>
-}
-
-function GeneratedAgentArchitecturePanel({report}){
-  const architecture=report?.architecture||{}
-  const components=normalizeArchitectureList(architecture.components)
-  const interfaces=normalizeArchitectureList(architecture.interfaces)
-  const persistence=normalizeArchitectureList(architecture.persistence)
-  const security=normalizeArchitectureList(architecture.security)
-  const stateRows=normalizeArchitectureList(architecture.state)
-  const componentTitles=components.slice(0,4).map((item,index)=>typeof item==='string'?item:(item?.label||item?.name||item?.component||`구성요소 ${index+1}`))
-  const centerTitle=componentTitles[0]||'AI Agent Core'
-  const rightTitle=componentTitles[1]||'Action / Tool Executor'
-  const leftTitle=componentTitles[2]||'User Input / Interface'
-  const memoryTitle=componentTitles[3]||'Memory / State'
-
-  return <div className="architecture-panel">
-    <div className="architecture-panel-head">
-      <div>
-        <small>TARGET AGENT ARCHITECTURE</small>
-        <strong>신규 에이전트 아키텍처</strong>
-      </div>
-      <span>{report?.requirementSpec?.goal||'확정된 요구사항을 기반으로 구성 요소를 시각화합니다.'}</span>
-    </div>
-
-    <div className="architecture-canvas generated-agent">
-      <div className="architecture-top-stack">
-        <ArchitectureNode title="User / Client" subtitle="요청 · 입력 · 승인" tone="soft" />
-        <div className="architecture-vertical-arrow">↓</div>
-        <ArchitectureNode title={leftTitle} subtitle="입력 채널 / 외부 인터페이스" tone="blue" />
-      </div>
-
-      <div className="architecture-stage-board">
-        <div className="architecture-stage-row">
-          <ArchitectureNode title={leftTitle} subtitle="Perception / Input" tone="soft" />
-          <ArchitectureArrow label="context" />
-          <ArchitectureNode title={centerTitle} subtitle="Planning / LLM / Cognition" tone="accent" />
-          <ArchitectureArrow label="execute" />
-          <ArchitectureNode title={rightTitle} subtitle="Action / Tool / MCP" tone="purple" />
-        </div>
-
-        <div className="architecture-feedback-loop">
-          <div className="architecture-feedback-bubble">
-            <strong>State / Feedback Loop</strong>
-            <small>{stateRows.length?`${stateRows.length}개 상태 항목`:'실행 상태와 결과를 다시 Agent로 피드백'}</small>
-          </div>
-        </div>
-
-        <div className="architecture-side-band">
-          <ArchitectureNode title={memoryTitle} subtitle="Memory / Persistence" tone="soft" />
-          <ArchitectureNode title="Policy / Security" subtitle={security.length?`${security.length}개 보안 규칙`:'권한 · Secret · Guardrail'} tone="soft" />
-        </div>
-      </div>
-    </div>
-
-    <div className="architecture-detail-grid">
-      <ReportSection icon="⬢" title="구성 요소" subtitle="Components">
-        <ArchitectureList items={components} />
-      </ReportSection>
-      <ReportSection icon="⇄" title="인터페이스" subtitle="Interfaces">
-        <ArchitectureList items={interfaces} />
-      </ReportSection>
-      <ReportSection icon="💾" title="영속성" subtitle="Persistence">
-        <ArchitectureList items={persistence} />
-      </ReportSection>
-      <ReportSection icon="🔐" title="보안" subtitle="Security">
-        <ArchitectureList items={security} />
-      </ReportSection>
-    </div>
-  </div>
-}
-
-function AgentStudioArchitecturePanel(){
-  return <div className="architecture-panel">
-    <div className="architecture-panel-head">
-      <div>
-        <small>THEANOVA AGENTSTUDIO PLATFORM</small>
-        <strong>에이전트 스튜디오 아키텍처</strong>
-      </div>
-      <span>React UI · FastAPI Backend · Agent Orchestrator · MCP / Tool / DB / LLM 구조</span>
-    </div>
-
-    <div className="architecture-canvas agentstudio-platform">
-      <div className="architecture-top-stack studio">
-        <ArchitectureNode title="User" subtitle="요구사항 · 코드 수정 · 실행" tone="soft" />
-        <div className="architecture-vertical-arrow">↕</div>
-        <ArchitectureNode title="THEANOVA AgentStudio" subtitle="React Workspace" tone="blue" />
-      </div>
-
-      <div className="architecture-stage-board studio-board">
-        <div className="architecture-stage-row studio-main-row">
-          <ArchitectureNode title="Frontend UI" subtitle="Workspace / Report / Notebook / SQL" tone="soft" />
-          <ArchitectureArrow />
-          <ArchitectureNode title="FastAPI Backend" subtitle="API / Jobs / Runtime" tone="accent" />
-          <ArchitectureArrow />
-          <ArchitectureNode title="Agent Orchestrator" subtitle="Workflow / Planning / Recovery" tone="purple" />
-        </div>
-
-        <div className="architecture-matrix-grid">
-          <div className="architecture-mini-group">
-            <strong>LLM Layer</strong>
-            <div>
-              <span>OpenAI</span>
-              <span>Ollama</span>
-              <span>LangChain / LangGraph</span>
-            </div>
-          </div>
-          <div className="architecture-mini-group">
-            <strong>Execution Layer</strong>
-            <div>
-              <span>MCP Server / Client</span>
-              <span>Local Tools</span>
-              <span>Python / Terminal / SQL</span>
-            </div>
-          </div>
-          <div className="architecture-mini-group">
-            <strong>Persistence</strong>
-            <div>
-              <span>PostgreSQL</span>
-              <span>MSSQL / Oracle / SQLite</span>
-              <span>Project State / Reports</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div className="architecture-detail-grid two-column">
-      <ReportSection icon="◈" title="주요 계층" subtitle="Core Layers">
-        <ArchitectureList items={[
-          'Frontend UI (React)',
-          'Backend API (FastAPI)',
-          'Agent Orchestrator / Workflow Engine',
-          'LLM Routing / MCP / Local Tool Execution',
-          'Project State / Report / Usage Tracking',
-        ]} />
-      </ReportSection>
-      <ReportSection icon="☰" title="핵심 역할" subtitle="Responsibilities">
-        <ArchitectureList items={[
-          '요구사항 수집 → 설계 → 코드 생성 → 실행 → 테스트 → 복구',
-          'MCP / Tool 분석 및 Registry 등록',
-          '프로젝트 파일, Notebook, SQL Workspace 통합 관리',
-          'LLM 사용량 / 비용 / 분석 리포트 시각화',
-          '다중 DB 연결 프로필과 로컬 런타임 운영',
-        ]} />
-      </ReportSection>
-    </div>
-  </div>
-}
-
-function LlmRouteCard({item,index}){
-  const request=item?.request||{}
-  return <details className="llm-route-card" open={false}>
-    <summary>
-      <div>
-        <strong>{item?.label||item?.task||`LLM Route ${index+1}`}</strong>
-        <small>{item?.task||''}</small>
-      </div>
-      <div className="llm-route-summary">
-        <span>{item?.group||'-'}</span>
-        <b>{item?.provider||'-'} · {item?.model||'-'}</b>
-      </div>
-    </summary>
-
-    <div className="llm-route-body">
-      <KeyValueGrid items={[
-        {label:'Provider',value:item?.provider||'-'},
-        {label:'Model',value:item?.model||'-'},
-        {label:'Method',value:request?.method||'POST'},
-        {label:'Endpoint',value:request?.endpoint||'-'},
-      ]} />
-
-      <div className="llm-request-code-block">
-        <div>
-          <strong>Headers</strong>
-          <pre>{JSON.stringify(request?.headers||{},null,2)}</pre>
-        </div>
-        <div>
-          <strong>JSON Body 예시</strong>
-          <pre>{JSON.stringify(request?.body||{},null,2)}</pre>
-        </div>
-      </div>
-
-      {Array.isArray(item?.notes)&&item.notes.length>0&&<div className="llm-route-notes">
-        {item.notes.map((note,noteIndex)=><span key={noteIndex}>{note}</span>)}
-      </div>}
-    </div>
-  </details>
-}
-
-function LlmHistoryCard({item,index}){
-  const usage=item?.usage||{}
-  const success=String(item?.status||'').toLowerCase()==='success'
-  const timestamp=item?.timestamp
-    ? new Date(item.timestamp).toLocaleString('ko-KR')
-    : '-'
-  const tokens=Number(usage?.total_tokens||0).toLocaleString('ko-KR')
-  const cost=Number(usage?.cost_usd||0)
-
-  return <details className={`llm-history-card ${success?'success':'error'}`} open={index===0}>
-    <summary>
-      <div className="llm-history-title">
-        <span className={`llm-history-status ${success?'success':'error'}`}>{success?'SUCCESS':'ERROR'}</span>
-        <div>
-          <strong>{item?.task||'LLM 호출'}</strong>
-          <small>{timestamp} · {item?.operation||'operation 미지정'}</small>
-        </div>
-      </div>
-      <div className="llm-route-summary">
-        <span>{tokens} tokens · {Number(item?.elapsed_ms||0).toLocaleString('ko-KR')} ms</span>
-        <b>{item?.provider||'-'} · {item?.model||'-'}{cost>0?` · $${cost.toFixed(cost<0.01?6:4)}`:''}</b>
-      </div>
-    </summary>
-
-    <div className="llm-route-body">
-      <KeyValueGrid items={[
-        {label:'호출 ID',value:item?.id||'-'},
-        {label:'Project',value:item?.project_root||'-'},
-        {label:'Thread',value:item?.thread_id||'-'},
-        {label:'Operation',value:item?.operation||'-'},
-        {label:'Provider',value:item?.provider||'-'},
-        {label:'Model',value:item?.model||'-'},
-        {label:'Input Tokens',value:Number(usage?.input_tokens||0).toLocaleString('ko-KR')},
-        {label:'Output Tokens',value:Number(usage?.output_tokens||0).toLocaleString('ko-KR')},
-      ]} />
-
-      <div className="llm-history-payload-grid">
-        <div className="llm-history-payload request">
-          <strong>실제 요청</strong>
-          <small>LangChain 호출 직전 입력 · Secret 자동 마스킹</small>
-          <pre>{JSON.stringify(item?.request||{},null,2)}</pre>
-        </div>
-        <div className={`llm-history-payload ${success?'response':'error'}`}>
-          <strong>{success?'실제 응답':'오류 결과'}</strong>
-          <small>{success?'LLM 반환 content / metadata / usage':'실패한 호출의 예외 정보'}</small>
-          <pre>{JSON.stringify(success?(item?.response||{}):(item?.error||{}),null,2)}</pre>
-        </div>
-      </div>
-    </div>
-  </details>
-}
-
-function LlmCatalogPanel({catalog, history, loading=false, error='', onRefresh}){
-  const items=Array.isArray(catalog?.items)?catalog.items:[]
-  const defaults=catalog?.defaults||{}
-  const historyItems=Array.isArray(history?.items)?history.items:[]
-  const successCount=historyItems.filter(item=>String(item?.status||'').toLowerCase()==='success').length
-  const errorCount=historyItems.length-successCount
-
-  return <div className="analysis-report-dashboard llm-catalog-dashboard">
-    <div className="dashboard-hero report llm-hero">
-      <div>
-        <span className="dashboard-eyebrow">LLM REQUEST / RESPONSE HISTORY</span>
-        <h2>LLM 리스트</h2>
-        <p>실제 LLM 요청과 응답을 최근 10일 동안 보관하고, 작업별 라우팅/요청 형식도 함께 확인합니다.</p>
-      </div>
-      <div className="report-hero-actions">
-        <button type="button" onClick={onRefresh} disabled={loading}>{loading?'조회 중...':'↻ LLM 기록 새로고침'}</button>
-        <StatusBadge status={loading?'LOADING':historyItems.length?'READY':'EMPTY'} />
-      </div>
-    </div>
-
-    <div className="metric-grid report-metrics">
-      <MetricCard label="최근 10일 호출" value={`${Number(history?.total_count??historyItems.length).toLocaleString('ko-KR')}개`} sub={`화면 ${historyItems.length}개 · 성공 ${successCount} · 실패 ${errorCount}`} icon="◷" tone="info" />
-      <MetricCard label="보관 기간" value={`${history?.retention_days||10}일`} sub="기간 경과 시 자동 삭제" icon="▣" tone="default" />
-      <MetricCard label="요구사항 모델" value={defaults.openai_model||'-'} sub={defaults.requirements_llm_provider||'-'} icon="✦" tone="success" />
-      <MetricCard label="로컬 모델" value={defaults.ollama_model||'-'} sub={defaults.ollama_base_url||'-'} icon="◎" tone="warning" />
-    </div>
-
-    <div className="report-layout llm-catalog-layout">
-      <ReportSection icon="↔" title="실제 LLM 요청 / 응답 기록" subtitle={`최근 ${history?.retention_days||10}일 · 최신순`} className="span-2">
-        {error&&<div className="report-empty-mini">{error}</div>}
-        {!error&&!historyItems.length&&!loading&&<div className="report-empty-mini">
-          아직 저장된 실제 LLM 호출이 없습니다. v5.243 이후 실행되는 LLM 요청부터 이곳에 요청과 결과가 함께 저장됩니다.
-        </div>}
-        <div className="llm-history-list">
-          {historyItems.map((item,index)=><LlmHistoryCard key={item?.id||`${item?.timestamp}-${index}`} item={item} index={index} />)}
-        </div>
-        {history?.truncated&&<div className="report-empty-mini">최근 기록이 많아 최신 {historyItems.length}개를 화면에 표시하고 있습니다. 전체 기록은 보관 파일에 유지됩니다.</div>}
-        {history?.log_path&&<div className="llm-history-storage-note">
-          <span>저장 위치</span><code>{history.log_path}</code>
-          <small>API Key, Password, Secret, Bearer Token 패턴은 저장 전에 마스킹합니다.</small>
-        </div>}
-      </ReportSection>
-
-      <ReportSection icon="⚙" title="라우팅 기본값" subtitle="현재 설정된 Provider / Model">
-        <KeyValueGrid items={[
-          {label:'Default LLM Provider',value:defaults.llm_provider||'-'},
-          {label:'Local LLM Provider',value:defaults.local_llm_provider||'-'},
-          {label:'Requirements Provider',value:defaults.requirements_llm_provider||'-'},
-          {label:'Coding Provider',value:defaults.coding_llm_provider||'-'},
-          {label:'OpenAI Model',value:defaults.openai_model||'-'},
-          {label:'Ollama Model',value:defaults.ollama_model||'-'},
-        ]} />
-      </ReportSection>
-
-      <ReportSection icon="ℹ" title="기록 정책" subtitle="실제 요청/응답 보관 기준">
-        <div className="llm-catalog-info">
-          <p>성공 호출은 요청, 응답, 토큰, 비용, 실행시간을 하나의 기록으로 저장합니다.</p>
-          <p>실패 호출도 요청과 오류 결과를 저장하여 디버깅에 사용할 수 있습니다.</p>
-          <p>10일보다 오래된 기록은 조회/새 기록 저장 시 자동 정리됩니다.</p>
-        </div>
-      </ReportSection>
-
-      <ReportSection icon="⎔" title="LLM 요청 형식 / 라우팅 목록" subtitle="참고용 Task → Provider → JSON Body 예시" className="span-2">
-        {!items.length&&!loading&&<div className="report-empty-mini">표시할 LLM 라우팅 정보가 없습니다.</div>}
-        <div className="llm-route-list">
-          {items.map((item,index)=><LlmRouteCard key={`${item.task}-${index}`} item={item} index={index} />)}
-        </div>
-      </ReportSection>
-    </div>
-  </div>
-}
-
 function AgentBuildActionBar({
   stage='REQUIREMENTS',
   busy=false,
@@ -3093,60 +1827,6 @@ function IDE() {
   const terminalCompletionTimerRef=useRef({})
   const [terminalCompletion,setTerminalCompletion]=useState(null)
 
-  const terminalCellWidth=(text='')=>{
-    const clean=String(text||'').replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g,'')
-    let width=0
-
-    for(const ch of clean){
-      const code=ch.codePointAt(0) ?? 0
-
-      if(ch==='\t'){
-        width+=4-(width%4)
-        continue
-      }
-
-      const isWide=(
-        (code>=0x1100&&code<=0x115f)
-        ||(code>=0x2329&&code<=0x232a)
-        ||(code>=0x2e80&&code<=0xa4cf&&code!==0x303f)
-        ||(code>=0xac00&&code<=0xd7a3)
-        ||(code>=0xf900&&code<=0xfaff)
-        ||(code>=0xfe10&&code<=0xfe19)
-        ||(code>=0xfe30&&code<=0xfe6f)
-        ||(code>=0xff00&&code<=0xff60)
-        ||(code>=0xffe0&&code<=0xffe6)
-        ||(code>=0x1f300&&code<=0x1faff)
-      )
-
-      width+=isWide?2:1
-    }
-
-    return width
-  }
-
-  const terminalLongestLineWidth=(text='')=>Math.max(
-    0,
-    ...String(text||'')
-      .replace(/\r\n/g,'\n')
-      .replace(/\r/g,'\n')
-      .split('\n')
-      .map(terminalCellWidth)
-  )
-
-  const terminalPreviousCharacter=(value,cursor)=>{
-    if(cursor<=0) return {text:'',start:0}
-    const before=value.slice(0,cursor)
-    const chars=Array.from(before)
-    const text=chars[chars.length-1]||''
-    return {text,start:cursor-text.length}
-  }
-
-  const terminalNextCharacter=(value,cursor)=>{
-    if(cursor>=value.length) return {text:'',end:value.length}
-    const text=Array.from(value.slice(cursor))[0]||''
-    return {text,end:cursor+text.length}
-  }
-
   // v5.189: 터미널은 일반 콘솔처럼 현재 화면 폭에 맞춰 자동 줄바꿈합니다.
   // 입력/터미널 선택 시 가로 스크롤 위치를 강제로 변경하는 로직은 사용하지 않습니다.
   const scrollTerminalHorizontallyToEnd=()=>{}
@@ -3232,6 +1912,7 @@ function IDE() {
   const editorFileDiskMetaRef=useRef({})
   const [editorExternalState,setEditorExternalState]=useState({})
   const [pdfPreviewRevision,setPdfPreviewRevision]=useState({})
+  const [presentationPreviewRevision,setPresentationPreviewRevision]=useState({})
   const projectFileSnapshotRef=useRef(null)
   const fileWatchBusyRef=useRef(false)
   const openEditorFilesRef=useRef([])
@@ -3423,6 +2104,7 @@ function IDE() {
     host:'127.0.0.1',
     port:5432,
     database:'',
+    schema_name:'',
     username:'postgres',
     password:'',
     driver:'ODBC Driver 18 for SQL Server',
@@ -3454,6 +2136,19 @@ function IDE() {
   const [sqlDbObjectsBusy,setSqlDbObjectsBusy]=useState(false)
   const [sqlDbObjectsError,setSqlDbObjectsError]=useState('')
   const [sqlDbObjectExpanded,setSqlDbObjectExpanded]=useState({})
+  const [firestoreBrowser,setFirestoreBrowser]=useState(null)
+  const [firestoreBrowserBusy,setFirestoreBrowserBusy]=useState(false)
+  const [firestoreBrowserError,setFirestoreBrowserError]=useState('')
+  const [firestoreCollectionFilter,setFirestoreCollectionFilter]=useState('')
+  const [firestoreDocumentFilter,setFirestoreDocumentFilter]=useState('')
+  const [firestoreSelectedCollection,setFirestoreSelectedCollection]=useState('')
+  const [firestoreDocuments,setFirestoreDocuments]=useState(null)
+  const [firestoreDocumentsBusy,setFirestoreDocumentsBusy]=useState(false)
+  const [firestoreSelectedDocument,setFirestoreSelectedDocument]=useState('')
+  const [firestoreDocumentDetail,setFirestoreDocumentDetail]=useState(null)
+  const [firestoreDocumentDetailBusy,setFirestoreDocumentDetailBusy]=useState(false)
+  const [firestoreContextMenu,setFirestoreContextMenu]=useState(null)
+  const [firestoreScriptBusy,setFirestoreScriptBusy]=useState('')
   const [redisBrowser,setRedisBrowser]=useState(null)
   const [redisBrowserBusy,setRedisBrowserBusy]=useState(false)
   const [redisBrowserError,setRedisBrowserError]=useState('')
@@ -3775,13 +2470,13 @@ function IDE() {
 
   const sqlProfileForType=(dbType,previous={})=>{
     const kind=String(dbType||'postgresql').toLowerCase()
-    const common={connection_id:'',name:'DB 연결',db_type:kind,host:'',port:0,database:'',username:'',password:'',driver:'',service_name:'',project_id:'',service_account_json:'',dashboard_url:'',ssl_mode:'',trust_server_certificate:true,credential_saved:false}
+    const common={connection_id:'',name:'DB 연결',db_type:kind,host:'',port:0,database:'',schema_name:'',username:'',password:'',driver:'',service_name:'',project_id:'',service_account_json:'',dashboard_url:'',ssl_mode:'',trust_server_certificate:true,credential_saved:false}
     const defaults=kind==='sqlite3'
       ? {...common,name:'SQLite3 연결',db_type:'sqlite3',database:'',driver:'Python sqlite3 (stdlib)'}
       : kind==='firestore'
         ? {...common,name:'Google Cloud Firestore 연결',db_type:'firestore',database:'(default)',driver:'google-cloud-firestore',dashboard_url:'https://console.cloud.google.com/firestore/databases'}
         : kind==='supabase'
-          ? {...common,name:'Supabase 연결',db_type:'supabase',host:'',port:5432,database:'postgres',username:'postgres',driver:'psycopg',dashboard_url:'https://supabase.com/dashboard',ssl_mode:'require'}
+          ? {...common,name:'Supabase 연결',db_type:'supabase',host:'',port:5432,database:'postgres',schema_name:'public',username:'postgres',driver:'psycopg',dashboard_url:'https://supabase.com/dashboard',ssl_mode:'require'}
           : kind==='redis'
             ? {...common,name:'Redis 연결',db_type:'redis',host:'127.0.0.1',port:6379,database:'0',username:'',driver:'redis-py'}
           : kind==='mssql'
@@ -3804,10 +2499,13 @@ function IDE() {
       const database=decodeURIComponent((parsed.pathname||'/postgres').replace(/^\//,'')||'postgres')
       const username=decodeURIComponent(parsed.username||'postgres')
       const password=decodeURIComponent(parsed.password||'')
+      const optionsValue=decodeURIComponent(parsed.searchParams.get('options')||'')
+      const optionSchemaMatch=optionsValue.match(/(?:^|\s)-csearch_path=([^\s]+)/i)
+      const schemaName=String(parsed.searchParams.get('schema')||parsed.searchParams.get('search_path')||optionSchemaMatch?.[1]||'').split(',')[0].trim()
       if(!host) throw new Error('Host를 읽을 수 없습니다.')
-      setSqlProfile(prev=>({...prev,db_type:'supabase',host,port,database,username,password,ssl_mode:prev.ssl_mode||'require'}))
+      setSqlProfile(prev=>({...prev,db_type:'supabase',host,port,database,schema_name:schemaName||prev.schema_name||'public',username,password,ssl_mode:prev.ssl_mode||'require'}))
       setSqlSupabaseConnectionUrl('')
-      setSqlMessages(prev=>[{type:'info',text:'Supabase Connection URL을 Host/Port/Database/User/Password로 분해했습니다. 원본 URL은 저장하지 않습니다.',time:new Date().toLocaleTimeString()},...prev].slice(0,100))
+      setSqlMessages(prev=>[{type:'info',text:'Supabase Connection URL을 Host/Port/Database/Schema/User/Password로 분해했습니다. 원본 URL은 저장하지 않습니다.',time:new Date().toLocaleTimeString()},...prev].slice(0,100))
     }catch(e){
       setSqlMessages(prev=>[{type:'error',text:`Supabase Connection URL 형식 확인 필요: ${e}`,time:new Date().toLocaleTimeString()},...prev].slice(0,100))
     }
@@ -3921,6 +2619,7 @@ function IDE() {
     setSqlDbObjects(null)
     setSqlDbObjectsError('')
     setSqlDbObjectExpanded({})
+    resetFirestoreBrowser()
     setRedisBrowser(null)
     setRedisBrowserError('')
     setRedisSelectedKey('')
@@ -3944,17 +2643,26 @@ function IDE() {
       })
       applySqlWorkspaceStatus(status,{preservePassword:false})
       if(status?.connected&&status?.profile?.db_type==='redis'){
+        resetFirestoreBrowser()
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
         setSqlDbObjectExpanded({})
         await loadRedisKeys({quiet:true,preserveSelection:false})
-      }else if(status?.connected&&status?.profile?.db_type!=='firestore'){
+      }else if(status?.connected&&status?.profile?.db_type==='firestore'){
+        resetRedisBrowser()
+        setSqlDbObjects(null)
+        setSqlDbObjectsError('')
+        setSqlDbObjectExpanded({})
+        await loadFirestoreCollections({quiet:true,preserveSelection:false})
+      }else if(status?.connected){
+        resetFirestoreBrowser()
         resetRedisBrowser()
         await loadSqlDbObjects({quiet:true})
       }else{
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
         setSqlDbObjectExpanded({})
+        resetFirestoreBrowser()
         resetRedisBrowser()
       }
       if(status?.profile?.db_type==='sqlite3') await loadSqliteProjectStatus({quiet:true})
@@ -4019,6 +2727,96 @@ function IDE() {
     }
   }
 
+  const resetFirestoreBrowser=()=>{
+    setFirestoreBrowser(null)
+    setFirestoreBrowserError('')
+    setFirestoreSelectedCollection('')
+    setFirestoreDocuments(null)
+    setFirestoreSelectedDocument('')
+    setFirestoreDocumentDetail(null)
+  }
+
+  const loadFirestoreDocumentDetail=async(path,{quiet=false}={})=>{
+    const workspaceRoot=activeWorkspaceRoot
+    const documentPath=String(path||'')
+    if(!workspaceRoot||!documentPath) return null
+    if(!quiet) setFirestoreDocumentDetailBusy(true)
+    try{
+      const detail=await api(`/sql/firestore/document?root=${encodeURIComponent(workspaceRoot)}&path=${encodeURIComponent(documentPath)}`)
+      setFirestoreSelectedDocument(documentPath)
+      setFirestoreDocumentDetail(detail)
+      return detail
+    }catch(e){
+      setFirestoreDocumentDetail(null)
+      setFirestoreBrowserError(String(e))
+      return null
+    }finally{
+      if(!quiet) setFirestoreDocumentDetailBusy(false)
+    }
+  }
+
+  const loadFirestoreDocuments=async(collection,{quiet=false,preserveSelection=true}={})=>{
+    const workspaceRoot=activeWorkspaceRoot
+    const collectionPath=String(collection||'')
+    if(!workspaceRoot||!collectionPath) return null
+    if(!quiet) setFirestoreDocumentsBusy(true)
+    setFirestoreBrowserError('')
+    try{
+      const result=await api(`/sql/firestore/documents?root=${encodeURIComponent(workspaceRoot)}&collection=${encodeURIComponent(collectionPath)}&limit=500`)
+      setFirestoreSelectedCollection(collectionPath)
+      setFirestoreDocuments(result)
+      const documents=Array.isArray(result?.documents)?result.documents:[]
+      const previous=preserveSelection?String(firestoreSelectedDocument||''):''
+      const nextPath=previous&&documents.some(item=>String(item?.path||'')===previous)?previous:(documents[0]?.path||'')
+      if(nextPath){
+        await loadFirestoreDocumentDetail(nextPath,{quiet:true})
+      }else{
+        setFirestoreSelectedDocument('')
+        setFirestoreDocumentDetail(null)
+      }
+      return result
+    }catch(e){
+      setFirestoreDocuments(null)
+      setFirestoreSelectedDocument('')
+      setFirestoreDocumentDetail(null)
+      setFirestoreBrowserError(String(e))
+      return null
+    }finally{
+      if(!quiet) setFirestoreDocumentsBusy(false)
+    }
+  }
+
+  const loadFirestoreCollections=async({quiet=false,preserveSelection=true}={})=>{
+    const workspaceRoot=activeWorkspaceRoot
+    if(!workspaceRoot) return null
+    if(!quiet) setFirestoreBrowserBusy(true)
+    setFirestoreBrowserError('')
+    try{
+      const result=await api(`/sql/firestore/collections?root=${encodeURIComponent(workspaceRoot)}&limit=1000`)
+      setFirestoreBrowser(result)
+      const collections=Array.isArray(result?.collections)?result.collections:[]
+      const previous=preserveSelection?String(firestoreSelectedCollection||''):''
+      const nextCollection=previous&&collections.some(item=>String(item?.path||'')===previous)?previous:(collections[0]?.path||'')
+      if(nextCollection){
+        await loadFirestoreDocuments(nextCollection,{quiet:true,preserveSelection})
+      }else{
+        setFirestoreSelectedCollection('')
+        setFirestoreDocuments(null)
+        setFirestoreSelectedDocument('')
+        setFirestoreDocumentDetail(null)
+      }
+      return result
+    }catch(e){
+      setFirestoreBrowser(null)
+      setFirestoreDocuments(null)
+      setFirestoreDocumentDetail(null)
+      setFirestoreBrowserError(String(e))
+      return null
+    }finally{
+      if(!quiet) setFirestoreBrowserBusy(false)
+    }
+  }
+
   const resetRedisBrowser=()=>{
     setRedisBrowser(null)
     setRedisBrowserError('')
@@ -4035,9 +2833,13 @@ function IDE() {
     if(!quiet) setRedisKeyDetailBusy(true)
     try{
       const detail=await api(`/sql/redis/key?root=${encodeURIComponent(workspaceRoot)}&key=${encodeURIComponent(keyName)}&max_items=500`)
+      const observedAt=Date.now()
+      const nextDetail=detail&&typeof detail==='object'
+        ? {...detail,__ttl_observed_at_ms:observedAt}
+        : detail
       setRedisSelectedKey(keyName)
-      setRedisKeyDetail(detail)
-      return detail
+      setRedisKeyDetail(nextDetail)
+      return nextDetail
     }catch(e){
       setRedisKeyDetail(null)
       setRedisBrowserError(String(e))
@@ -4057,8 +2859,12 @@ function IDE() {
       const hasGlob=/[*?\[]/.test(raw)
       const pattern=raw?(hasGlob?raw:`*${raw}*`):'*'
       const result=await api(`/sql/redis/keys?root=${encodeURIComponent(workspaceRoot)}&pattern=${encodeURIComponent(pattern)}&limit=2000`)
-      setRedisBrowser(result)
-      const keys=Array.isArray(result?.keys)?result.keys:[]
+      const observedAt=Date.now()
+      const nextResult=result&&typeof result==='object'
+        ? {...result,__ttl_observed_at_ms:observedAt}
+        : result
+      setRedisBrowser(nextResult)
+      const keys=Array.isArray(nextResult?.keys)?nextResult.keys:[]
       const previous=preserveSelection?String(redisSelectedKey||''):''
       const nextKey=previous&&keys.some(item=>String(item?.key||'')===previous)?previous:(keys[0]?.key||'')
       if(nextKey){
@@ -4067,7 +2873,7 @@ function IDE() {
         setRedisSelectedKey('')
         setRedisKeyDetail(null)
       }
-      return result
+      return nextResult
     }catch(e){
       setRedisBrowser(null)
       setRedisKeyDetail(null)
@@ -4080,6 +2886,58 @@ function IDE() {
 
   const toggleRedisKeyGroup=(path)=>{
     setRedisKeyExpanded(prev=>({...prev,[path]:prev[path]===false?true:false}))
+  }
+
+  const openFirestoreContextMenu=(event,node)=>{
+    if(!sqlConnectionStatus?.connected||String(sqlProfile.db_type||'').toLowerCase()!=='firestore') return
+    event.preventDefault()
+    event.stopPropagation()
+    const menuWidth=306
+    const menuHeight=402
+    const x=Math.max(8,Math.min(event.clientX,window.innerWidth-menuWidth-8))
+    const y=Math.max(8,Math.min(event.clientY,window.innerHeight-menuHeight-8))
+    const nodeKind=node?.kind==='document'?'document':'collection'
+    const path=String(node?.path||'')
+    const label=String(node?.label||path||'Firestore')
+    if(nodeKind==='collection'&&path){
+      setFirestoreSelectedCollection(path)
+      if(firestoreSelectedCollection!==path) loadFirestoreDocuments(path,{quiet:true,preserveSelection:false})
+    }else if(nodeKind==='document'&&path){
+      const parts=path.split('/').filter(Boolean)
+      const collectionPath=parts.slice(0,-1).join('/')
+      if(collectionPath) setFirestoreSelectedCollection(collectionPath)
+      setFirestoreSelectedDocument(path)
+      if(firestoreSelectedDocument!==path) loadFirestoreDocumentDetail(path,{quiet:true})
+    }
+    setRedisContextMenu(null)
+    setSqlObjectContextMenu(null)
+    setSqlDatabaseContextMenu(null)
+    setFirestoreContextMenu({x,y,nodeKind,path,label})
+  }
+
+  const createFirestorePythonScript=async(action)=>{
+    const menu=firestoreContextMenu
+    if(!menu||!activeWorkspaceRoot||!sqlConnectionStatus?.connected||firestoreScriptBusy) return
+    const normalized=String(action||'').toLowerCase()
+    setFirestoreContextMenu(null)
+    setFirestoreScriptBusy(normalized)
+    try{
+      const response=await api('/sql/firestore/script',{
+        method:'POST',
+        body:JSON.stringify({root:activeWorkspaceRoot,action:normalized,path:menu.path||'',node_kind:menu.nodeKind||'collection'})
+      })
+      if(response?.relative_path){
+        await loadFiles()
+        await openFile(response.relative_path)
+      }
+      setSqlResultTab('MESSAGES')
+      setSqlMessages(prev=>[{type:'success',text:response?.message||'Firestore 임시 Python 코드를 생성했습니다.',time:new Date().toLocaleTimeString()},...prev].slice(0,100))
+    }catch(e){
+      setSqlResultTab('MESSAGES')
+      setSqlMessages(prev=>[{type:'error',text:`Firestore Python 코드 생성 실패: ${e}`,time:new Date().toLocaleTimeString()},...prev].slice(0,100))
+    }finally{
+      setFirestoreScriptBusy('')
+    }
   }
 
   const openRedisContextMenu=(event,node)=>{
@@ -4102,6 +2960,7 @@ function IDE() {
       setRedisSelectedKey(payload.key)
       if(redisSelectedKey!==payload.key) loadRedisKeyDetail(payload.key,{quiet:true})
     }
+    setFirestoreContextMenu(null)
     setSqlObjectContextMenu(null)
     setSqlDatabaseContextMenu(null)
     setRedisContextMenu(payload)
@@ -4147,50 +3006,6 @@ function IDE() {
     }
   }
 
-  const renderRedisTreeNodes=(node,level=0)=>{
-    if(!node) return null
-    return <>
-      {(node.children||[]).map(child=>{
-        const open=redisKeyExpanded[child.path]!==false
-        const descendantCount=countRedisTreeKeys(child)
-        return <div className="redis-tree-group" key={`redis-group:${child.path}`}>
-          <button
-            type="button"
-            className="redis-tree-row group"
-            style={{paddingLeft:`${8+level*14}px`}}
-            onClick={()=>toggleRedisKeyGroup(child.path)}
-            onContextMenu={(event)=>openRedisContextMenu(event,{kind:'group',prefix:child.path,label:child.path})}
-            title={`${child.path} · 우클릭: Redis Python 코드 생성`}
-          >
-            <span className="redis-tree-caret">{open?'⌄':'›'}</span>
-            <span className="redis-tree-folder">▱</span>
-            <strong>{child.name}</strong>
-            <em>{descendantCount||''}</em>
-          </button>
-          {open&&renderRedisTreeNodes(child,level+1)}
-        </div>
-      })}
-      {(node.items||[]).map(item=>{
-        const type=String(item?.type||'unknown').toLowerCase()
-        const active=redisSelectedKey===item.key
-        const fullKey=String(item?.key||'')
-        const parentPrefix=fullKey.includes(':')?fullKey.split(':').slice(0,-1).join(':'):''
-        return <button
-          type="button"
-          key={`redis-key:${item.key}`}
-          className={`redis-tree-row key ${active?'active':''}`}
-          style={{paddingLeft:`${24+level*14}px`}}
-          onClick={()=>loadRedisKeyDetail(item.key)}
-          onContextMenu={(event)=>openRedisContextMenu(event,{kind:'key',key:fullKey,keyType:type,prefix:parentPrefix,label:fullKey})}
-          title={`${item.key} · 우클릭: 연결/조회/등록/수정/삭제 Python 코드 생성`}
-        >
-          <span className={`redis-type-badge ${type}`}>{type.toUpperCase()}</span>
-          <code>{item.label||item.key}</code>
-          <small>{redisTtlLabel(item.ttl)}</small>
-        </button>
-      })}
-    </>
-  }
 
   useEffect(()=>{
     if(!redisContextMenu) return
@@ -4207,6 +3022,22 @@ function IDE() {
       window.removeEventListener('keydown',onKey,true)
     }
   },[redisContextMenu])
+
+  useEffect(()=>{
+    if(!firestoreContextMenu) return
+    const close=()=>setFirestoreContextMenu(null)
+    const onKey=(event)=>{if(event.key==='Escape') close()}
+    window.addEventListener('mousedown',close)
+    window.addEventListener('scroll',close,true)
+    window.addEventListener('resize',close)
+    window.addEventListener('keydown',onKey,true)
+    return ()=>{
+      window.removeEventListener('mousedown',close)
+      window.removeEventListener('scroll',close,true)
+      window.removeEventListener('resize',close)
+      window.removeEventListener('keydown',onKey,true)
+    }
+  },[firestoreContextMenu])
 
   const toggleSqlDbObject=(key)=>{
     setSqlDbObjectExpanded(prev=>({...prev,[key]:!prev[key]}))
@@ -4498,17 +3329,26 @@ function IDE() {
       sqlLoadedRootRef.current=workspaceRoot
       applySqlWorkspaceStatus(status,{preservePassword:!rootChanged})
       if(status?.connected&&status?.profile?.db_type==='redis'){
+        resetFirestoreBrowser()
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
         setSqlDbObjectExpanded({})
         await loadRedisKeys({quiet:true})
-      }else if(status?.connected&&status?.profile?.db_type!=='firestore'){
+      }else if(status?.connected&&status?.profile?.db_type==='firestore'){
+        resetRedisBrowser()
+        setSqlDbObjects(null)
+        setSqlDbObjectsError('')
+        setSqlDbObjectExpanded({})
+        await loadFirestoreCollections({quiet:true})
+      }else if(status?.connected){
+        resetFirestoreBrowser()
         resetRedisBrowser()
         await loadSqlDbObjects({quiet:true})
       }else{
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
         setSqlDbObjectExpanded({})
+        resetFirestoreBrowser()
         resetRedisBrowser()
       }
       return status
@@ -4546,6 +3386,32 @@ function IDE() {
     }
   }
 
+  const renameSqlWorkspaceConnection=async()=>{
+    if(!activeWorkspaceRoot||!sqlProfile.connection_id) return
+    const nextName=String(sqlProfile.name||'').trim()
+    if(!nextName){
+      setSqlMessages(prev=>[{type:'warning',text:'변경할 연결 이름을 입력하세요.',time:new Date().toLocaleTimeString()},...prev].slice(0,100))
+      return
+    }
+    setSqlConnectionBusy(true)
+    try{
+      const result=await api('/sql/profile/rename',{
+        method:'POST',
+        body:JSON.stringify({root:activeWorkspaceRoot,connection_id:sqlProfile.connection_id,name:nextName})
+      })
+      applySqlWorkspaceStatus(result,{preservePassword:true})
+      setSqlMessages(prev=>[{
+        type:'info',
+        text:`DB 연결 이름을 '${result?.profile?.name||nextName}'(으)로 변경했습니다. 연결 ID와 저장된 자격증명은 그대로 유지됩니다.`,
+        time:new Date().toLocaleTimeString()
+      },...prev].slice(0,100))
+    }catch(e){
+      setSqlMessages(prev=>[{type:'error',text:`DB 연결 이름 변경 실패: ${e}`,time:new Date().toLocaleTimeString()},...prev].slice(0,100))
+    }finally{
+      setSqlConnectionBusy(false)
+    }
+  }
+
   const deleteSqlWorkspaceConnection=async()=>{
     if(!activeWorkspaceRoot||!sqlProfile.connection_id) return
     const label=sqlProfile.name||String(sqlProfile.db_type||'DB').toUpperCase()
@@ -4559,17 +3425,26 @@ function IDE() {
       applySqlWorkspaceStatus(status,{preservePassword:false})
       if(!status?.profile?.connection_id) newSqlWorkspaceConnection(sqlProfile.db_type)
       if(status?.connected&&status?.profile?.db_type==='redis'){
+        resetFirestoreBrowser()
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
         setSqlDbObjectExpanded({})
         await loadRedisKeys({quiet:true,preserveSelection:false})
-      }else if(status?.connected&&status?.profile?.db_type!=='firestore'){
+      }else if(status?.connected&&status?.profile?.db_type==='firestore'){
+        resetRedisBrowser()
+        setSqlDbObjects(null)
+        setSqlDbObjectsError('')
+        setSqlDbObjectExpanded({})
+        await loadFirestoreCollections({quiet:true,preserveSelection:false})
+      }else if(status?.connected){
+        resetFirestoreBrowser()
         resetRedisBrowser()
         await loadSqlDbObjects({quiet:true})
       }else{
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
         setSqlDbObjectExpanded({})
+        resetFirestoreBrowser()
         resetRedisBrowser()
       }
       setSqlMessages(prev=>[{type:'info',text:`DB 연결 '${label}'을 삭제했습니다.`,time:new Date().toLocaleTimeString()},...prev].slice(0,100))
@@ -4595,18 +3470,21 @@ function IDE() {
         time:new Date().toLocaleTimeString()
       },...prev].slice(0,100))
       if((status?.profile?.db_type||sqlProfile.db_type)==='redis'){
+        resetFirestoreBrowser()
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
         setSqlDbObjectExpanded({})
         await loadRedisKeys({quiet:true,preserveSelection:false})
-      }else if((status?.profile?.db_type||sqlProfile.db_type)!=='firestore'){
+      }else if((status?.profile?.db_type||sqlProfile.db_type)==='firestore'){
         resetRedisBrowser()
-        await loadSqlDbObjects({quiet:true})
-      }else{
         setSqlDbObjects(null)
         setSqlDbObjectsError('')
         setSqlDbObjectExpanded({})
+        await loadFirestoreCollections({quiet:true,preserveSelection:false})
+      }else{
+        resetFirestoreBrowser()
         resetRedisBrowser()
+        await loadSqlDbObjects({quiet:true})
       }
       if((status?.profile?.db_type||sqlProfile.db_type)==='sqlite3') await loadSqliteProjectStatus({quiet:true})
     }catch(e){
@@ -4629,6 +3507,7 @@ function IDE() {
       setSqlDbObjects(null)
       setSqlDbObjectsError('')
       setSqlDbObjectExpanded({})
+      resetFirestoreBrowser()
       resetRedisBrowser()
       setSqlMessages(prev=>[{type:'info',text:`${sqlProfile.name||'데이터베이스'} 연결을 해제했습니다.`,time:new Date().toLocaleTimeString()},...prev].slice(0,100))
     }catch(e){
@@ -5088,7 +3967,7 @@ function IDE() {
       xtermCommandBuffersRef.current[sessionId]=''
       xtermCursorIndexRef.current[sessionId]=0
       terminalCommandBusyRef.current[sessionId]=false
-      setTerminalSessions(prev=>prev.map(t=>t.id===sessionId?{...t,busy:false}:t))
+      setTerminalSessions(prev=>prev.map(t=>t.id===sessionId?{...t,busy:false,interrupting:false}:t))
       fitTerminalViewport(sessionId)
       writeXterm(sessionId,nextPrompt)
       requestAnimationFrame(()=>{
@@ -5176,7 +4055,7 @@ function IDE() {
 
     ws.onmessage=(event)=>{
       try{
-        const msg=JSON.parse(event.data)
+        const msg=parseTerminalServerMessage(event.data)
 
         if(msg.type==='history'){
           processTerminalRawOutput(
@@ -5211,7 +4090,8 @@ function IDE() {
                   hasVenv:!!msg.has_venv,
                   cwd:t.cwd||projectRoot,
                   processState:'running',
-                  exitCode:null
+                  exitCode:null,
+                  interrupting:false
                 }
               : t
           ))
@@ -5230,16 +4110,24 @@ function IDE() {
         }
 
         if(msg.type==='interrupted'){
-          terminalCommandBusyRef.current[sessionId]=false
-          setTerminalSessions(prev=>prev.map(t=>
-            t.id===sessionId
-              ? {
-                  ...t,
-                  busy:false,
-                  output:(t.output||'')+'\n[중단 요청 완료]\n'
-                }
-              : t
-          ))
+          // 'interrupted' means that the stop signal/child-tree termination
+          // request was delivered.  It does NOT mean PowerShell has already
+          // returned to its prompt.  Keep the command busy until the prompt
+          // marker arrives so a second Ctrl+C can still be sent if shutdown
+          // is taking longer than expected.  The prompt can race ahead of
+          // this ACK, so ignore a late ACK once the parser already marked the
+          // command idle.
+          if(terminalCommandBusyRef.current[sessionId]){
+            setTerminalSessions(prev=>prev.map(t=>
+              t.id===sessionId
+                ? {
+                    ...t,
+                    busy:true,
+                    interrupting:true
+                  }
+                : t
+            ))
+          }
         }
 
         if(msg.type==='process_exit'){
@@ -5252,7 +4140,9 @@ function IDE() {
                   ...t,
                   processState:'exited',
                   exitCode,
-                  command:''
+                  command:'',
+                  busy:false,
+                  interrupting:false
                 }
               : t
           ))
@@ -5499,8 +4389,8 @@ function IDE() {
     ))
 
     terminalCommandBusyRef.current[id]=true
-    setTerminalSessions(prev=>prev.map(t=>t.id===id?{...t,busy:true}:t))
-    ws.send(JSON.stringify({
+    setTerminalSessions(prev=>prev.map(t=>t.id===id?{...t,busy:true,interrupting:false}:t))
+    ws.send(serializeTerminalClientMessage({
       type:'input',
       data:cmd+'\r\n'
     }))
@@ -5515,7 +4405,13 @@ function IDE() {
   const interruptTerminal=(id)=>{
     const ws=terminalSocketsRef.current[id]
     if(ws&&ws.readyState===WebSocket.OPEN){
-      ws.send(JSON.stringify({type:'interrupt'}))
+      // Keep the command in a busy/interrupting state until the backend
+      // command wrapper emits the normal prompt marker.  This prevents the
+      // first Ctrl+C acknowledgement from making later Ctrl+C presses local
+      // only while Streamlit/Python is still shutting down.
+      terminalCommandBusyRef.current[id]=true
+      setTerminalSessions(prev=>prev.map(t=>t.id===id?{...t,busy:true,interrupting:true}:t))
+      ws.send(serializeTerminalClientMessage({type:'interrupt'}))
     }
   }
 
@@ -5816,6 +4712,14 @@ function IDE() {
     }
 
     term.attachCustomKeyEventHandler(event=>{
+      // Only the terminal may consume keyboard input while it is the explicit
+      // focus owner. Notebook/Monaco/LLM clicks can leave xterm's hidden
+      // textarea mounted, and older builds could therefore keep receiving
+      // Backspace after the user had moved back to the editor.
+      if(event.type==='keydown'&&focusOwnerRef.current!=='terminal'){
+        return false
+      }
+
       if(
         event.type==='keydown'
         && event.shiftKey
@@ -5877,7 +4781,36 @@ function IDE() {
       return true
     })
 
+    const eraseTerminalCellsBackward=(count)=>{
+      const cells=Math.max(0,Number(count)||0)
+      if(!cells) return
+
+      const activeBuffer=term.buffer?.active
+      const cols=Math.max(1,Number(term.cols)||1)
+      let cursorX=Math.max(0,Number(activeBuffer?.cursorX)||0)
+      let sequence=''
+
+      // Backspace (\b) does not reliably cross a soft-wrapped xterm row.
+      // Move explicitly across the row boundary and erase in-place so a long
+      // PowerShell command is shortened instead of being redrawn repeatedly.
+      for(let index=0;index<cells;index++){
+        if(cursorX>0){
+          sequence+='\x1b[D\x1b[X'
+          cursorX-=1
+        }else{
+          sequence+=`\x1b[A\x1b[${cols}G\x1b[X`
+          cursorX=cols-1
+        }
+      }
+
+      if(sequence) term.write(sequence)
+    }
+
     const disposable=term.onData(data=>{
+      // Defensive input gate matching attachCustomKeyEventHandler above.
+      // Program output uses term.write() and is unaffected by this guard.
+      if(focusOwnerRef.current!=='terminal') return
+
       const currentSession=terminalSessions.find(t=>t.id===id)
       if(currentSession?.processState==='exited') return
 
@@ -5967,7 +4900,8 @@ function IDE() {
         }
 
         terminalCommandBusyRef.current[id]=!!command.trim()
-        ws.send(JSON.stringify({
+        setTerminalSessions(prev=>prev.map(t=>t.id===id?{...t,busy:!!command.trim(),interrupting:false}:t))
+        ws.send(serializeTerminalClientMessage({
           type:'command',
           data:command
         }))
@@ -5994,7 +4928,7 @@ function IDE() {
         }
 
         term.write('^C\r\n')
-        ws.send(JSON.stringify({type:'interrupt'}))
+        interruptTerminal(id)
         return
       }
 
@@ -6016,7 +4950,7 @@ function IDE() {
             // repeated Backspace always reaches the prompt without leaving
             // half-width remnants on screen.
             const eraseCells=Math.max(1,terminalCellWidth(removed))
-            term.write('\b \b'.repeat(eraseCells))
+            eraseTerminalCellsBackward(eraseCells)
             fitTerminalViewport(id)
           }else{
             setCommandLine(buffer,cursor)
@@ -6224,7 +5158,7 @@ function IDE() {
     const ws=terminalSocketsRef.current[id]
     try{
       if(ws?.readyState===WebSocket.OPEN){
-        ws.send(JSON.stringify({type:'clear'}))
+        ws.send(serializeTerminalClientMessage({type:'clear'}))
       }
     }catch{}
 
@@ -6437,7 +5371,7 @@ function IDE() {
   const reloadExternalEditorFile=async(editorPath,{activate=false}={})=>{
     const normalized=normalizeProjectRelativePath(editorPath)
 
-    if(isPdfFile(editorPath)){
+    if(isBinaryPreviewFile(editorPath)){
       let latest={exists:true,mtime_ns:0,size:0}
       try{
         latest=await api(`/files/meta?root=${encodeURIComponent(activeWorkspaceRoot)}&relative_path=${encodeURIComponent(editorPath)}`)
@@ -6456,13 +5390,17 @@ function IDE() {
       setEditorExternalState(prev=>{
         const copy={...prev}; delete copy[normalized]; return copy
       })
-      setPdfPreviewRevision(prev=>({...prev,[normalized]:Date.now()}))
+      if(isPdfFile(editorPath)){
+        setPdfPreviewRevision(prev=>({...prev,[normalized]:Date.now()}))
+      }else{
+        setPresentationPreviewRevision(prev=>({...prev,[normalized]:Date.now()}))
+      }
       if(activate||selectedEditorFileRef.current===editorPath){
         setSelected(editorPath)
         setFileTreeSelected(editorPath)
         setFileTreeSelectedPaths([editorPath])
         setCode('')
-        setFileSaveStatus('PDF 미리보기 새로고침')
+        setFileSaveStatus(isPdfFile(editorPath)?'PDF 미리보기 새로고침':'PowerPoint 미리보기 새로고침')
       }
       return latest
     }
@@ -7097,9 +6035,10 @@ function IDE() {
       setTerminal(prev=>(prev||'')+'\n[저장 차단] 파일 로드가 실패한 탭은 디스크에 저장하지 않습니다. 먼저 다시 불러오세요.\n')
       return
     }
-    if(isPdfFile(selected)){
-      setFileSaveStatus('PDF 읽기 전용')
-      setTerminal(prev=>(prev||'')+'\n[PDF] PDF 파일은 미리보기 전용이며 텍스트 저장을 수행하지 않습니다.\n')
+    if(isBinaryPreviewFile(selected)){
+      const presentation=isPresentationFile(selected)
+      setFileSaveStatus(presentation?'PowerPoint 읽기 전용':'PDF 읽기 전용')
+      setTerminal(prev=>(prev||'')+`\n[${presentation?'PowerPoint':'PDF'}] 바이너리 문서는 미리보기 전용이며 텍스트 저장을 수행하지 않습니다.\n`)
       return
     }
     setFileSaveStatus('저장 중')
@@ -7762,7 +6701,7 @@ function IDE() {
     setFileLoading(true)
 
     try{
-      if(isPdfFile(requestedPath)){
+      if(isBinaryPreviewFile(requestedPath)){
         let meta=null
         try{
           meta=await api(`/files/meta?root=${encodeURIComponent(activeWorkspaceRoot)}&relative_path=${encodeURIComponent(requestedPath)}`)
@@ -7787,11 +6726,15 @@ function IDE() {
         setOpenEditorFiles(prev=>prev.includes(requestedPath)?prev:[...prev,requestedPath])
         setEditorFileContents(prev=>({...prev,[requestedPath]:''}))
         setEditorFileDirty(prev=>({...prev,[requestedPath]:false}))
-        setPdfPreviewRevision(prev=>({...prev,[metaKey]:Date.now()}))
+        if(isPdfFile(requestedPath)){
+          setPdfPreviewRevision(prev=>({...prev,[metaKey]:Date.now()}))
+        }else{
+          setPresentationPreviewRevision(prev=>({...prev,[metaKey]:Date.now()}))
+        }
         setCode('')
         setSelected(requestedPath)
         setFileTreeSelected(requestedPath)
-        setFileSaveStatus('PDF 미리보기')
+        setFileSaveStatus(isPdfFile(requestedPath)?'PDF 미리보기':'PowerPoint 미리보기')
         return
       }
 
@@ -10188,7 +9131,7 @@ function IDE() {
 
     terminalCommandBusyRef.current[targetId]=true
     setTerminalSessions(prev=>prev.map(t=>t.id===targetId?{...t,busy:true}:t))
-    ws.send(JSON.stringify({type:'command',data:script}))
+    ws.send(serializeTerminalClientMessage({type:'command',data:script}))
     setActiveTerminalId(targetId)
     setFocusOwnerSafe('terminal')
 
@@ -10757,13 +9700,16 @@ function IDE() {
       return
     }
 
-    if(!projectMode&&isPdfFile(selected)){
+    if(!projectMode&&isBinaryPreviewFile(selected)){
+      const presentation=isPresentationFile(selected)
       setCodeEditChat(prev=>[
         ...prev,
         {role:'user',content:prompt},
         {
           role:'assistant',
-          content:'PDF는 바이너리 문서이므로 파일 단위 코드 수정 대상이 아닙니다. PDF는 미리보기 전용으로 열립니다.'
+          content:presentation
+            ? 'PPT/PPTX는 바이너리 문서이므로 파일 단위 코드 수정 대상이 아닙니다. 원본을 보존한 채 PDF 미리보기로 열립니다.'
+            : 'PDF는 바이너리 문서이므로 파일 단위 코드 수정 대상이 아닙니다. PDF는 미리보기 전용으로 열립니다.'
         }
       ])
       setCodeEditPrompt('')
@@ -12793,7 +11739,7 @@ function IDE() {
     <main className={`workspace-main workspace-tab-${workspaceTab.toLowerCase()} ${
       ['RUN','REPORT','ARCHITECTURE','LLM'].includes(workspaceTab)
         ? 'compact-workspace result-only-workspace'
-        : workspaceTab==='CODE'&&!isPdfFile(selected)
+        : workspaceTab==='CODE'&&!isBinaryPreviewFile(selected)
           ? 'workspace-with-bottom-tools code-tools-workspace'
           : 'workspace-clean-design'
     } ${workspaceBottomCollapsed?'workspace-bottom-collapsed':''} ${workspaceBottomResizing?'workspace-bottom-resizing':''}`}>
@@ -13446,6 +12392,12 @@ function IDE() {
                   projectRoot={root||activeWorkspaceRoot}
                   revision={pdfPreviewRevision[normalizeProjectRelativePath(selected)]||0}
                 />
+              : isPresentationFile(selected)
+              ? <PresentationViewer
+                  filePath={selected}
+                  projectRoot={root||activeWorkspaceRoot}
+                  revision={presentationPreviewRevision[normalizeProjectRelativePath(selected)]||0}
+                />
               : isNotebookFile(selected)
               ? <NotebookEditor
                   value={code}
@@ -13455,6 +12407,7 @@ function IDE() {
                   onExecutePython={executeNotebookPythonCode}
                   onStopPython={stopPythonExecution}
                   controllerRef={notebookEditorControllerRef}
+                  onEditorFocus={()=>setFocusOwnerSafe('editor')}
                 />
               : <Editor
             beforeMount={(monaco)=>{
@@ -13968,7 +12921,7 @@ function IDE() {
         />}
       </div>
 
-      {workspaceTab==='CODE'&&!isPdfFile(selected)&&<div className={`workspace-bottom-control-rail ${workspaceBottomCollapsed?'collapsed':''}`}>
+      {workspaceTab==='CODE'&&!isBinaryPreviewFile(selected)&&<div className={`workspace-bottom-control-rail ${workspaceBottomCollapsed?'collapsed':''}`}>
         {!workspaceBottomCollapsed&&<div
           className="workspace-bottom-resizer workspace-bottom-resizer-inline"
           role="separator"
@@ -13990,7 +12943,7 @@ function IDE() {
       </div>}
 
       <div className={
-        workspaceTab==='CODE'&&!isPdfFile(selected)&&!workspaceBottomCollapsed
+        workspaceTab==='CODE'&&!isBinaryPreviewFile(selected)&&!workspaceBottomCollapsed
           ? `workspace-bottom-grid fixed-bottom-tools persistent-code-tools visible ${isSqlFile?'sql-workspace-bottom':''}`
           : 'workspace-bottom-grid fixed-bottom-tools persistent-code-tools hidden'
       }>
@@ -14041,7 +12994,7 @@ function IDE() {
                 <span className="file-save-status failed">저장 실패</span>
               }
 
-              <button onClick={saveFile} disabled={!selected||isPdfFile(selected)}>상단 코드 저장</button>
+              <button onClick={saveFile} disabled={!selected||isBinaryPreviewFile(selected)}>상단 코드 저장</button>
             </div>
           </div>
 
@@ -14176,253 +13129,64 @@ function IDE() {
           </div>
         </section>
 
-        <section className={`terminal-pane multi-terminal-pane ${isSqlFile?'sql-hidden':''}`}>
-          <div className="terminal-toolbar">
-            <div className="terminal-tabs">
-              
-    {activeTerminalId&&terminalErrors[activeTerminalId]&&
-      <div className="terminal-error-panel">
-        <div className="terminal-error-head">
-          <strong>터미널 오류 상세</strong>
-          <button
-            type="button"
-            onClick={()=>
-              setTerminalErrors(prev=>({
-                ...prev,
-                [activeTerminalId]:null
-              }))
+        <TerminalPanel
+          hiddenForSql={isSqlFile}
+          sessions={terminalSessions}
+          activeTerminalId={activeTerminalId}
+          activeTerminal={activeTerminal}
+          errors={terminalErrors}
+          terminalNameEditId={terminalNameEditId}
+          terminalNameDraft={terminalNameDraft}
+          activeTerminalProjectId={activeTerminalProjectId}
+          projectTerminalSessions={projectTerminalSessions}
+          completion={terminalCompletion}
+          completionRef={terminalCompletionRef}
+          onDismissError={sessionId=>setTerminalErrors(prev=>({...prev,[sessionId]:null}))}
+          onNameDraftChange={setTerminalNameDraft}
+          onSaveName={saveTerminalName}
+          onCancelRename={()=>{ setTerminalNameEditId(null); setTerminalNameDraft('') }}
+          onSelectTerminal={terminal=>{
+            setFocusOwnerSafe('terminal')
+            setActiveTerminalId(terminal.id)
+            setTimeout(()=>focusXterm(terminal.id,{force:true}),0)
+          }}
+          onStartRename={startRenameTerminal}
+          onRemoveTerminal={removeTerminal}
+          onRestartTerminal={restartTerminalSession}
+          onInterruptTerminal={interruptTerminal}
+          onClearTerminal={clearTerminalView}
+          onAddTerminal={addTerminal}
+          onBindTerminalContainer={(terminal,el)=>{
+            if(!el) return
+            xtermContainersRef.current[terminal.id]=el
+            setTimeout(async()=>{
+              await ensureXtermInstance(terminal.id)
+              if(
+                activeTerminalId===terminal.id
+                && terminal.processState!=='exited'
+                && canAutoFocusTerminal()
+              ){
+                focusXterm(terminal.id)
+              }
+            },0)
+          }}
+          onTerminalMouseDown={terminal=>{
+            if(terminal.processState==='exited') return
+            setFocusOwnerSafe('terminal')
+          }}
+          onTerminalClick={terminal=>{
+            if(terminal.processState==='exited') return
+            setFocusOwnerSafe('terminal')
+            focusXterm(terminal.id,{force:true})
+          }}
+          onCompletionHover={index=>{
+            const current=terminalCompletionRef.current
+            if(current?.sessionId===activeTerminalId){
+              setTerminalCompletionState({...current,selectedIndex:index})
             }
-          >
-            닫기
-          </button>
-        </div>
-
-        <div className="terminal-error-grid">
-          <span>단계</span>
-          <code>{terminalErrors[activeTerminalId].stage||'-'}</code>
-
-          <span>오류</span>
-          <code>{terminalErrors[activeTerminalId].message||'-'}</code>
-
-          <span>프로젝트</span>
-          <code>{terminalErrors[activeTerminalId].root||'-'}</code>
-
-          <span>세션 ID</span>
-          <code>{terminalErrors[activeTerminalId].sessionId||'-'}</code>
-
-          <span>WebSocket</span>
-          <code>{terminalErrors[activeTerminalId].wsUrl||'-'}</code>
-
-          <span>발생 시각</span>
-          <code>{terminalErrors[activeTerminalId].time||'-'}</code>
-        </div>
-
-        {terminalErrors[activeTerminalId].logPath&&
-          <div className="terminal-error-log-path">
-            <span>로그 전체 경로</span>
-            <code>
-              {terminalErrors[activeTerminalId].logPath}
-            </code>
-          </div>
-        }
-
-        {terminalErrors[activeTerminalId].detail&&
-          <details className="terminal-error-detail" open>
-            <summary>상세 오류 / Traceback</summary>
-            <pre>{terminalErrors[activeTerminalId].detail}</pre>
-          </details>
-        }
-      </div>
-    }
-
-
-    {terminalSessions.map(t=><div
-                key={t.id}
-                className={activeTerminalId===t.id?'terminal-tab active':'terminal-tab'}
-              >
-                {terminalNameEditId===t.id
-                  ? <input
-                      className="terminal-name-input"
-                      value={terminalNameDraft}
-                      autoFocus
-                      onChange={e=>setTerminalNameDraft(e.target.value)}
-                      onBlur={()=>saveTerminalName(t.id)}
-                      onKeyDown={e=>{
-                        if(e.key==='Enter') saveTerminalName(t.id)
-                        if(e.key==='Escape'){
-                          setTerminalNameEditId(null)
-                          setTerminalNameDraft('')
-                        }
-                      }}
-                    />
-                  : <button
-                      className="terminal-tab-select"
-                      onClick={()=>{
-                  setFocusOwnerSafe('terminal')
-                  setActiveTerminalId(t.id)
-                  setTimeout(()=>focusXterm(t.id,{force:true}),0)
-                }}
-                      onDoubleClick={()=>startRenameTerminal(t)}
-                      title="더블클릭하면 이름을 변경할 수 있습니다."
-                    >
-                      {t.name}
-                    </button>
-                }
-
-                <button
-                  className="terminal-tab-menu"
-                  onClick={()=>startRenameTerminal(t)}
-                  title="이름 변경"
-                >✎</button>
-
-                {terminalSessions.length>1&&<button
-                  className="terminal-tab-close"
-                  onClick={()=>removeTerminal(t.id)}
-                  title="터미널 닫기"
-                >×</button>}
-              </div>)}
-            </div>
-
-            {activeTerminal?.processState==='exited'&&
-              <button
-                type="button"
-                className="terminal-restart-button"
-                onClick={()=>restartTerminalSession(activeTerminal.id)}
-              >
-                다시 시작
-              </button>
-            }
-
-            {activeTerminal?.busy&&<button
-              type="button"
-              className="terminal-stop-button execution-stop-button"
-              onClick={()=>interruptTerminal(activeTerminalId)}
-              title="현재 터미널에서 실행 중인 명령을 Ctrl+C로 중지"
-            >■ 실행 정지</button>}
-
-            <button
-              type="button"
-              className="terminal-clear-button"
-              onClick={()=>clearTerminalView(activeTerminalId)}
-              disabled={!activeTerminalId}
-              title="현재 터미널 출력 지우기 (PowerShell 세션은 유지됩니다)"
-            >⌫ Clear</button>
-
-            <button
-              className="add-terminal-button"
-              onClick={addTerminal}
-              title="새 터미널 만들기"
-            >＋ 터미널</button>
-          </div>
-
-          {activeTerminalProjectId&&projectTerminalSessions[activeTerminalProjectId]&&
-          <div className="project-terminal-status">
-            <span className="project-terminal-dot"/>
-            <strong>{projectTerminalSessions[activeTerminalProjectId].projectName||'프로젝트'}</strong>
-            <code>{projectTerminalSessions[activeTerminalProjectId].root}</code>
-            {projectTerminalSessions[activeTerminalProjectId].hasVenv&&
-              <span className="project-terminal-venv">.venv 활성</span>
-            }
-          </div>}
-        <div className="xterm-shell-wrap"> 
-          {terminalSessions.map(t=>
-            <div
-              key={t.id}
-              ref={el=>{
-                if(el){
-                  xtermContainersRef.current[t.id]=el
-
-                  setTimeout(async()=>{
-                    await ensureXtermInstance(t.id)
-
-                    if(
-                      activeTerminalId===t.id
-                      && t.processState!=='exited'
-                      && canAutoFocusTerminal()
-                    ){
-                      focusXterm(t.id)
-                    }
-                  },0)
-                }
-              }}
-              className={
-                activeTerminalId===t.id
-                  ? 'xterm-shell active'
-                  : 'xterm-shell hidden'
-              }
-              onMouseDown={()=>{
-                if(t.processState==='exited') return
-                setFocusOwnerSafe('terminal')
-              }}
-              onClick={()=>{
-                if(t.processState==='exited') return
-                setFocusOwnerSafe('terminal')
-                focusXterm(t.id,{force:true})
-              }}
-            />
-          )}
-
-          {terminalCompletion?.sessionId===activeTerminalId&&
-            <div
-              className="terminal-completion-menu"
-              onMouseDown={e=>e.preventDefault()}
-            >
-              <div className="terminal-completion-head">
-                <strong>
-                  터미널 자동완성
-                  {terminalCompletion.token?` · ${terminalCompletion.token}`:''}
-                </strong>
-                <span>
-                  {terminalCompletion.items?.length||0}개 · ↑↓ 선택 · Tab/Enter 적용 · Esc 닫기
-                </span>
-              </div>
-
-              {terminalCompletion.loading&&
-                <div className="terminal-completion-empty">후보를 찾는 중...</div>
-              }
-
-              {!terminalCompletion.loading&&terminalCompletion.error&&
-                <div className="terminal-completion-empty error">
-                  {terminalCompletion.error}
-                </div>
-              }
-
-              {!terminalCompletion.loading&&!terminalCompletion.error&&terminalCompletion.items?.length===0&&
-                <div className="terminal-completion-empty">일치하는 후보가 없습니다.</div>
-              }
-
-              {!terminalCompletion.loading&&terminalCompletion.items?.length>0&&
-                <div className="terminal-completion-list">
-                  {terminalCompletion.items.map((item,index)=>
-                    <button
-                      type="button"
-                      key={`${item.kind||'item'}:${item.insert_text||item.label}:${index}`}
-                      className={index===terminalCompletion.selectedIndex?'selected':''}
-                      onMouseEnter={()=>{
-                        const current=terminalCompletionRef.current
-                        if(current?.sessionId===activeTerminalId){
-                          setTerminalCompletionState({...current,selectedIndex:index})
-                        }
-                      }}
-                      onMouseDown={e=>{
-                        e.preventDefault()
-                        applyTerminalCompletion(item)
-                      }}
-                      title={item.detail||item.label}
-                    >
-                      <span className={`terminal-completion-kind ${item.kind||'item'}`}>
-                        {item.kind==='folder'?'DIR':item.kind==='file'?'FILE':'CMD'}
-                      </span>
-                      <span className="terminal-completion-label">{item.label}</span>
-                      <small>{item.detail||''}</small>
-                    </button>
-                  )}
-                </div>
-              }
-            </div>
-          }
-        </div>
-        </section>
+          }}
+          onApplyCompletion={applyTerminalCompletion}
+        />
       </div>
     </main>
 
@@ -14842,7 +13606,11 @@ function IDE() {
               onChange={e=>setSqlProfile(prev=>({...prev,name:e.target.value}))}
               placeholder="예: 운영 MSSQL / 개발 PostgreSQL / Supabase / Firestore / Redis"
             />
+            {sqlProfile.connection_id&&<small className="muted">저장된 PostgreSQL/Supabase/Firestore/Redis/MSSQL/Oracle/SQLite3 연결 이름을 수정할 수 있습니다. 접속 정보와 저장 비밀번호는 변경하지 않습니다.</small>}
           </label>
+          {sqlProfile.connection_id&&<div className="sql-profile-manager-actions">
+            <button type="button" onClick={renameSqlWorkspaceConnection} disabled={sqlConnectionBusy||!String(sqlProfile.name||'').trim()}>연결 이름 변경 저장</button>
+          </div>}
 
           <label className="sql-field">
             <span>DB 종류</span>
@@ -14875,7 +13643,7 @@ function IDE() {
 
           {sqlProfile.db_type==='firestore'
             ? <>
-                <div className="sql-connection-import-card">
+                <div className="sql-connection-import-card firestore-import-card">
                   <div>
                     <strong>Firestore Service Account JSON 자동 등록</strong>
                     <small>Google Cloud/Firebase Service Account JSON을 분석해 Project ID와 JSON 파일 경로를 자동 등록합니다. Private Key 내용은 설정에 복사하지 않습니다.</small>
@@ -14985,7 +13753,7 @@ function IDE() {
                   <div className="sql-connection-import-card">
                     <div>
                       <strong>Supabase JSON 자동 등록</strong>
-                      <small>JSON의 PostgreSQL URL 또는 Host/Port/Database/User/Password/SSL 정보를 분석해 아래 입력란에 자동 등록합니다.</small>
+                      <small>JSON의 PostgreSQL URL 또는 Host/Port/Database/Schema/User/Password/SSL 정보를 분석해 아래 입력란에 자동 등록합니다.</small>
                     </div>
                     <button type="button" onClick={()=>importSqlConnectionFile('supabase')} disabled={sqlConnectionImport.busy}>
                       {sqlConnectionImport.busy&&sqlConnectionImport.db_type==='supabase'?'분석 중...':'JSON 파일 찾기 / 로드'}
@@ -15043,6 +13811,16 @@ function IDE() {
                     })()
                   : <label className="sql-field"><span>Service Name</span><input value={sqlProfile.service_name||''} onChange={e=>setSqlProfile(prev=>({...prev,service_name:e.target.value}))} placeholder="FREEPDB1 / XEPDB1"/></label>}
 
+                {sqlProfile.db_type==='supabase'&&<label className="sql-field">
+                  <span>Schema</span>
+                  <input
+                    value={sqlProfile.schema_name||''}
+                    onChange={e=>setSqlProfile(prev=>({...prev,schema_name:e.target.value}))}
+                    placeholder="예: theanova_agentstudio / public"
+                  />
+                  <small className="muted">Supabase PostgreSQL 연결 후 기본 search_path를 Schema → extensions → public 순서로 적용합니다. 비우면 public을 사용합니다.</small>
+                </label>}
+
                 <label className="sql-field"><span>사용자</span><input value={sqlProfile.username||''} onChange={e=>setSqlProfile(prev=>({...prev,username:e.target.value}))}/></label>
                 <label className="sql-field">
                   <span>비밀번호 {sqlProfile.credential_saved&&<em className="sql-credential-saved">Windows 보안 저장됨</em>}</span>
@@ -15077,6 +13855,7 @@ function IDE() {
             <div><span>현재 연결 상태</span><strong>{sqlConnectionStatus?.connected?'연결 유지 중':'연결 필요'}</strong></div>
             <div><span>저장된 연결</span><code>{sqlConnectionStatus?.saved_connection_count??sqlConnections.length}개 · 연결 중 {sqlConnectionStatus?.connected_connection_count??sqlConnections.filter(item=>item.connected).length}개</code></div>
             {sqlProfile.db_type==='sqlite3'&&<div><span>DB 파일</span><code>{sqlConnectionStatus?.profile?.database||sqlProfile.database||'-'}</code></div>}
+            {sqlProfile.db_type==='supabase'&&<div><span>Supabase Schema</span><code>{sqlConnectionStatus?.profile?.schema_name||sqlProfile.schema_name||'public'}</code></div>}
             {sqlConnectionStatus?.connected_at&&<div><span>연결 시각</span><code>{sqlConnectionStatus.connected_at}</code></div>}
             {!!(sqlConnectionStatus?.saved_db_types||[]).length&&<div><span>등록된 DB 종류</span><code>{sqlConnectionStatus.saved_db_types.map(v=>String(v).toUpperCase()).join(', ')}</code></div>}
             {sqlConnectionStatus?.profile_storage_path&&<div><span>연결 정보 저장 위치</span><code title={sqlConnectionStatus.profile_storage_path}>{sqlConnectionStatus.profile_storage_path}</code></div>}
@@ -15098,343 +13877,100 @@ function IDE() {
               <div>
                 <strong>{sqlProfile.db_type==='firestore'?'Firestore 연결':sqlProfile.db_type==='redis'?'Redis 연결':'DB Object Explorer'}</strong>
                 <small>{sqlProfile.db_type==='firestore'?'NoSQL Document Database · Collection → Document → Field':sqlProfile.db_type==='redis'?'NoSQL Key-Value Database · String / Hash / List / Set / ZSet':'테이블 · 뷰 · 프로시저 · 함수 · 인덱스 · 시퀀스 · 트리거'}</small>
-                <small className="sql-object-doubleclick-help">{sqlProfile.db_type==='firestore'?'Firestore 인증/연결 테스트를 지원하며 SQL 실행은 사용하지 않습니다.':sqlProfile.db_type==='redis'?'Redis 인증/PING 후 Key Browser에서 실제 Key/Value를 읽기 전용으로 조회합니다. SQL 실행은 사용하지 않습니다.':'더블클릭: 테이블은 전체 컬럼 SELECT 조회 · 기타 객체는 수정용 임시 SQL 생성'}</small>
+                <small className="sql-object-doubleclick-help">{sqlProfile.db_type==='firestore'?'Firestore 인증 후 Collection/Document/Field를 읽기 전용으로 탐색합니다. SQL 실행은 사용하지 않습니다.':sqlProfile.db_type==='redis'?'Redis 인증/PING 후 Key Browser에서 실제 Key/Value를 읽기 전용으로 조회합니다. SQL 실행은 사용하지 않습니다.':'더블클릭: 테이블은 전체 컬럼 SELECT 조회 · 기타 객체는 수정용 임시 SQL 생성'}</small>
               </div>
               <button
                 type="button"
-                onClick={()=>sqlProfile.db_type==='redis'?loadRedisKeys():loadSqlDbObjects()}
-                disabled={sqlProfile.db_type==='firestore'||!sqlConnectionStatus?.connected||(sqlProfile.db_type==='redis'?redisBrowserBusy:sqlDbObjectsBusy)}
-                title={sqlProfile.db_type==='redis'?'Redis Key 목록 새로고침':'DB 객체 목록 새로고침'}
+                onClick={()=>sqlProfile.db_type==='firestore'?loadFirestoreCollections():sqlProfile.db_type==='redis'?loadRedisKeys():loadSqlDbObjects()}
+                disabled={!sqlConnectionStatus?.connected||(sqlProfile.db_type==='firestore'?firestoreBrowserBusy:sqlProfile.db_type==='redis'?redisBrowserBusy:sqlDbObjectsBusy)}
+                title={sqlProfile.db_type==='firestore'?'Firestore Collection 목록 새로고침':sqlProfile.db_type==='redis'?'Redis Key 목록 새로고침':'DB 객체 목록 새로고침'}
               >
-                {(sqlProfile.db_type==='redis'?redisBrowserBusy:sqlDbObjectsBusy)?'…':'↻'}
+                {(sqlProfile.db_type==='firestore'?firestoreBrowserBusy:sqlProfile.db_type==='redis'?redisBrowserBusy:sqlDbObjectsBusy)?'…':'↻'}
               </button>
             </div>
 
             {sqlProfile.db_type==='firestore'
-              ? <div className="sql-object-empty">{sqlConnectionStatus?.connected?'Firestore 인증 및 연결 테스트가 성공했습니다. 컬렉션/문서 작업은 프로젝트 코드에서 Google Cloud Firestore SDK를 사용하세요.':'Project ID와 인증 정보를 입력한 뒤 연결 / 테스트를 실행하세요.'}</div>
+              ? <FirestoreBrowserPanel
+                  connected={sqlConnectionStatus?.connected}
+                  profile={sqlProfile}
+                  browser={firestoreBrowser}
+                  browserBusy={firestoreBrowserBusy}
+                  browserError={firestoreBrowserError}
+                  collectionFilter={firestoreCollectionFilter}
+                  documentFilter={firestoreDocumentFilter}
+                  selectedCollection={firestoreSelectedCollection}
+                  documents={firestoreDocuments}
+                  documentsBusy={firestoreDocumentsBusy}
+                  selectedDocument={firestoreSelectedDocument}
+                  documentDetail={firestoreDocumentDetail}
+                  documentDetailBusy={firestoreDocumentDetailBusy}
+                  setCollectionFilter={setFirestoreCollectionFilter}
+                  setDocumentFilter={setFirestoreDocumentFilter}
+                  loadCollections={loadFirestoreCollections}
+                  loadDocuments={loadFirestoreDocuments}
+                  loadDocumentDetail={loadFirestoreDocumentDetail}
+                  openContextMenu={openFirestoreContextMenu}
+                />
               : sqlProfile.db_type==='redis'
-                ? (!sqlConnectionStatus?.connected
-                    ? <div className="sql-object-empty">Host/Port/DB index와 필요한 인증 정보를 입력한 뒤 연결 / 테스트를 실행하세요.</div>
-                    : (()=>{
-                        const allKeys=Array.isArray(redisBrowser?.keys)?redisBrowser.keys:[]
-                        const visibleKeys=redisTypeFilter==='all'?allKeys:allKeys.filter(item=>String(item?.type||'').toLowerCase()===redisTypeFilter)
-                        const tree=buildRedisKeyTree(visibleKeys)
-                        const detail=redisKeyDetail
-                        const detailType=String(detail?.type||'').toLowerCase()
-                        return <div className="redis-browser-shell">
-                          <div className="redis-browser-toolbar">
-                            <select value={redisTypeFilter} onChange={e=>setRedisTypeFilter(e.target.value)} title="Redis Key 타입 필터">
-                              <option value="all">All Key Types</option>
-                              <option value="string">STRING</option>
-                              <option value="hash">HASH</option>
-                              <option value="list">LIST</option>
-                              <option value="set">SET</option>
-                              <option value="zset">ZSET</option>
-                              <option value="stream">STREAM</option>
-                            </select>
-                            <div className="redis-key-search">
-                              <input
-                                value={redisKeyFilter}
-                                onChange={e=>setRedisKeyFilter(e.target.value)}
-                                onKeyDown={e=>{if(e.key==='Enter') loadRedisKeys({preserveSelection:false})}}
-                                placeholder="Filter by Key Name or Pattern"
-                              />
-                              <button type="button" onClick={()=>loadRedisKeys({preserveSelection:false})} disabled={redisBrowserBusy}>⌕</button>
-                            </div>
-                          </div>
-                          <div className="redis-browser-summary">
-                            <strong>Results: {visibleKeys.length}</strong>
-                            <span>Total keys {redisBrowser?.total_keys??'-'} · DB {redisBrowser?.database??sqlProfile.database??'0'}</span>
-                            <button type="button" onClick={()=>loadRedisKeys()} disabled={redisBrowserBusy}>{redisBrowserBusy?'조회 중...':'↻ 새로고침'}</button>
-                          </div>
-                          {redisBrowserError&&<div className="sql-object-error">{redisBrowserError}</div>}
-                          <div className="redis-browser-main">
-                            <div className="redis-key-pane">
-                              {redisBrowserBusy&&!redisBrowser
-                                ? <div className="sql-object-empty">Redis Key를 읽고 있습니다...</div>
-                                : visibleKeys.length
-                                  ? <div className="redis-key-tree">{renderRedisTreeNodes(tree)}</div>
-                                  : <div className="sql-object-empty">조건에 맞는 Redis Key가 없습니다.</div>}
-                            </div>
-                            <div className="redis-detail-pane">
-                              {redisKeyDetailBusy
-                                ? <div className="sql-object-empty">Key 상세 값을 읽고 있습니다...</div>
-                                : !detail
-                                  ? <div className="sql-object-empty">왼쪽 Key를 선택하면 값과 TTL 정보가 표시됩니다.</div>
-                                  : <>
-                                      <div className="redis-detail-head">
-                                        <div className="redis-detail-title">
-                                          <span className={`redis-type-badge large ${detailType}`}>{detailType.toUpperCase()}</span>
-                                          <strong title={detail.key}>{detail.key}</strong>
-                                        </div>
-                                        <button type="button" onClick={()=>loadRedisKeyDetail(detail.key)} disabled={redisKeyDetailBusy}>↻</button>
-                                      </div>
-                                      <div className="redis-detail-meta">
-                                        <span>Key Size: <strong>{formatRedisBytes(detail.size_bytes)}</strong></span>
-                                        <span>Length: <strong>{detail.length??'-'}</strong></span>
-                                        <span>TTL: <strong>{redisTtlLabel(detail.ttl)}</strong></span>
-                                      </div>
-                                      <div className="redis-detail-content">
-                                        {detailType==='string'
-                                          ? <pre className="redis-string-value">{String(detail.value??'')}</pre>
-                                          : detailType==='hash'
-                                            ? <table className="redis-value-table"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>{(detail.rows||[]).map((row,index)=><tr key={`${row.field}-${index}`}><td>{row.field}</td><td>{row.value}</td></tr>)}</tbody></table>
-                                            : ['list','set'].includes(detailType)
-                                              ? <table className="redis-value-table"><thead><tr><th>Index</th><th>Element</th></tr></thead><tbody>{(detail.rows||[]).map((row,index)=><tr key={`${row.index}-${index}`}><td>{row.index}</td><td>{row.value}</td></tr>)}</tbody></table>
-                                              : detailType==='zset'
-                                                ? <table className="redis-value-table"><thead><tr><th>Index</th><th>Member</th><th>Score</th></tr></thead><tbody>{(detail.rows||[]).map((row,index)=><tr key={`${row.member}-${index}`}><td>{row.index}</td><td>{row.member}</td><td>{row.score}</td></tr>)}</tbody></table>
-                                                : detailType==='stream'
-                                                  ? <table className="redis-value-table"><thead><tr><th>ID</th><th>Fields</th></tr></thead><tbody>{(detail.rows||[]).map((row,index)=><tr key={`${row.id}-${index}`}><td>{row.id}</td><td><code>{JSON.stringify(row.fields,null,2)}</code></td></tr>)}</tbody></table>
-                                                  : <pre className="redis-string-value">{String(detail.value??'')}</pre>}
-                                        {detail.truncated&&<div className="redis-detail-truncated">표시 성능을 위해 일부 데이터만 보여줍니다. 최대 {detail.max_items||500}개 항목</div>}
-                                      </div>
-                                      {detail.refreshed_at&&<div className="redis-detail-refreshed">Last refresh: {detail.refreshed_at.replace('T',' ')}</div>}
-                                    </>}
-                            </div>
-                          </div>
-                        </div>
-                      })())
-              : !sqlConnectionStatus?.connected
-              ? <div className="sql-object-empty">DB에 연결하면 개발 객체 목록이 표시됩니다.</div>
-              : sqlDbObjectsBusy&&!sqlDbObjects
-                ? <div className="sql-object-empty">DB 객체를 읽고 있습니다...</div>
-                : sqlDbObjectsError
-                  ? <div className="sql-object-error">{sqlDbObjectsError}</div>
-                  : sqlDbObjects?.schemas?.length
-                    ? <div className="sql-object-tree">
-                        <button
-                          type="button"
-                          className="sql-database-root-row"
-                          onContextMenu={openSqlDatabaseContextMenu}
-                          title="데이터베이스 우클릭: PostgreSQL 세션 / Lock 관리 SQL 생성"
-                        >
-                          <span className="sql-database-root-icon">🗄</span>
-                          <strong>{sqlDbObjects?.database||sqlConnectionStatus?.profile?.database||sqlProfile.database||'Database'}</strong>
-                          <small>{String(sqlDbObjects?.db_type||sqlProfile.db_type||'').toUpperCase()}</small>
-                          <em>우클릭 메뉴</em>
-                        </button>
-                        {sqlDbObjects.schemas.map(schema=>{
-                          const schemaKey=`schema:${schema.name}`
-                          const schemaOpen=!!sqlDbObjectExpanded[schemaKey]
-                          const categories=[
-                            ['tables','테이블','▦'],
-                            ['views','뷰','◫'],
-                            ['procedures','프로시저','⚙'],
-                            ['functions','함수','ƒ'],
-                            ['sequences','시퀀스','≋'],
-                            ['triggers','트리거','⚡'],
-                            ['indexes','인덱스','⌗'],
-                            ['packages','패키지','▣']
-                          ].filter(([key])=>(schema[key]||[]).length)
-                          const schemaCount=categories.reduce((sum,[key])=>sum+(schema[key]?.length||0),0)
-                          return <div className="sql-object-schema" key={schema.name}>
-                            <button type="button" className="sql-object-tree-row schema" onClick={()=>toggleSqlDbObject(schemaKey)}>
-                              <span className="tree-caret">{schemaOpen?'−':'+'}</span>
-                              <span className="tree-icon">◈</span>
-                              <strong>{schema.name}</strong>
-                              <em>{schemaCount}</em>
-                            </button>
-                            {schemaOpen&&<div className="sql-object-schema-body">
-                              {categories.map(([category,label,icon])=>{
-                                const categoryKey=`category:${schema.name}:${category}`
-                                const categoryOpen=!!sqlDbObjectExpanded[categoryKey]
-                                const items=schema[category]||[]
-                                return <div className="sql-object-category" key={category}>
-                                  <button type="button" className="sql-object-tree-row category" onClick={()=>toggleSqlDbObject(categoryKey)}>
-                                    <span className="tree-caret">{categoryOpen?'−':'+'}</span>
-                                    <span className="tree-icon">{icon}</span>
-                                    <span>{label}</span>
-                                    <em>{items.length}</em>
-                                  </button>
-                                  {categoryOpen&&<div className="sql-object-items">
-                                    {items.map((item,index)=>{
-                                      const itemKey=`item:${schema.name}:${category}:${item.name}:${index}`
-                                      const hasColumns=Array.isArray(item.columns)&&item.columns.length>0
-                                      const itemOpen=!!sqlDbObjectExpanded[itemKey]
-                                      return <div className="sql-object-item" key={itemKey}>
-                                        <button
-                                          type="button"
-                                          className="sql-object-tree-row item"
-                                          onClick={()=>hasColumns&&toggleSqlDbObject(itemKey)}
-                                          onDoubleClick={(event)=>{
-                                            event.preventDefault()
-                                            event.stopPropagation()
-                                            openSqlDbObject(schema.name,category,item)
-                                          }}
-                                          onContextMenu={(event)=>openSqlObjectContextMenu(event,schema.name,category,item)}
-                                          title={`${item.qualified_name||item.name} · 더블클릭하여 ${category==='tables'?'전체 컬럼 SELECT 조회 · 우클릭: DDL/ALTER/SELECT/INSERT/UPDATE/DELETE 생성':'수정용 임시 SQL 열기'}`}
-                                          disabled={sqlObjectActionBusy===`${schema.name}:${category}:${item.name}`}
-                                        >
-                                          <span className={`tree-caret ${hasColumns?'':'empty'}`}>{hasColumns?(itemOpen?'−':'+'):''}</span>
-                                          <code>{item.name}</code>
-                                          {item.arguments&&<small>({item.arguments})</small>}
-                                          {item.table&&<small>→ {item.table}</small>}
-                                        </button>
-                                        {hasColumns&&itemOpen&&<div className="sql-object-columns">
-                                          {item.columns.map((column,columnIndex)=><div className="sql-object-column" key={`${column.name}-${columnIndex}`}>
-                                            <span>◇</span>
-                                            <code>{column.name}</code>
-                                            <small>{column.data_type}{column.nullable?' · NULL':''}</small>
-                                          </div>)}
-                                        </div>}
-                                      </div>
-                                    })}
-                                  </div>}
-                                </div>
-                              })}
-                            </div>}
-                          </div>
-                        })}
-                      </div>
-                    : <div className="sql-object-empty">표시할 DB 객체가 없습니다.</div>}
+                ? <RedisBrowserPanel
+                    connected={sqlConnectionStatus?.connected}
+                    profile={sqlProfile}
+                    browser={redisBrowser}
+                    browserBusy={redisBrowserBusy}
+                    browserError={redisBrowserError}
+                    keyFilter={redisKeyFilter}
+                    typeFilter={redisTypeFilter}
+                    selectedKey={redisSelectedKey}
+                    keyDetail={redisKeyDetail}
+                    keyDetailBusy={redisKeyDetailBusy}
+                    keyExpanded={redisKeyExpanded}
+                    setKeyFilter={setRedisKeyFilter}
+                    setTypeFilter={setRedisTypeFilter}
+                    toggleKeyGroup={toggleRedisKeyGroup}
+                    loadKeys={loadRedisKeys}
+                    loadKeyDetail={loadRedisKeyDetail}
+                    openContextMenu={openRedisContextMenu}
+                  />
+                : <SqlObjectTreePanel
+                    connected={sqlConnectionStatus?.connected}
+                    profile={sqlProfile}
+                    connectionStatus={sqlConnectionStatus}
+                    dbObjects={sqlDbObjects}
+                    busy={sqlDbObjectsBusy}
+                    error={sqlDbObjectsError}
+                    expanded={sqlDbObjectExpanded}
+                    actionBusy={sqlObjectActionBusy}
+                    toggleObject={toggleSqlDbObject}
+                    openObject={openSqlDbObject}
+                    openObjectContextMenu={openSqlObjectContextMenu}
+                    openDatabaseContextMenu={openSqlDatabaseContextMenu}
+                  />}
 
-            {sqlDbObjects?.refreshed_at&&
+            {sqlDbObjects?.refreshed_at&&sqlProfile.db_type!=='firestore'&&sqlProfile.db_type!=='redis'&&
               <div className="sql-object-refreshed">최근 조회: {sqlDbObjects.refreshed_at.replace('T',' ')}</div>}
 
-            {redisContextMenu&&<div
-              className="sql-object-context-menu redis-context-menu"
-              style={{left:redisContextMenu.x,top:redisContextMenu.y}}
-              onMouseDown={event=>event.stopPropagation()}
-            >
-              <div className="sql-context-menu-title">
-                <strong>{redisContextMenu.label||'Redis'}</strong>
-                <small>{redisContextMenu.nodeKind==='group'?'Redis Key 그룹':'Redis Key'}{redisContextMenu.keyType?` · ${redisContextMenu.keyType.toUpperCase()}`:''}</small>
-              </div>
-              {[
-                ['connection','⛓','Redis 연결코드','현재 Host/Port/DB/User 기반 redis-py 연결 코드'],
-                ['list','☷','리스트 조회','선택 노드 범위 Key 또는 LIST 요소 조회'],
-                ['read','⌕','조회','Key 타입에 맞는 조회 명령 생성'],
-                ['create','＋','등록','Key 타입에 맞는 등록 예제'],
-                ['update','✎','수정','Key 타입에 맞는 수정 예제'],
-                ['delete','🗑','삭제','삭제 확인 가드가 포함된 안전한 삭제 예제'],
-              ].map(([action,icon,title,description])=><button
-                type="button"
-                key={action}
-                className={action==='delete'?'redis-menu-danger':''}
-                onClick={()=>createRedisPythonScript(action)}
-                disabled={!!redisScriptBusy}
-              >
-                <span>{icon}</span>
-                <div><strong>{title}</strong><small>{description}</small></div>
-              </button>)}
-              <div className="redis-context-note">임시 `.py` 파일만 생성하며 자동 실행하지 않습니다. 저장된 비밀번호는 파일에 평문으로 넣지 않습니다.</div>
-            </div>}
+            <DatabaseBrowserContextMenus
+              firestoreContextMenu={firestoreContextMenu}
+              firestoreScriptBusy={firestoreScriptBusy}
+              createFirestorePythonScript={createFirestorePythonScript}
+              redisContextMenu={redisContextMenu}
+              redisScriptBusy={redisScriptBusy}
+              createRedisPythonScript={createRedisPythonScript}
+              sqlObjectContextMenu={sqlObjectContextMenu}
+              sqlObjectActionBusy={sqlObjectActionBusy}
+              createSqlTableScript={createSqlTableScript}
+              createSqlTableAlterScript={createSqlTableAlterScript}
+              createSqlTableDmlScript={createSqlTableDmlScript}
+              sqlDatabaseContextMenu={sqlDatabaseContextMenu}
+              dbObjects={sqlDbObjects}
+              profile={sqlProfile}
+              createPostgresqlAdminScript={createPostgresqlAdminScript}
+              openSqlAdminPrompt={openSqlAdminPrompt}
+              sqlAdminPrompt={sqlAdminPrompt}
+              setSqlAdminPrompt={setSqlAdminPrompt}
+              submitSqlAdminPrompt={submitSqlAdminPrompt}
+            />
 
-            {sqlObjectContextMenu&&<div
-              className="sql-object-context-menu"
-              style={{left:sqlObjectContextMenu.x,top:sqlObjectContextMenu.y}}
-              onMouseDown={event=>event.stopPropagation()}
-            >
-              <button
-                type="button"
-                onClick={()=>createSqlTableScript(sqlObjectContextMenu.schemaName,sqlObjectContextMenu.item)}
-                disabled={!!sqlObjectActionBusy}
-              >
-                <span>📜</span>
-                <div>
-                  <strong>테이블 스크립트 보기</strong>
-                  <small>CREATE TABLE DDL을 임시 SQL로 열기</small>
-                </div>
-              </button>
-              <button
-                type="button"
-                onClick={()=>createSqlTableAlterScript(sqlObjectContextMenu.schemaName,sqlObjectContextMenu.item)}
-                disabled={!!sqlObjectActionBusy}
-              >
-                <span>🛠</span>
-                <div>
-                  <strong>테이블 수정 스크립트 보기</strong>
-                  <small>ALTER TABLE 템플릿을 임시 SQL로 열기</small>
-                </div>
-              </button>
-              <div className="sql-context-menu-section">DML 스크립트 생성</div>
-              {[
-                ['select','🔎','SELECT 생성','현재 컬럼 기준 조회 SQL'],
-                ['insert','＋','INSERT 생성','현재 컬럼 기준 입력 SQL'],
-                ['update','✎','UPDATE 생성','PK 기반 수정 SQL'],
-                ['delete','🗑','DELETE 생성','PK 기반 삭제 SQL'],
-              ].map(([action,icon,title,description])=>
-                <button
-                  type="button"
-                  key={action}
-                  onClick={()=>createSqlTableDmlScript(sqlObjectContextMenu.schemaName,sqlObjectContextMenu.item,action)}
-                  disabled={!!sqlObjectActionBusy}
-                >
-                  <span>{icon}</span>
-                  <div>
-                    <strong>{title}</strong>
-                    <small>{description}</small>
-                  </div>
-                </button>
-              )}
-            </div>}
-
-            {sqlDatabaseContextMenu&&<div
-              className="sql-object-context-menu sql-database-context-menu"
-              style={{left:sqlDatabaseContextMenu.x,top:sqlDatabaseContextMenu.y}}
-              onMouseDown={event=>event.stopPropagation()}
-            >
-              <div className="sql-context-menu-title">
-                <strong>{sqlDbObjects?.database||sqlProfile.database||'Database'}</strong>
-                <small>{String(sqlDbObjects?.db_type||sqlProfile.db_type||'').toUpperCase()} · 세션 / Lock 관리</small>
-              </div>
-              {String(sqlDbObjects?.db_type||sqlProfile.db_type||'').toLowerCase()!=='postgresql'
-                ? <div className="sql-context-menu-disabled-note">현재 메뉴는 PostgreSQL 연결에서 지원합니다.</div>
-                : <>
-                    <button type="button" onClick={()=>createPostgresqlAdminScript('sessions')} disabled={!!sqlObjectActionBusy}>
-                      <span>◉</span><div><strong>현재 실행 중인 세션 보기</strong><small>pg_stat_activity 조회</small></div>
-                    </button>
-                    <button type="button" onClick={()=>createPostgresqlAdminScript('locks')} disabled={!!sqlObjectActionBusy}>
-                      <span>🔒</span><div><strong>실제 Lock 목록 보기</strong><small>pg_locks + pg_stat_activity</small></div>
-                    </button>
-                    <button type="button" onClick={()=>createPostgresqlAdminScript('blocking')} disabled={!!sqlObjectActionBusy}>
-                      <span>⇄</span><div><strong>누가 누구를 막고 있는지 보기</strong><small>pg_blocking_pids 기반</small></div>
-                    </button>
-                    <button type="button" onClick={()=>openSqlAdminPrompt('table_locks')} disabled={!!sqlObjectActionBusy}>
-                      <span>▦</span><div><strong>특정 테이블 Lock만 보기</strong><small>테이블명을 입력해 SQL 생성</small></div>
-                    </button>
-                    <button type="button" onClick={()=>createPostgresqlAdminScript('backend_pid')} disabled={!!sqlObjectActionBusy}>
-                      <span>#</span><div><strong>현재 내 DBeaver 세션의 PID 보기</strong><small>실행 위치의 pg_backend_pid()</small></div>
-                    </button>
-                    <div className="sql-context-menu-section danger">세션 제어 SQL 생성</div>
-                    <button type="button" onClick={()=>openSqlAdminPrompt('cancel_backend')} disabled={!!sqlObjectActionBusy}>
-                      <span>■</span><div><strong>쿼리만 중지하고 DB 접속 유지</strong><small>PID 입력 → pg_cancel_backend</small></div>
-                    </button>
-                    <button type="button" onClick={()=>openSqlAdminPrompt('terminate_backend')} disabled={!!sqlObjectActionBusy}>
-                      <span>⛔</span><div><strong>DB 연결 자체를 강제로 종료</strong><small>PID 입력 → pg_terminate_backend</small></div>
-                    </button>
-                    <button type="button" onClick={()=>openSqlAdminPrompt('terminate_others')} disabled={!!sqlObjectActionBusy}>
-                      <span>⚠</span><div><strong>다른 세션만 종료 처리</strong><small>현재 세션 제외 · 상태 조건 입력</small></div>
-                    </button>
-                  </>}
-            </div>}
-
-            {sqlAdminPrompt&&<div className="sql-admin-prompt-backdrop" onMouseDown={()=>setSqlAdminPrompt(null)}>
-              <div className={`sql-admin-prompt ${sqlAdminPrompt.danger?'danger':''}`} onMouseDown={event=>event.stopPropagation()}>
-                <div className="sql-admin-prompt-head">
-                  <div>
-                    <strong>{sqlAdminPrompt.title}</strong>
-                    <small>입력한 값을 반영한 SQL 임시 파일만 생성합니다. 자동 실행되지 않습니다.</small>
-                  </div>
-                  <button type="button" onClick={()=>setSqlAdminPrompt(null)}>×</button>
-                </div>
-                <label>
-                  <span>{sqlAdminPrompt.label}</span>
-                  <input
-                    autoFocus
-                    value={sqlAdminPrompt.value}
-                    placeholder={sqlAdminPrompt.placeholder}
-                    onChange={event=>setSqlAdminPrompt(prev=>({...prev,value:event.target.value}))}
-                    onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();submitSqlAdminPrompt()} if(event.key==='Escape')setSqlAdminPrompt(null)}}
-                  />
-                </label>
-                {sqlAdminPrompt.danger&&<div className="sql-admin-prompt-warning">⚠ 생성된 세션 취소/종료 SQL은 실행 전에 PID와 조건을 반드시 다시 확인하세요.</div>}
-                <div className="sql-admin-prompt-actions">
-                  <button type="button" onClick={()=>setSqlAdminPrompt(null)}>취소</button>
-                  <button type="button" className="primary" onClick={submitSqlAdminPrompt} disabled={!String(sqlAdminPrompt.value??'').trim()}>SQL 임시파일 생성</button>
-                </div>
-              </div>
-            </div>}
           </div>
 
           {sqlConnectionStatus?.error&&<div className="sql-connection-error">{sqlConnectionStatus.error}</div>}

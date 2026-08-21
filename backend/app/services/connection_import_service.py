@@ -62,10 +62,23 @@ def _parse_postgres_url(raw: str) -> dict[str, Any]:
         return {}
     query = parsed.query.lower()
     ssl_mode = "require" if "sslmode=require" in query or "ssl=true" in query else ""
+    schema_name = ""
+    try:
+        from urllib.parse import parse_qs
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        schema_name = str((params.get("schema") or params.get("search_path") or [""])[0] or "").split(",")[0].strip()
+        if not schema_name:
+            options = str((params.get("options") or [""])[0] or "")
+            match = re.search(r"(?:^|\s)-csearch_path=([^\s]+)", options, flags=re.I)
+            if match:
+                schema_name = str(match.group(1) or "").split(",")[0].strip()
+    except Exception:
+        schema_name = ""
     return {
         "host": parsed.hostname or "",
         "port": int(parsed.port or 5432),
         "database": unquote((parsed.path or "/postgres").lstrip("/") or "postgres"),
+        "schema_name": schema_name,
         "username": unquote(parsed.username or "postgres"),
         "password": unquote(parsed.password or ""),
         "ssl_mode": ssl_mode,
@@ -157,6 +170,7 @@ def _analyze_supabase_json(path: Path, text: str) -> dict[str, Any]:
         "host": {"host", "db_host", "database_host", "postgres_host", "pg_host"},
         "port": {"port", "db_port", "database_port", "postgres_port", "pg_port"},
         "database": {"database", "db", "db_name", "database_name", "dbname"},
+        "schema_name": {"schema", "schema_name", "db_schema", "database_schema", "supabase_schema", "SUPABASE_DB_SCHEMA"},
         "username": {"username", "user", "db_user", "database_user", "postgres_user"},
         "password": {"password", "db_password", "database_password", "postgres_password"},
         "ssl_mode": {"ssl_mode", "sslmode"},
@@ -172,6 +186,7 @@ def _analyze_supabase_json(path: Path, text: str) -> dict[str, Any]:
     if profile.get("host"):
         profile["port"] = int(profile.get("port") or 5432)
         profile["database"] = str(profile.get("database") or "postgres")
+        profile["schema_name"] = str(profile.get("schema_name") or "public")
         profile["username"] = str(profile.get("username") or "postgres")
         profile["password"] = str(profile.get("password") or "")
         profile["ssl_mode"] = str(profile.get("ssl_mode") or "require")
@@ -181,7 +196,7 @@ def _analyze_supabase_json(path: Path, text: str) -> dict[str, Any]:
             "JSON에 database_url/connection_url 또는 host 정보가 필요합니다."
         )
 
-    detected = [key for key in ("host", "port", "database", "username", "password", "ssl_mode") if profile.get(key) not in (None, "")]
+    detected = [key for key in ("host", "port", "database", "schema_name", "username", "password", "ssl_mode") if profile.get(key) not in (None, "")]
     return {
         "ok": True,
         "db_type": "supabase",
@@ -193,6 +208,7 @@ def _analyze_supabase_json(path: Path, text: str) -> dict[str, Any]:
             "host": str(profile["host"]),
             "port": int(profile["port"]),
             "database": str(profile["database"]),
+            "schema_name": str(profile.get("schema_name") or "public"),
             "username": str(profile["username"]),
             "password": str(profile.get("password") or ""),
             "driver": "psycopg",

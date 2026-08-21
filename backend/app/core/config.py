@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     agentstudio_database_provider: str = "local"
     supabase_database_url: str = ""
     supabase_langgraph_database_url: str = ""
+    # v5.295: Supabase AgentStudio/LangGraph objects are isolated from public.
+    supabase_db_schema: str = "theanova_agentstudio"
 
     openai_api_key: str = ""
     openai_model: str = "gpt-5-mini"
@@ -86,6 +88,7 @@ def _read_backend_env_overrides() -> dict:
         "AGENTSTUDIO_DATABASE_PROVIDER": "agentstudio_database_provider",
         "SUPABASE_DATABASE_URL": "supabase_database_url",
         "SUPABASE_LANGGRAPH_DATABASE_URL": "supabase_langgraph_database_url",
+        "SUPABASE_DB_SCHEMA": "supabase_db_schema",
         "POSTGRESQL18_ROOT": "postgresql18_root",
     }
     found = {}

@@ -45,16 +45,95 @@ def _agentstudio_notebook_pip(arguments):
     importlib.invalidate_caches()
     return None
 
-def _preprocess_notebook_code(source):
-    """Translate a small, safe subset of Jupyter line magics to Python.
+def _agentstudio_notebook_writefile(arguments, body, project_root):
+    """Implement the safe Notebook subset of Jupyter ``%%writefile``.
 
-    Keep one output line for every input line so traceback line numbers remain
-    aligned with the cell shown in AgentStudio.  %pip is intentionally executed
-    with sys.executable so packages are installed into the same project venv as
-    the persistent Notebook worker.
+    Relative paths are resolved from the Notebook working directory (CWD).
+    The destination must remain inside the current AgentStudio project so a
+    Notebook cell cannot accidentally overwrite arbitrary files elsewhere.
+    Parent directories are created automatically, which is convenient for
+    exercises such as ``%%writefile apps/streamlit_01_hello.py``.
     """
+    tokens = shlex.split(str(arguments or "").strip(), posix=False)
+    append = False
+    filenames = []
+    for token in tokens:
+        normalized = str(token).strip()
+        if normalized in {"-a", "--append"}:
+            append = True
+            continue
+        if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {"\"", "'"}:
+            normalized = normalized[1:-1]
+        filenames.append(normalized)
+
+    if len(filenames) != 1 or not filenames[0]:
+        raise ValueError("%%writefile 사용법: %%writefile [-a] <파일경로>")
+
+    root_path = os.path.realpath(os.path.abspath(str(project_root or os.getcwd())))
+    requested = filenames[0]
+    target_path = requested if os.path.isabs(requested) else os.path.join(os.getcwd(), requested)
+    target_path = os.path.realpath(os.path.abspath(target_path))
+    try:
+        inside_project = os.path.commonpath([root_path, target_path]) == root_path
+    except ValueError:
+        inside_project = False
+    if not inside_project:
+        raise ValueError("%%writefile 대상은 현재 AgentStudio 프로젝트 폴더 안에 있어야 합니다.")
+
+    parent = os.path.dirname(target_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    mode = "a" if append else "w"
+    with open(target_path, mode, encoding="utf-8", newline="") as handle:
+        handle.write(str(body or ""))
+
+    action = "Appending" if append else "Writing"
+    display_path = os.path.relpath(target_path, os.getcwd())
+    print(f"{action} {display_path}")
+    return None
+
+def _preprocess_notebook_code(source, project_root):
+    """Translate supported Jupyter magics to executable Python.
+
+    ``%pip`` stays line-oriented so traceback line numbers remain aligned.
+    ``%%writefile`` is a cell magic: the first line is the directive and every
+    following character is written to disk as UTF-8 instead of being executed.
+    """
+    text = str(source or "")
+    lines = text.splitlines(True)
+
+    # Jupyter treats a cell magic as the first meaningful line of the cell.
+    # LLM-generated Notebook edits can legitimately leave one or more blank
+    # lines before ``%%writefile``.  v5.291 only inspected physical line 1, so
+    # a cell whose traceback showed the magic on line 2 fell through to the
+    # Python parser and raised SyntaxError.  Find the first non-empty line and
+    # keep all leading blank lines so traceback/cell line mapping stays stable.
+    magic_index = None
+    for index, raw_line in enumerate(lines):
+        candidate = raw_line.rstrip("\r\n").lstrip("\ufeff \t")
+        if candidate:
+            magic_index = index
+            break
+
+    if magic_index is not None:
+        magic_body = lines[magic_index].rstrip("\r\n")
+        magic_stripped = magic_body.lstrip("\ufeff \t")
+        lower_magic = magic_stripped.casefold()
+        magic = "%%writefile"
+        if lower_magic.startswith(magic) and (len(magic_stripped) == len(magic) or magic_stripped[len(magic)].isspace()):
+            arguments = magic_stripped[len(magic):].strip()
+            body = "".join(lines[magic_index + 1:])
+            translated = ["\n" for _ in lines[:magic_index]]
+            translated.append(
+                f"_agentstudio_notebook_writefile({arguments!r}, {body!r}, {str(project_root or '')!r})\n"
+            )
+            # Preserve the source line count for predictable traceback/cell mapping.
+            translated.extend("\n" for _ in lines[magic_index + 1:])
+            return "".join(translated)
+
     translated = []
-    for raw_line in str(source or "").splitlines(True):
+    for raw_line in lines:
         newline = "\n" if raw_line.endswith("\n") else ""
         body = raw_line[:-1] if newline else raw_line
         stripped = body.lstrip()
@@ -68,6 +147,7 @@ def _preprocess_notebook_code(source):
     return "".join(translated)
 
 namespace["_agentstudio_notebook_pip"] = _agentstudio_notebook_pip
+namespace["_agentstudio_notebook_writefile"] = _agentstudio_notebook_writefile
 
 for raw in sys.stdin:
     try:
@@ -89,7 +169,7 @@ for raw in sys.stdin:
             if isinstance(key, str) and value is not None
         } if isinstance(raw_env_overrides, dict) else {}
         if notebook_mode:
-            code = _preprocess_notebook_code(code)
+            code = _preprocess_notebook_code(code, root)
 
         if reset:
             namespace = {
@@ -97,6 +177,7 @@ for raw in sys.stdin:
                 "__package__": None,
                 "__builtins__": builtins,
                 "_agentstudio_notebook_pip": _agentstudio_notebook_pip,
+                "_agentstudio_notebook_writefile": _agentstudio_notebook_writefile,
             }
 
         namespace["__file__"] = filename

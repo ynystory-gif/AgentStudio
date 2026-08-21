@@ -10493,3 +10493,325 @@ display:none은 React DOM을 unmount하지 않습니다.
 .runtime-db-warning{color:#ffb7bc;}
 .database-runtime-actions{align-items:center;}
 @media(max-width:760px){.database-provider-choice{grid-template-columns:1fr;}}
+
+/* ===== v5.285 Firestore Collection / Document / Field Browser ===== */
+.firestore-browser-shell{
+  display:flex;
+  flex:1 1 auto;
+  min-height:0;
+  flex-direction:column;
+  background:#08111a;
+  overflow:hidden;
+}
+.firestore-browser-toolbar{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:7px;
+  padding:8px;
+  border-bottom:1px solid #203447;
+  background:#0a151f;
+}
+.firestore-filter-box{display:grid;gap:3px;min-width:0;}
+.firestore-filter-box span{font-size:8px;color:#7690a6;}
+.firestore-filter-box input{
+  width:100%;min-width:0;height:30px;box-sizing:border-box;padding:0 8px;
+  border:1px solid #314b63;border-radius:5px;background:#0b1722;color:#d8e8f5;
+  font-size:9px;outline:none;
+}
+.firestore-filter-box input:focus{border-color:#4a8bc0;box-shadow:0 0 0 2px rgba(74,139,192,.12);}
+.firestore-browser-summary{
+  min-height:34px;display:flex;align-items:center;gap:8px;padding:0 9px;
+  border-bottom:1px solid #203447;background:#0d1924;color:#7f98ad;font-size:9px;
+}
+.firestore-browser-summary strong{color:#cfe3f3;font-size:10px;}
+.firestore-browser-summary span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.firestore-browser-summary button{
+  margin-left:auto;height:24px;padding:0 7px;border:1px solid #304a60;border-radius:4px;
+  background:#102235;color:#9fc6e5;font-size:8px;cursor:pointer;white-space:nowrap;
+}
+.firestore-browser-summary button:hover:not(:disabled){background:#17324b;}
+.firestore-browser-summary button:disabled{opacity:.45;cursor:not-allowed;}
+.firestore-browser-main{
+  flex:1 1 auto;min-height:0;display:grid;
+  grid-template-rows:minmax(380px,48%) minmax(450px,52%);
+  overflow:hidden;
+}
+.firestore-browser-top{
+  min-height:0;display:grid;grid-template-columns:minmax(135px,42%) minmax(0,58%);
+  border-bottom:1px solid #294155;overflow:hidden;
+}
+.firestore-collection-pane,.firestore-document-pane{
+  min-width:0;min-height:0;display:flex;flex-direction:column;background:#09131d;overflow:hidden;
+}
+.firestore-collection-pane{border-right:1px solid #294155;}
+.firestore-pane-head{
+  min-height:36px;display:flex;align-items:center;gap:6px;padding:0 8px;
+  border-bottom:1px solid #203447;background:#0d1924;color:#8ea7ba;
+}
+.firestore-pane-head strong{font-size:9px;color:#cfe1ef;}
+.firestore-pane-head small{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:8px;color:#6f899f;}
+.firestore-pane-head button{
+  margin-left:auto;width:25px;height:24px;border:1px solid #304a60;border-radius:4px;
+  background:#102235;color:#9fc6e5;font-size:11px;cursor:pointer;
+}
+.firestore-pane-scroll{
+  flex:1 1 auto;min-height:0;overflow:auto;padding:5px 4px 8px;
+  scrollbar-gutter:stable;scrollbar-color:#4d7091 #09111a;
+}
+.firestore-pane-scroll::-webkit-scrollbar,.firestore-detail-content::-webkit-scrollbar{width:10px;height:10px;}
+.firestore-pane-scroll::-webkit-scrollbar-track,.firestore-detail-content::-webkit-scrollbar-track{background:#09111a;}
+.firestore-pane-scroll::-webkit-scrollbar-thumb,.firestore-detail-content::-webkit-scrollbar-thumb{background:#476a8b;border-radius:7px;border:2px solid #09111a;}
+.firestore-tree-row{
+  width:100%;min-width:0;height:30px;display:flex;align-items:center;gap:6px;padding:0 7px;
+  border:0;border-radius:4px;background:transparent;color:#b7cadb;text-align:left;cursor:pointer;overflow:hidden;
+}
+.firestore-tree-row:hover{background:#10263a;color:#edf8ff;}
+.firestore-tree-row.active{background:#173750;box-shadow:inset 2px 0 0 #4e9bd3;}
+.firestore-tree-row>span{flex:0 0 15px;color:#7fa5c4;text-align:center;}
+.firestore-tree-row code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:Consolas,'D2Coding',monospace;font-size:9px;color:#d5e6f4;}
+.firestore-tree-row small{margin-left:auto;font-size:7px;color:#758fa5;white-space:nowrap;}
+.firestore-truncated{padding:5px 7px;border-top:1px solid #4b4127;background:#211b0d;color:#cfb66f;font-size:7px;}
+.firestore-detail-pane{display:flex;min-height:0;flex-direction:column;background:#0a141e;overflow:hidden;}
+.firestore-detail-head{
+  min-height:45px;display:flex;align-items:center;gap:8px;padding:0 9px;
+  border-bottom:1px solid #24394c;background:#0e1a25;
+}
+.firestore-detail-head>div{display:grid;gap:2px;min-width:0;flex:1;}
+.firestore-detail-head strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e6f2fb;font-family:Consolas,'D2Coding',monospace;font-size:11px;}
+.firestore-detail-head small{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#708da4;font-size:8px;}
+.firestore-detail-head>button{width:28px;height:26px;border:1px solid #34506a;border-radius:4px;background:#12263a;color:#bddcf2;cursor:pointer;}
+.firestore-detail-meta{display:flex;flex-wrap:wrap;gap:8px 14px;padding:7px 9px;border-bottom:1px solid #223648;color:#7891a6;font-size:8px;}
+.firestore-detail-meta strong{color:#bcd1e2;font-weight:600;}
+.firestore-detail-content{flex:1 1 auto;min-height:0;overflow:auto;padding:8px;scrollbar-gutter:stable;}
+.firestore-value-table{width:100%;height:auto!important;border-collapse:collapse;table-layout:fixed;font-size:8px;color:#c5d7e5;align-self:flex-start;}
+.firestore-value-table thead,.firestore-value-table tbody{height:auto!important;}
+.firestore-value-table tr{height:auto!important;min-height:0;}
+.firestore-value-table th{height:29px;min-height:29px;padding:0 6px;border:1px solid #2a4358;background:#10202d;color:#9db7cb;text-align:left;font-weight:700;vertical-align:middle;}
+.firestore-value-table td{height:auto!important;min-height:28px;padding:6px;border:1px solid #233b4e;background:#0c1823;vertical-align:top;word-break:break-word;}
+.firestore-value-table tr:nth-child(even) td{background:#0e1b27;}
+.firestore-value-table th:nth-child(1),.firestore-value-table td:nth-child(1){width:24%;}
+.firestore-value-table th:nth-child(2),.firestore-value-table td:nth-child(2){width:18%;}
+.firestore-value-table td code{font-family:Consolas,'D2Coding',monospace;color:#d3e4f1;font-size:8px;}
+.firestore-value-table td pre{margin:0;font-family:Consolas,'D2Coding',monospace;color:#c6d8e6;font-size:8px;line-height:1.45;white-space:pre-wrap;word-break:break-word;}
+.firestore-field-type{display:inline-flex;padding:2px 4px;border-radius:3px;background:#24364a;color:#a8c5dd;font-size:7px;font-weight:700;}
+.firestore-field-type.string{background:#3d265d;color:#d8b9ff;}
+.firestore-field-type.integer,.firestore-field-type.number{background:#173b5a;color:#9ed5ff;}
+.firestore-field-type.boolean{background:#164735;color:#9ce4bd;}
+.firestore-field-type.map,.firestore-field-type.array{background:#4a3518;color:#efd09a;}
+.firestore-subcollections{margin-top:8px;padding:7px;border:1px solid #294155;border-radius:5px;background:#0b1722;display:flex;flex-wrap:wrap;gap:5px;align-items:center;}
+.firestore-subcollections strong{font-size:8px;color:#9eb8cc;margin-right:3px;}
+.firestore-subcollections span{padding:2px 5px;border-radius:3px;background:#17324b;color:#a8d3f2;font-size:7px;font-family:Consolas,'D2Coding',monospace;}
+@media(max-width:1100px){
+  .firestore-browser-toolbar{grid-template-columns:1fr;}
+  .firestore-browser-top{grid-template-columns:1fr;grid-template-rows:minmax(150px,1fr) minmax(180px,1fr);}
+  .firestore-collection-pane{border-right:0;border-bottom:1px solid #294155;}
+}
+
+/* ===== v5.286 Firestore context Python scripts + import card layout ===== */
+.firestore-import-card{grid-template-columns:minmax(0,1fr);align-items:stretch;}
+.firestore-import-card>div{width:100%;}
+.firestore-import-card button{width:100%;min-height:38px;margin-top:2px;}
+.firestore-tree-row.collection,.firestore-tree-row.document{cursor:context-menu;}
+.firestore-context-menu{min-width:306px;max-width:350px;}
+.firestore-context-menu .firestore-menu-danger{color:#ffadb5;}
+.firestore-context-menu .firestore-menu-danger:hover:not(:disabled){background:#341b22;}
+.firestore-context-note{border-top:1px solid #25394b;margin-top:4px;padding:8px 10px;color:#8298ad;font-size:9px;line-height:1.45;}
+
+
+/* ===== v5.287 Firestore compact field rows ===== */
+/* Document Field rows must size to their content instead of stretching to fill the detail pane. */
+.firestore-detail-content{align-content:start;}
+.firestore-detail-content>.firestore-value-table{height:max-content!important;min-height:0!important;}
+.firestore-value-table tbody tr,.firestore-value-table tbody td{block-size:auto!important;}
+.firestore-value-table td pre{min-height:0!important;max-height:180px;overflow:auto;}
+
+/* ===== v5.288 PowerPoint inline preview ===== */
+.presentation-viewer-toolbar .presentation-viewer-status{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:8px;
+  min-width:0;
+}
+.presentation-viewer-toolbar .presentation-viewer-status>span{
+  flex:0 0 auto;
+  padding:3px 7px;
+  border:1px solid #31506f;
+  border-radius:999px;
+  background:#14263a;
+  color:#a9c8ea;
+  font-size:10px;
+}
+.presentation-viewer-toolbar .presentation-viewer-status small{
+  flex:0 1 auto;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.presentation-viewer-toolbar .presentation-viewer-status button{
+  flex:0 0 auto;
+  min-width:0;
+  padding:5px 8px;
+  border:1px solid #30455e;
+  background:#152131;
+  color:#b9cae0;
+  border-radius:6px;
+}
+.presentation-viewer-message{
+  min-height:360px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:8px;
+  padding:28px;
+  text-align:center;
+  background:#0b1119;
+  color:#8fa6c4;
+}
+.presentation-viewer-message strong{
+  color:#dce8f8;
+  font-size:15px;
+}
+.presentation-viewer-message span{
+  max-width:720px;
+  color:#94a9c5;
+  font-size:12px;
+  line-height:1.6;
+}
+.presentation-viewer-message small{
+  max-width:720px;
+  color:#7288a8;
+  font-size:10px;
+  line-height:1.6;
+}
+.presentation-viewer-message.error{
+  background:#140f13;
+}
+.presentation-viewer-message.error strong{
+  color:#ffb3b3;
+}
+.presentation-viewer-message.error span{
+  color:#e49c9c;
+}
+@media(max-width:900px){
+  .presentation-viewer-toolbar .presentation-viewer-status{
+    width:100%;
+    justify-content:flex-start;
+    flex-wrap:wrap;
+  }
+  .presentation-viewer-toolbar .presentation-viewer-status small{
+    flex:1 1 100%;
+    white-space:normal;
+  }
+}
+
+/* ===== v5.290 PowerPoint Windows COM fallback diagnostics ===== */
+.presentation-viewer-attempts{
+  width:min(920px,92%);
+  display:grid;
+  gap:8px;
+  margin-top:4px;
+  text-align:left;
+}
+.presentation-viewer-attempts>div{
+  display:grid;
+  grid-template-columns:minmax(150px,210px) 1fr;
+  gap:6px 12px;
+  padding:9px 11px;
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:7px;
+  background:rgba(0,0,0,.18);
+}
+.presentation-viewer-attempts b{font-size:12px;color:#f4c7c7}
+.presentation-viewer-attempts em{font-size:12px;font-style:normal;color:#d9b5b5;overflow-wrap:anywhere}
+.presentation-viewer-attempts code{
+  grid-column:1/-1;
+  max-height:120px;
+  overflow:auto;
+  white-space:pre-wrap;
+  font-size:11px;
+  color:#b9c7d7;
+  background:#07111b;
+  padding:7px;
+  border-radius:5px;
+}
+
+/* ===== v5.294 Firestore content-sized field grid ===== */
+/*
+ * The previous HTML table could distribute spare vertical space across a
+ * small number of rows inside the tall DB detail pane on Chromium.  Render
+ * field data as an explicit CSS grid so every field row is always sized by
+ * its own content, regardless of the available panel height.
+ */
+.firestore-field-grid{
+  width:100%;
+  display:flex;
+  flex:0 0 auto;
+  flex-direction:column;
+  align-self:flex-start;
+  border-top:1px solid #2a4358;
+  border-left:1px solid #2a4358;
+  color:#c5d7e5;
+  font-size:8px;
+}
+.firestore-field-grid-head,
+.firestore-field-row{
+  display:grid;
+  grid-template-columns:minmax(0,24%) minmax(46px,18%) minmax(0,1fr);
+  flex:0 0 auto;
+  min-height:0;
+  align-items:start;
+}
+.firestore-field-grid-head{
+  min-height:29px;
+  background:#10202d;
+  color:#9db7cb;
+  font-weight:700;
+}
+.firestore-field-grid-head>span,
+.firestore-field-cell{
+  min-width:0;
+  border-right:1px solid #2a4358;
+  border-bottom:1px solid #2a4358;
+}
+.firestore-field-grid-head>span{
+  display:flex;
+  min-height:29px;
+  align-items:center;
+  padding:0 6px;
+}
+.firestore-field-row{
+  background:#0c1823;
+}
+.firestore-field-row:nth-child(odd){
+  background:#0e1b27;
+}
+.firestore-field-cell{
+  min-height:28px;
+  height:auto;
+  padding:6px;
+  box-sizing:border-box;
+  overflow:hidden;
+  word-break:break-word;
+}
+.firestore-field-cell.name code{
+  font-family:Consolas,'D2Coding',monospace;
+  color:#d3e4f1;
+  font-size:8px;
+  white-space:pre-wrap;
+  word-break:break-word;
+}
+.firestore-field-cell.value pre{
+  margin:0;
+  min-height:0;
+  max-height:180px;
+  overflow:auto;
+  font-family:Consolas,'D2Coding',monospace;
+  color:#c6d8e6;
+  font-size:8px;
+  line-height:1.45;
+  white-space:pre-wrap;
+  word-break:break-word;
+}

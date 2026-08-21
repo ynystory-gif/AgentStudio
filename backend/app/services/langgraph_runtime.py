@@ -5,6 +5,7 @@ import time
 
 from app.core.config import get_settings
 from app.services.agent_workflow import build_workflow
+from app.services.langgraph_postgres_connection import open_schema_pinned_checkpointer
 
 
 class AgentGraphRuntime:
@@ -57,9 +58,10 @@ class AgentGraphRuntime:
             if not url:
                 raise RuntimeError("LANGGRAPH_DATABASE_URL이 비어 있습니다.")
 
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
-            cm = AsyncPostgresSaver.from_conn_string(url)
+            # v5.296: the helper explicitly applies search_path on the exact
+            # psycopg session used by LangGraph. This avoids Supabase PgBouncer
+            # silently losing the startup search_path URL option.
+            cm = open_schema_pinned_checkpointer(url)
             checkpointer = await cm.__aenter__()
             try:
                 # 실제 PostgreSQL 연결 + LangGraph checkpoint 테이블 준비까지 성공해야

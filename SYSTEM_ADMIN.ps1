@@ -37,7 +37,7 @@ if (-not $IsAdministrator) {
     }
 }
 
-$ExpectedAgentStudioVersion = "5.284"
+$ExpectedAgentStudioVersion = "5.306"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BackendDir = Join-Path $Root "backend"
@@ -504,7 +504,11 @@ try {
 $frontendNodeModules = Join-Path $FrontendDir "node_modules"
 $requiredFrontendPackages = @(
     "@xterm/xterm",
-    "@xterm/addon-fit"
+    "@xterm/addon-fit",
+    "typescript",
+    "@types/node",
+    "@types/react",
+    "@types/react-dom"
 )
 
 $needNpmInstall = -not (Test-Path $frontendNodeModules)

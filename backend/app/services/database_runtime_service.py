@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import UniqueConstraint, inspect, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -10,12 +10,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.config import get_settings
 from app.core.database import (
     Base,
+    create_agentstudio_async_engine,
     migrate_agentstudio_schema_on_connection,
     normalize_async_database_url,
+    normalize_schema_name,
+    postgres_search_path,
+    quote_identifier,
     rebind_database,
 )
 from app.core.machine_identity import current_pc_name
 from app.models.entities import AppSetting
+from app.services.langgraph_postgres_connection import open_schema_pinned_checkpointer
 
 
 PROVIDER_LOCAL = "local"
@@ -28,6 +33,8 @@ SUPABASE_TARGET_SETTING_KEY = "AGENTSTUDIO_SUPABASE_TARGET"
 ENV_PROVIDER_KEY = "AGENTSTUDIO_DATABASE_PROVIDER"
 ENV_SUPABASE_DATABASE_URL = "SUPABASE_DATABASE_URL"
 ENV_SUPABASE_LANGGRAPH_DATABASE_URL = "SUPABASE_LANGGRAPH_DATABASE_URL"
+ENV_SUPABASE_DB_SCHEMA = "SUPABASE_DB_SCHEMA"
+DEFAULT_SUPABASE_DB_SCHEMA = "theanova_agentstudio"
 
 _SCHEMA_PATH = Path(__file__).resolve().parents[2] / "sql" / "supabase_agentstudio_full_schema.sql"
 
@@ -50,6 +57,36 @@ def _langgraph_url_from_database_url(value: str) -> str:
         if url.startswith(prefix):
             return "postgresql://" + url[len(prefix):]
     return url
+
+
+def _postgres_url_with_search_path(value: str, schema: str) -> str:
+    """Add a psycopg startup search_path without persisting it into the saved URL."""
+    base = _langgraph_url_from_database_url(value)
+    target_schema = normalize_schema_name(schema, default=DEFAULT_SUPABASE_DB_SCHEMA)
+    parts = urlsplit(base)
+    query = [(key, val) for key, val in parse_qsl(parts.query, keep_blank_values=True) if key.lower() != "options"]
+    query.append(("options", f"-csearch_path={postgres_search_path(target_schema)}"))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def configured_supabase_schema() -> str:
+    settings = get_settings()
+    return normalize_schema_name(
+        getattr(settings, "supabase_db_schema", ""),
+        default=DEFAULT_SUPABASE_DB_SCHEMA,
+    )
+
+
+def _validate_supabase_persistent_connection(value: str) -> None:
+    """AgentStudio is a persistent backend; avoid Supabase transaction pooler for schema-pinned sessions."""
+    parsed = urlsplit(_langgraph_url_from_database_url(value))
+    host = str(parsed.hostname or "").lower()
+    port = parsed.port or 5432
+    if host.endswith(".pooler.supabase.com") and port == 6543:
+        raise ValueError(
+            "AgentStudio의 Supabase custom schema/LangGraph 연결은 transaction pooler(6543)가 아니라 "
+            "Session pooler(5432) 또는 Direct connection을 사용해야 합니다."
+        )
 
 
 def _target_label(value: str) -> str:
@@ -92,6 +129,7 @@ def schema_script_info() -> dict[str, Any]:
         "path": str(_SCHEMA_PATH),
         "exists": _SCHEMA_PATH.exists(),
         "file_name": _SCHEMA_PATH.name,
+        "default_schema": DEFAULT_SUPABASE_DB_SCHEMA,
     }
 
 
@@ -190,11 +228,24 @@ async def _save_local_provider_state(provider: str, supabase_url: str = "") -> N
         await local_engine.dispose()
 
 
-async def _test_target_database(database_url: str) -> None:
-    candidate = create_async_engine(normalize_async_database_url(database_url), pool_pre_ping=True)
+async def _test_target_database(database_url: str, *, schema: str = "") -> None:
+    target_schema = normalize_schema_name(schema)
+    candidate = create_agentstudio_async_engine(database_url, schema=target_schema)
     try:
         async with candidate.connect() as conn:
             await conn.execute(text("SELECT 1"))
+            if target_schema:
+                exists = bool((await conn.execute(
+                    text("SELECT to_regnamespace(:schema_name) IS NOT NULL"),
+                    {"schema_name": target_schema},
+                )).scalar())
+                if not exists:
+                    raise RuntimeError(f"Supabase 스키마 '{target_schema}'가 존재하지 않습니다.")
+                actual = str((await conn.execute(text("SELECT current_schema()"))).scalar() or "")
+                if actual != target_schema:
+                    raise RuntimeError(
+                        f"Supabase search_path 적용 실패: 기대={target_schema}, 실제={actual or '-'}"
+                    )
     finally:
         await candidate.dispose()
 
@@ -207,21 +258,29 @@ LANGGRAPH_REQUIRED_TABLES = {
 }
 
 
-def _ensure_metadata_indexes(sync_conn) -> list[str]:
-    """Create metadata-defined indexes only when they are missing."""
+def _ensure_metadata_indexes(sync_conn, schema: str) -> list[str]:
+    """Create metadata-defined indexes using an explicit schema-aware existence check."""
+    target_schema = normalize_schema_name(schema, default="public")
+    inspector = inspect(sync_conn)
+    translated = sync_conn.execution_options(schema_translate_map={None: target_schema})
     created_or_verified: list[str] = []
     for table in Base.metadata.sorted_tables:
+        existing = {
+            str(item.get("name") or "")
+            for item in inspector.get_indexes(table.name, schema=target_schema)
+        }
         for index in sorted(table.indexes, key=lambda item: item.name or ""):
-            index.create(bind=sync_conn, checkfirst=True)
+            if index.name and index.name not in existing:
+                index.create(bind=translated, checkfirst=False)
             if index.name:
                 created_or_verified.append(index.name)
     return created_or_verified
 
 
-def _inspect_agentstudio_schema(sync_conn) -> dict[str, Any]:
-    """Compare the live PostgreSQL schema with the current SQLAlchemy metadata."""
+def _inspect_agentstudio_schema(sync_conn, schema: str) -> dict[str, Any]:
+    """Compare one explicit AgentStudio schema with the current SQLAlchemy metadata."""
     inspector = inspect(sync_conn)
-    schema = inspector.default_schema_name or "public"
+    schema = normalize_schema_name(schema, default="public")
     actual_tables = set(inspector.get_table_names(schema=schema))
 
     expected_tables = {table.name for table in Base.metadata.sorted_tables}
@@ -331,17 +390,22 @@ def _inspect_agentstudio_schema(sync_conn) -> dict[str, Any]:
     }
 
 
-async def _prepare_agentstudio_schema_transaction(candidate) -> dict[str, Any]:
+async def _prepare_agentstudio_schema_transaction(candidate, schema: str) -> dict[str, Any]:
     """Prepare pgvector + AgentStudio tables in one PostgreSQL transaction."""
     import app.models.entities  # noqa: F401
 
+    target_schema = normalize_schema_name(schema, default=DEFAULT_SUPABASE_DB_SCHEMA)
+    qschema = quote_identifier(target_schema)
     migration: dict[str, Any] = {"ok": False, "count": 0, "applied": []}
     verification: dict[str, Any] = {"ok": False}
     indexes: list[str] = []
     extension_status = ""
 
     async with candidate.begin() as conn:
-        # Preflight first. Supabase normally exposes vector, but a project/role can still deny CREATE EXTENSION.
+        # User schema is isolated from public. pgvector follows Supabase's extensions schema.
+        await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {qschema}"))
+        await conn.execute(text('CREATE SCHEMA IF NOT EXISTS "extensions"'))
+
         available = bool((await conn.execute(text(
             "SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name='vector')"
         ))).scalar())
@@ -351,28 +415,54 @@ async def _prepare_agentstudio_schema_transaction(candidate) -> dict[str, Any]:
         if not available and not installed_before:
             raise RuntimeError("Supabase PostgreSQL에서 pgvector(vector) 확장을 사용할 수 없습니다.")
 
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        if not installed_before:
+            await conn.execute(text('CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA "extensions"'))
         installed_after = bool((await conn.execute(text(
             "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='vector')"
         ))).scalar())
         if not installed_after:
             raise RuntimeError("pgvector(vector) 확장 설치 확인에 실패했습니다.")
+
+        vector_schema = str((await conn.execute(text(
+            """
+            SELECT n.nspname
+            FROM pg_extension e
+            JOIN pg_namespace n ON n.oid = e.extnamespace
+            WHERE e.extname = 'vector'
+            """
+        ))).scalar() or "")
+        if vector_schema != "extensions":
+            raise RuntimeError(
+                "pgvector(vector)가 extensions 스키마가 아닌 "
+                f"'{vector_schema or 'unknown'}'에 설치되어 있습니다. "
+                "AgentStudio는 Supabase의 extensions.vector 구성을 사용합니다."
+            )
         extension_status = "already_installed" if installed_before else "installed"
 
-        # create_all + compatibility ALTERs + index reconciliation share this transaction.
+        # CREATE SCHEMA 이후 transaction의 search_path도 즉시 맞춘다.
+        await conn.execute(text(
+            f'SET LOCAL search_path TO {qschema}, "extensions", "public"'
+        ))
+
+        # schema_translate_map explicitly qualifies all SQLAlchemy ORM tables.
         await conn.run_sync(Base.metadata.create_all)
-        migration = await migrate_agentstudio_schema_on_connection(conn)
-        indexes = await conn.run_sync(_ensure_metadata_indexes)
-        verification = await conn.run_sync(_inspect_agentstudio_schema)
+        migration = await migrate_agentstudio_schema_on_connection(conn, schema=target_schema)
+        indexes = await conn.run_sync(
+            lambda sync_conn: _ensure_metadata_indexes(sync_conn, target_schema)
+        )
+        verification = await conn.run_sync(
+            lambda sync_conn: _inspect_agentstudio_schema(sync_conn, target_schema)
+        )
         if not verification.get("ok"):
             raise RuntimeError(
-                "AgentStudio 스키마 검증 실패: "
-                + _schema_problem_summary(verification)
+                "AgentStudio 스키마 검증 실패: " + _schema_problem_summary(verification)
             )
 
     return {
         "ok": True,
+        "schema": target_schema,
         "vector": extension_status,
+        "vector_schema": "extensions",
         "migration": migration,
         "indexes": indexes,
         "verification": verification,
@@ -400,26 +490,35 @@ def _schema_problem_summary(verification: dict[str, Any]) -> str:
     return " / ".join(parts) or "세부 정보를 확인하세요."
 
 
-async def _setup_and_verify_langgraph(langgraph_database_url: str) -> dict[str, Any]:
-    """Use the installed LangGraph package as the authoritative checkpoint migration source."""
-    try:
-        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+async def _setup_and_verify_langgraph(langgraph_database_url: str, schema: str) -> dict[str, Any]:
+    """
+    Use the installed LangGraph package as the authoritative checkpoint migration source.
 
-        async with AsyncPostgresSaver.from_conn_string(langgraph_database_url) as checkpointer:
+    Python langgraph-checkpoint-postgres currently uses unqualified table names, so
+    the official setup/runtime is pinned to the same custom schema through the
+    PostgreSQL connection search_path.
+    """
+    target_schema = normalize_schema_name(schema, default=DEFAULT_SUPABASE_DB_SCHEMA)
+    scoped_url = _postgres_url_with_search_path(langgraph_database_url, target_schema)
+    try:
+        # v5.296: do not rely on PgBouncer/startup URL options for custom schema.
+        # Pin search_path on the exact psycopg session used by LangGraph setup().
+        async with open_schema_pinned_checkpointer(
+            scoped_url,
+            schema=target_schema,
+        ) as checkpointer:
             await checkpointer.setup()
     except Exception as exc:
         return {
             "ok": False,
             "phase": "langgraph_setup",
+            "schema": target_schema,
             "tables": [],
             "missing_tables": sorted(LANGGRAPH_REQUIRED_TABLES),
             "message": f"LangGraph 공식 Checkpointer migration 실패: {exc}",
         }
 
-    engine = create_async_engine(
-        normalize_async_database_url(langgraph_database_url),
-        pool_pre_ping=True,
-    )
+    engine = create_agentstudio_async_engine(langgraph_database_url, schema=target_schema)
     try:
         async with engine.connect() as conn:
             rows = (
@@ -427,7 +526,25 @@ async def _setup_and_verify_langgraph(langgraph_database_url: str) -> dict[str, 
                     """
                     SELECT tablename
                     FROM pg_tables
-                    WHERE schemaname = current_schema()
+                    WHERE schemaname = :schema_name
+                      AND tablename IN (
+                        'checkpoint_migrations',
+                        'checkpoints',
+                        'checkpoint_blobs',
+                        'checkpoint_writes'
+                      )
+                    ORDER BY tablename
+                    """
+                ), {"schema_name": target_schema})
+            ).scalars().all()
+            tables = {str(name) for name in rows}
+            missing = sorted(LANGGRAPH_REQUIRED_TABLES - tables)
+            public_rows = (
+                await conn.execute(text(
+                    """
+                    SELECT tablename
+                    FROM pg_tables
+                    WHERE schemaname = 'public'
                       AND tablename IN (
                         'checkpoint_migrations',
                         'checkpoints',
@@ -438,12 +555,12 @@ async def _setup_and_verify_langgraph(langgraph_database_url: str) -> dict[str, 
                     """
                 ))
             ).scalars().all()
-            tables = {str(name) for name in rows}
-            missing = sorted(LANGGRAPH_REQUIRED_TABLES - tables)
+            misplaced_public_tables = [str(name) for name in public_rows]
             migration_count = 0
             if "checkpoint_migrations" in tables:
+                qschema = quote_identifier(target_schema)
                 migration_count = int((await conn.execute(text(
-                    "SELECT COUNT(*) FROM checkpoint_migrations"
+                    f'SELECT COUNT(*) FROM {qschema}."checkpoint_migrations"'
                 ))).scalar() or 0)
     finally:
         await engine.dispose()
@@ -451,18 +568,31 @@ async def _setup_and_verify_langgraph(langgraph_database_url: str) -> dict[str, 
     return {
         "ok": not missing,
         "phase": "langgraph_verify",
+        "schema": target_schema,
         "tables": sorted(tables),
         "missing_tables": missing,
         "migration_count": migration_count,
+        "misplaced_public_tables": misplaced_public_tables,
         "message": (
-            "LangGraph 공식 Checkpointer setup/검증 완료"
+            f"LangGraph 공식 Checkpointer setup/검증 완료 ({target_schema})"
             if not missing
-            else "LangGraph 필수 테이블 누락: " + ", ".join(missing)
+            else (
+                "LangGraph 필수 테이블 누락: " + ", ".join(missing)
+                + (
+                    " / public에 잘못 생성된 기존 테이블 감지: "
+                    + ", ".join(misplaced_public_tables)
+                    if misplaced_public_tables else ""
+                )
+            )
         ),
     }
 
 
-async def initialize_supabase_schema(database_url: str, langgraph_database_url: str = "") -> dict[str, Any]:
+async def initialize_supabase_schema(
+    database_url: str,
+    langgraph_database_url: str = "",
+    schema: str = "",
+) -> dict[str, Any]:
     """
     Create/upgrade the selected Supabase PostgreSQL idempotently.
 
@@ -471,6 +601,11 @@ async def initialize_supabase_schema(database_url: str, langgraph_database_url: 
     """
     database_url = str(database_url or configured_supabase_database_url()).strip()
     database_url = _validate_postgresql_url(database_url, "Supabase DATABASE URL")
+    _validate_supabase_persistent_connection(database_url)
+    target_schema = normalize_schema_name(
+        schema or configured_supabase_schema(),
+        default=DEFAULT_SUPABASE_DB_SCHEMA,
+    )
     langgraph_database_url = str(
         langgraph_database_url
         or configured_supabase_langgraph_url()
@@ -481,10 +616,7 @@ async def initialize_supabase_schema(database_url: str, langgraph_database_url: 
         "Supabase LangGraph DB URL",
     )
 
-    candidate = create_async_engine(
-        normalize_async_database_url(database_url),
-        pool_pre_ping=True,
-    )
+    candidate = create_agentstudio_async_engine(database_url, schema=target_schema)
     try:
         try:
             async with candidate.connect() as conn:
@@ -494,31 +626,34 @@ async def initialize_supabase_schema(database_url: str, langgraph_database_url: 
                 "ok": False,
                 "phase": "connection",
                 "target": _target_label(database_url),
+                "schema": target_schema,
                 "rolled_back": True,
                 "message": f"Supabase 연결 확인 실패: {exc}",
             }
 
         try:
-            agentstudio = await _prepare_agentstudio_schema_transaction(candidate)
+            agentstudio = await _prepare_agentstudio_schema_transaction(candidate, target_schema)
         except Exception as exc:
             # candidate.begin() guarantees rollback for AgentStudio DDL on this phase.
             return {
                 "ok": False,
                 "phase": "agentstudio_schema",
                 "target": _target_label(database_url),
+                "schema": target_schema,
                 "rolled_back": True,
                 "message": f"Supabase AgentStudio 스키마 준비 실패(변경사항 rollback): {exc}",
             }
     finally:
         await candidate.dispose()
 
-    langgraph = await _setup_and_verify_langgraph(langgraph_database_url)
+    langgraph = await _setup_and_verify_langgraph(langgraph_database_url, target_schema)
     verification = dict(agentstudio.get("verification") or {})
     if not langgraph.get("ok"):
         return {
             "ok": False,
             "phase": "langgraph",
             "target": _target_label(database_url),
+            "schema": target_schema,
             "rolled_back": False,
             "agentstudio_schema_committed": True,
             "agentstudio_table_count": int(verification.get("actual_agentstudio_table_count") or 0),
@@ -536,6 +671,7 @@ async def initialize_supabase_schema(database_url: str, langgraph_database_url: 
         "ok": True,
         "phase": "complete",
         "target": _target_label(database_url),
+        "schema": target_schema,
         "vector": agentstudio.get("vector"),
         "agentstudio_table_count": int(verification.get("actual_agentstudio_table_count") or 0),
         "tables": verification.get("expected_tables") or [],
@@ -546,7 +682,7 @@ async def initialize_supabase_schema(database_url: str, langgraph_database_url: 
         "langgraph_error": "",
         "schema_script": schema_script_info(),
         "message": (
-            f"Supabase 스키마 준비/재검증 완료: AgentStudio {verification.get('actual_agentstudio_table_count', 0)}개 테이블"
+            f"Supabase 스키마 준비/재검증 완료 [{target_schema}]: AgentStudio {verification.get('actual_agentstudio_table_count', 0)}개 테이블"
             f" · LangGraph {len(langgraph.get('tables') or [])}개 테이블 · 재실행 안전"
         ),
     }
@@ -571,6 +707,7 @@ async def runtime_status() -> dict[str, Any]:
         "local_target": _target_label(local_database_url()),
         "supabase_configured": bool(configured_supabase_database_url()),
         "supabase_target": _target_label(configured_supabase_database_url()),
+        "supabase_schema": configured_supabase_schema(),
         "langgraph_target": _target_label(current_runtime_langgraph_url()),
         "local_settings_db": _target_label(local_database_url()),
         "local_state_error": local_state_error,
@@ -579,11 +716,77 @@ async def runtime_status() -> dict[str, Any]:
     }
 
 
+async def save_supabase_runtime_settings(
+    database_url: str = "",
+    langgraph_database_url: str = "",
+    schema: str = "",
+) -> dict[str, Any]:
+    """Persist Supabase connection information without changing the active runtime provider.
+
+    Secrets stay in backend/.env only. The API never returns the raw URLs.
+    A blank LangGraph URL intentionally means "derive it from SUPABASE_DATABASE_URL".
+    """
+    from app.services.settings_service import write_env_values
+
+    resolved_database_url = str(database_url or configured_supabase_database_url()).strip()
+    resolved_database_url = _validate_postgresql_url(resolved_database_url, "Supabase DATABASE URL")
+    _validate_supabase_persistent_connection(resolved_database_url)
+
+    # 빈 값은 기존에 별도 저장된 LangGraph URL을 유지합니다. 별도 값이 없으면
+    # configured_supabase_langgraph_url()이 DATABASE URL에서 자동 파생합니다.
+    existing_explicit_langgraph = str(
+        getattr(get_settings(), "supabase_langgraph_database_url", "") or ""
+    ).strip()
+    raw_langgraph_url = str(langgraph_database_url or existing_explicit_langgraph or "").strip()
+    if raw_langgraph_url:
+        _validate_postgresql_url(raw_langgraph_url, "Supabase LangGraph DB URL")
+        _validate_supabase_persistent_connection(raw_langgraph_url)
+
+    target_schema = normalize_schema_name(
+        schema or configured_supabase_schema(),
+        default=DEFAULT_SUPABASE_DB_SCHEMA,
+    )
+
+    write_env_values({
+        ENV_SUPABASE_DATABASE_URL: resolved_database_url,
+        ENV_SUPABASE_LANGGRAPH_DATABASE_URL: raw_langgraph_url,
+        ENV_SUPABASE_DB_SCHEMA: target_schema,
+    })
+    get_settings.cache_clear()
+
+    # Verify persistence through the same Settings path used after a Backend restart.
+    persisted_database_url = configured_supabase_database_url()
+    persisted_schema = configured_supabase_schema()
+    if persisted_database_url != resolved_database_url or persisted_schema != target_schema:
+        raise OSError("Supabase 연결 정보를 backend/.env에 저장한 뒤 재조회하는 데 실패했습니다.")
+
+    persisted_explicit_langgraph = str(
+        getattr(get_settings(), "supabase_langgraph_database_url", "") or ""
+    ).strip()
+    if persisted_explicit_langgraph != raw_langgraph_url:
+        raise OSError("Supabase LangGraph DB URL 저장 확인에 실패했습니다.")
+
+    return {
+        "ok": True,
+        "storage": "backend/.env",
+        "target": _target_label(resolved_database_url),
+        "supabase_schema": target_schema,
+        "langgraph_mode": "separate_url" if raw_langgraph_url else "database_url_auto",
+        "active_provider": _ACTIVE_PROVIDER,
+        "runtime_changed": False,
+        "message": (
+            "Supabase PostgreSQL 연결 정보를 backend/.env에 저장했습니다. "
+            "현재 Runtime DB는 변경하지 않았습니다. 이후 URL 입력칸을 비워도 저장된 정보를 자동 사용합니다."
+        ),
+    }
+
+
 async def activate_database_provider(
     provider: str,
     *,
     supabase_database_url: str = "",
     supabase_langgraph_database_url: str = "",
+    supabase_db_schema: str = "",
     initialize_schema: bool = True,
 ) -> dict[str, Any]:
     global _ACTIVE_PROVIDER, _LAST_ERROR
@@ -614,16 +817,21 @@ async def activate_database_provider(
 
     database_url = str(supabase_database_url or configured_supabase_database_url()).strip()
     database_url = _validate_postgresql_url(database_url, "Supabase DATABASE URL")
+    _validate_supabase_persistent_connection(database_url)
     langgraph_url = str(
         supabase_langgraph_database_url
         or configured_supabase_langgraph_url()
         or _langgraph_url_from_database_url(database_url)
     ).strip()
     langgraph_url = _validate_postgresql_url(langgraph_url, "Supabase LangGraph DB URL")
+    target_schema = normalize_schema_name(
+        supabase_db_schema or configured_supabase_schema(),
+        default=DEFAULT_SUPABASE_DB_SCHEMA,
+    )
 
     schema_result = None
     if initialize_schema:
-        schema_result = await initialize_supabase_schema(database_url, langgraph_url)
+        schema_result = await initialize_supabase_schema(database_url, langgraph_url, target_schema)
         if not bool(schema_result.get("ok")):
             _LAST_ERROR = str(schema_result.get("message") or "Supabase 스키마 준비 실패")
             active_label = "로컬 PostgreSQL" if previous_provider == PROVIDER_LOCAL else "기존 Supabase PostgreSQL"
@@ -636,7 +844,7 @@ async def activate_database_provider(
                 "message": _LAST_ERROR + f" · Runtime 전환 없이 {active_label}을 계속 사용합니다.",
             }
     else:
-        await _test_target_database(database_url)
+        await _test_target_database(database_url, schema=target_schema)
 
     local_url = _validate_postgresql_url(local_database_url(), "로컬 PostgreSQL DATABASE URL")
     local_langgraph_url = _validate_postgresql_url(
@@ -649,6 +857,7 @@ async def activate_database_provider(
     write_env_values({
         ENV_SUPABASE_DATABASE_URL: database_url,
         ENV_SUPABASE_LANGGRAPH_DATABASE_URL: langgraph_url,
+        ENV_SUPABASE_DB_SCHEMA: target_schema,
     })
     get_settings.cache_clear()
 
@@ -657,8 +866,9 @@ async def activate_database_provider(
     await _save_local_provider_state(PROVIDER_SUPABASE, database_url)
 
     try:
-        await rebind_database(database_url)
-        langgraph_ok = bool(await agent_graph_runtime.set_database_url(langgraph_url, restart=True))
+        await rebind_database(database_url, schema=target_schema)
+        scoped_langgraph_url = _postgres_url_with_search_path(langgraph_url, target_schema)
+        langgraph_ok = bool(await agent_graph_runtime.set_database_url(scoped_langgraph_url, restart=True))
         if not langgraph_ok:
             raise RuntimeError(
                 agent_graph_runtime.last_error
@@ -710,12 +920,13 @@ async def activate_database_provider(
         "ok": True,
         "active_provider": PROVIDER_SUPABASE,
         "target": _target_label(database_url),
+        "supabase_schema": target_schema,
         "local_settings_updated": True,
         "schema": schema_result,
         "langgraph_ok": True,
         "langgraph_error": "",
         "message": (
-            "Supabase PostgreSQL로 안전하게 전환했습니다. 스키마/DB/LangGraph 검증이 모두 성공한 뒤 "
+            f"Supabase PostgreSQL [{target_schema}] 스키마로 안전하게 전환했습니다. 스키마/DB/LangGraph 검증이 모두 성공한 뒤 "
             "로컬 PostgreSQL app_settings와 backend/.env provider 상태를 supabase로 확정했습니다."
         ),
     }
@@ -747,6 +958,7 @@ async def apply_saved_database_provider() -> dict[str, Any]:
 
     database_url = configured_supabase_database_url()
     langgraph_url = configured_supabase_langgraph_url()
+    target_schema = configured_supabase_schema()
     if not database_url:
         _ACTIVE_PROVIDER = PROVIDER_LOCAL
         _LAST_ERROR = "Supabase가 선택되어 있지만 SUPABASE_DATABASE_URL이 없습니다. 로컬 PostgreSQL로 안전 복귀했습니다."
@@ -754,9 +966,13 @@ async def apply_saved_database_provider() -> dict[str, Any]:
         return {"ok": False, "selected_provider": PROVIDER_SUPABASE, "active_provider": PROVIDER_LOCAL, "message": _LAST_ERROR}
 
     try:
-        await rebind_database(database_url)
-        langgraph_ok = bool(await agent_graph_runtime.set_database_url(
+        await rebind_database(database_url, schema=target_schema)
+        scoped_langgraph_url = _postgres_url_with_search_path(
             langgraph_url or _langgraph_url_from_database_url(database_url),
+            target_schema,
+        )
+        langgraph_ok = bool(await agent_graph_runtime.set_database_url(
+            scoped_langgraph_url,
             restart=False,
         ))
         if not langgraph_ok:
@@ -768,7 +984,8 @@ async def apply_saved_database_provider() -> dict[str, Any]:
             "selected_provider": PROVIDER_SUPABASE,
             "active_provider": PROVIDER_SUPABASE,
             "target": _target_label(database_url),
-            "message": "저장된 선택에 따라 Supabase PostgreSQL runtime을 적용했습니다.",
+            "supabase_schema": target_schema,
+            "message": f"저장된 선택에 따라 Supabase PostgreSQL [{target_schema}] runtime을 적용했습니다.",
         }
     except Exception as exc:
         _ACTIVE_PROVIDER = PROVIDER_LOCAL
