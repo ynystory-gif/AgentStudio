@@ -1,3 +1,17 @@
+## v5.307 TypeScript System Runtime UI Migration
+
+Frontend TypeScript Phase 7. v5.306 Terminal/WebSocket migration을 기반으로 System / Settings / Runtime 표시 계층을 단계적으로 TypeScript로 분리했습니다.
+
+- 서비스 포트 설정 UI → `src/components/system/SystemRuntimePanels.tsx`
+- AgentStudio Runtime DB / Supabase 설정 UI → `SystemRuntimePanels.tsx`
+- Ollama Runtime 상태/실행/중지/설치 UI → `SystemRuntimePanels.tsx`
+- 시스템 상태 요약 UI → `SystemRuntimePanels.tsx`
+- System/Runtime 계약 타입 → `src/types/system.ts`
+- 실제 Backend API orchestration, 비밀번호 ref, 설정 저장/테스트 로직은 `App.jsx`에 유지하여 회귀 범위를 제한
+- v5.306의 Notebook/DB Browser/Terminal TypeScript 전환과 SystemAdmin UTF-8 BOM self-heal 유지
+
+### 이전 버전 메모
+
 ## v5.306 TypeScript Terminal WebSocket Migration
 
 v5.305를 기반으로 Frontend TypeScript Phase 6를 진행했습니다.

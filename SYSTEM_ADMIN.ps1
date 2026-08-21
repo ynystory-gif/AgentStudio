@@ -37,7 +37,7 @@ if (-not $IsAdministrator) {
     }
 }
 
-$ExpectedAgentStudioVersion = "5.306"
+$ExpectedAgentStudioVersion = "5.307"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BackendDir = Join-Path $Root "backend"

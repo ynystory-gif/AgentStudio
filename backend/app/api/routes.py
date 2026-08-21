@@ -2022,7 +2022,7 @@ async def sql_workspace_postgresql_admin_script(req: SqlWorkspaceDatabaseAdminSc
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.306", "build": "TypeScriptTerminalWebSocketMigration"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.307", "build": "TypeScriptSystemRuntimeUiMigration"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():

@@ -12,11 +12,12 @@ import { AgentStudioArchitecturePanel, GeneratedAgentArchitecturePanel } from '.
 import { LlmCatalogPanel } from './components/llm/LlmCatalogPanel'
 import { DatabaseBrowserContextMenus, FirestoreBrowserPanel, RedisBrowserPanel, SqlObjectTreePanel } from './components/database/DatabaseBrowsers'
 import { TerminalPanel } from './components/terminal/TerminalPanel'
+import { OllamaSettingsPanel, RuntimeDatabasePanel, ServicePortSettingsPanel, SystemStatusSummary } from './components/system/SystemRuntimePanels'
 import { parseTerminalServerMessage, serializeTerminalClientMessage, terminalCellWidth, terminalNextCharacter, terminalPreviousCharacter } from './utils/terminal'
 import { getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isNotebookFile, isPdfFile, isPresentationFile } from './utils/editor'
 import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSqlCode } from './utils/notebook'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.306'
+const AGENTSTUDIO_FRONTEND_VERSION='5.307'
 
 const joinWin = (root, file) => `${root}\\${file}`.replaceAll('\\\\', '\\')
 const localIsoDate = () => {
@@ -807,51 +808,19 @@ function SystemPage() {
     {error&&<div className="error">{error}</div>}
 
     <div className="settings-sections">
-      <section className="settings-panel settings-panel-wide service-port-settings">
-        <h2>서비스 포트 설정</h2>
-        <div className="hint-box">
-          PC마다 이미 사용 중인 포트가 다를 수 있습니다. 기본값은 Backend 8000 / Frontend 5173이며,
-          저장한 값은 다음 SYSTEM_ADMIN.cmd 실행부터 적용됩니다. 다른 프로그램이 사용 중인 포트는 강제로 종료하지 않습니다.
-        </div>
-        <div className="two-col-fields">
-          <label className="setting-field">
-            <span>Backend API 포트</span>
-            <input
-              type="number" min="1024" max="65535"
-              value={valueOf('AGENTSTUDIO_BACKEND_PORT')||'8000'}
-              onChange={e=>setValue('AGENTSTUDIO_BACKEND_PORT',e.target.value)}
-            />
-            <small>현재 실행: {runtimeInfo().apiBase}</small>
-            {portInfo?.backend&&<small className={`port-state ${portInfo.backend.state}`}>
-              상태: {portStateLabel(portInfo.backend.state)} · 추천: {portInfo.backend.recommended}
-            </small>}
-          </label>
-          <label className="setting-field">
-            <span>Frontend 포트</span>
-            <input
-              type="number" min="1024" max="65535"
-              value={valueOf('AGENTSTUDIO_FRONTEND_PORT')||'5173'}
-              onChange={e=>setValue('AGENTSTUDIO_FRONTEND_PORT',e.target.value)}
-            />
-            <small>현재 실행: {window.location.origin}</small>
-            {portInfo?.frontend&&<small className={`port-state ${portInfo.frontend.state}`}>
-              상태: {portStateLabel(portInfo.frontend.state)} · 추천: {portInfo.frontend.recommended}
-            </small>}
-          </label>
-        </div>
-        {portInfo&&<div className="port-recommendation-box">
-          <div><b>추천 Backend:</b> {portInfo.backend?.recommended} {portInfo.backend?.suggestions?.length>0&&` · 후보 ${portInfo.backend.suggestions.join(', ')}`}</div>
-          <div><b>추천 Frontend:</b> {portInfo.frontend?.recommended} {portInfo.frontend?.suggestions?.length>0&&` · 후보 ${portInfo.frontend.suggestions.join(', ')}`}</div>
-          <small>{portInfo.note}</small>
-        </div>}
-        <div className="panel-actions">
-          <button disabled={busy||portCheckBusy} onClick={checkPortRecommendations}>
-            {portCheckBusy?'포트 확인 중...':'포트 사용 여부 / 추천 확인'}
-          </button>
-          <button disabled={busy||!portInfo} onClick={applyRecommendedPorts}>추천 포트 적용</button>
-          <button disabled={busy||portCheckBusy} onClick={savePortSettings}>포트 설정 저장</button>
-        </div>
-      </section>
+      <ServicePortSettingsPanel
+        busy={busy}
+        portCheckBusy={portCheckBusy}
+        portInfo={portInfo}
+        runtimeApiBase={runtimeInfo().apiBase}
+        frontendOrigin={window.location.origin}
+        valueOf={valueOf}
+        setValue={setValue}
+        portStateLabel={portStateLabel}
+        onCheckRecommendations={checkPortRecommendations}
+        onApplyRecommendations={applyRecommendedPorts}
+        onSave={savePortSettings}
+      />
 
       <section className="settings-panel settings-panel-wide">
         <h2>기본 경로 설정</h2>
@@ -903,72 +872,24 @@ function SystemPage() {
       <section className="settings-panel">
         <h2>PostgreSQL / LangGraph</h2>
 
-        <div className="database-runtime-switch-box">
-          <h3>AgentStudio Runtime DB 선택</h3>
-          <div className="hint-box">
-            기본은 <b>기존 로컬 PostgreSQL</b>입니다. Supabase PostgreSQL을 선택하면 먼저 로컬 PostgreSQL의
-            <b> app_settings</b>에 선택 상태를 기록한 뒤 AgentStudio runtime DB와 LangGraph Checkpointer를 Supabase로 전환합니다.
-            Supabase 비밀번호가 포함된 URL은 로컬 DB에 저장하지 않고 <b>backend/.env</b>에만 저장합니다.
-          </div>
-          <div className="database-provider-choice">
-            <label className={databaseProviderChoice==='local'?'active':''}>
-              <input type="radio" name="agentstudio-db-provider" value="local" checked={databaseProviderChoice==='local'} onChange={()=>setDatabaseProviderChoice('local')}/>
-              <span><b>로컬 PostgreSQL</b><small>기본 / Control DB</small></span>
-            </label>
-            <label className={databaseProviderChoice==='supabase'?'active':''}>
-              <input type="radio" name="agentstudio-db-provider" value="supabase" checked={databaseProviderChoice==='supabase'} onChange={()=>setDatabaseProviderChoice('supabase')}/>
-              <span><b>Supabase PostgreSQL</b><small>선택 사용</small></span>
-            </label>
-          </div>
-          <div className="database-runtime-summary">
-            <div><b>현재 사용:</b> {databaseRuntime?.active_provider==='supabase'?'Supabase PostgreSQL':'로컬 PostgreSQL'}</div>
-            <div><b>로컬 DB:</b> {databaseRuntime?.local_target||'-'}</div>
-            <div><b>Supabase:</b> {databaseRuntime?.supabase_target||'아직 설정되지 않음'}</div>
-            <div><b>Supabase 연결 정보:</b> {databaseRuntime?.supabase_configured?'저장됨 (backend/.env)':'미저장'}</div>
-            <div><b>Supabase Schema:</b> {databaseRuntime?.supabase_schema||supabaseRuntimeSchema||'theanova_agentstudio'}</div>
-            {databaseRuntime?.last_error&&<div className="runtime-db-warning">{databaseRuntime.last_error}</div>}
-          </div>
-          {databaseProviderChoice==='supabase'&&<>
-            <label className="setting-field">
-              <span>Supabase DATABASE URL</span>
-              <input value={supabaseRuntimeUrl} onChange={e=>setSupabaseRuntimeUrl(e.target.value)} placeholder={databaseRuntime?.supabase_configured?'저장된 Supabase URL 사용 가능 · 변경할 때만 입력':'postgresql+psycopg://USER:PASSWORD@HOST:5432/postgres'}/>
-            </label>
-            <label className="setting-field">
-              <span>Supabase LangGraph DB URL</span>
-              <input value={supabaseLanggraphRuntimeUrl} onChange={e=>setSupabaseLanggraphRuntimeUrl(e.target.value)} placeholder={databaseRuntime?.supabase_configured?'비우면 저장된 값 또는 DATABASE URL 기준 자동 사용':'postgresql://USER:PASSWORD@HOST:5432/postgres'}/>
-            </label>
-            <label className="setting-field">
-              <span>Supabase AgentStudio Schema</span>
-              <input value={supabaseRuntimeSchema} onChange={e=>setSupabaseRuntimeSchema(e.target.value)} placeholder="theanova_agentstudio"/>
-            </label>
-            <div className="hint-box">
-              <b>Supabase 정보 저장</b>을 누르면 DATABASE URL, 선택적 LangGraph URL, Schema를 <b>backend/.env</b>에만 보관합니다. 저장 후 URL 입력칸은 비워도 이후 검증/적용에서 저장된 값을 자동 사용합니다.
-              최초/업그레이드 모두 <b>Supabase 스키마 준비/검증</b>을 사용할 수 있습니다. 기본 사용자 스키마는 <b>theanova_agentstudio</b>이며 AgentStudio ORM과 LangGraph Checkpointer 테이블을 public과 분리합니다. pgvector는 <b>extensions</b> 스키마를 사용합니다. LangGraph 테이블은 설치된 Checkpointer의 공식 setup()으로 migration한 뒤 같은 사용자 스키마에서 필수 구조를 재검증합니다.
-              <b> Supabase 사용 적용</b>은 모든 검증이 성공한 경우에만 전환하며 실패하면 로컬 PostgreSQL을 유지합니다.
-            </div>
-          </>}
-          <div className="panel-actions database-runtime-actions">
-            {databaseProviderChoice==='supabase'&&<button disabled={databaseRuntimeBusy||supabaseInfoSaveBusy} onClick={saveSupabaseRuntimeInfo}>{supabaseInfoSaveBusy?'Supabase 정보 저장 중...':'Supabase 정보 저장'}</button>}
-            {databaseProviderChoice==='supabase'&&<button disabled={databaseRuntimeBusy||supabaseInfoSaveBusy} onClick={initializeSupabaseRuntimeSchema}>Supabase 스키마 준비/검증</button>}
-            {databaseProviderChoice==='supabase'&&<button disabled={databaseRuntimeBusy||supabaseInfoSaveBusy} onClick={downloadSupabaseSchemaScript}>Supabase 스키마 SQL 다운로드</button>}
-            <button className="primary-install" disabled={databaseRuntimeBusy||supabaseInfoSaveBusy} onClick={activateRuntimeDatabase}>
-              {databaseRuntimeBusy?'DB 전환 중...':databaseProviderChoice==='supabase'?'Supabase PostgreSQL 사용 적용':'로컬 PostgreSQL 사용 적용'}
-            </button>
-          </div>
-          {databaseRuntimeResult&&<div className={databaseRuntimeResult.ok===false?'test-result badbox':'test-result okbox'}>
-            <div>{databaseRuntimeResult.message||'-'}</div>
-            {databaseRuntimeResult.target&&<div>대상: {databaseRuntimeResult.target}</div>}
-            {(databaseRuntimeResult.supabase_schema||databaseRuntimeResult.schema?.schema)&&<div>Schema: {databaseRuntimeResult.supabase_schema||databaseRuntimeResult.schema?.schema}</div>}
-            {databaseRuntimeResult.local_settings_updated&&<div>로컬 DB 설정 업데이트: 완료</div>}
-            {databaseRuntimeResult.schema?.agentstudio_table_count!==undefined&&<div>AgentStudio 테이블 확인: {databaseRuntimeResult.schema.agentstudio_table_count}개</div>}
-            {(databaseRuntimeResult.schema?.verification?.ok===true||databaseRuntimeResult.verification?.ok===true)&&<div>테이블/컬럼/PK/UNIQUE/INDEX/FK 재검증: 정상</div>}
-            {(databaseRuntimeResult.schema?.vector||databaseRuntimeResult.vector)&&<div>pgvector: {(databaseRuntimeResult.schema?.vector||databaseRuntimeResult.vector)==='already_installed'?'이미 설치됨':'설치/확인 완료'}</div>}
-            {(databaseRuntimeResult.schema?.langgraph?.migration_count!==undefined||databaseRuntimeResult.langgraph?.migration_count!==undefined)&&<div>LangGraph migration 기록: {databaseRuntimeResult.schema?.langgraph?.migration_count??databaseRuntimeResult.langgraph?.migration_count}개</div>}
-            {(databaseRuntimeResult.schema?.rolled_back===true||databaseRuntimeResult.rolled_back===true)&&<div>실패 단계 변경사항: rollback 완료</div>}
-            {databaseRuntimeResult.langgraph_ok===false&&databaseRuntimeResult.langgraph_error&&<details><summary>LangGraph 확인 필요</summary><pre>{databaseRuntimeResult.langgraph_error}</pre></details>}
-            {databaseRuntimeResult.schema?.langgraph?.ok===false&&<details><summary>LangGraph migration/검증 실패</summary><pre>{databaseRuntimeResult.schema?.langgraph?.message||'-'}</pre></details>}
-          </div>}
-        </div>
+        <RuntimeDatabasePanel
+          providerChoice={databaseProviderChoice}
+          runtime={databaseRuntime}
+          result={databaseRuntimeResult}
+          supabaseRuntimeUrl={supabaseRuntimeUrl}
+          supabaseLanggraphRuntimeUrl={supabaseLanggraphRuntimeUrl}
+          supabaseRuntimeSchema={supabaseRuntimeSchema}
+          runtimeBusy={databaseRuntimeBusy}
+          infoSaveBusy={supabaseInfoSaveBusy}
+          onProviderChoice={setDatabaseProviderChoice}
+          onSupabaseRuntimeUrl={setSupabaseRuntimeUrl}
+          onSupabaseLanggraphRuntimeUrl={setSupabaseLanggraphRuntimeUrl}
+          onSupabaseRuntimeSchema={setSupabaseRuntimeSchema}
+          onSaveSupabaseInfo={saveSupabaseRuntimeInfo}
+          onInitializeSupabaseSchema={initializeSupabaseRuntimeSchema}
+          onDownloadSupabaseSchema={downloadSupabaseSchemaScript}
+          onActivateRuntimeDatabase={activateRuntimeDatabase}
+        />
 
         {renderField("로컬 DATABASE URL (기본 / Control DB)","DATABASE_URL","text","")}
         {renderField("로컬 LangGraph DB URL","LANGGRAPH_DATABASE_URL","text","")}
@@ -1104,70 +1025,22 @@ function SystemPage() {
         {renderTestResult("openai")}
       </section>
 
-      <section className="settings-panel">
-        <h2>Ollama</h2>
-        {renderField("Ollama URL","OLLAMA_BASE_URL","text","")}
-        {renderField("Ollama 모델","OLLAMA_MODEL","text","")}
-        {renderField("Embedding 모델","OLLAMA_EMBEDDING_MODEL","text","")}
-        <label className="setting-checkbox-row">
-          <input
-            type="checkbox"
-            checked={String(valueOf('OLLAMA_AUTO_START')).toLowerCase()!=='false'}
-            onChange={e=>setValue('OLLAMA_AUTO_START',e.target.checked?'true':'false')}
-          />
-          <span>AgentStudio 시작 시 로컬 Ollama 서버 자동 시작</span>
-        </label>
-        <div className="hint-box">
-          Ollama는 별도 Agent가 아니라 AgentStudio가 HTTP Provider로 연결하는 로컬 LLM 서버입니다.
-          설치된 Ollama 서버가 중지되어 있으면 아래의 <b>Ollama 실행</b>으로 시작할 수 있습니다.
-        </div>
-
-        {ollamaRuntime&&<div className={`ollama-runtime-card ${ollamaRuntime.running?'running':ollamaRuntime.installed?'stopped':'missing'}`}>
-          <div className="ollama-runtime-head">
-            <strong>Ollama Server</strong>
-            <span>{ollamaRuntime.running?'● 연결됨':ollamaRuntime.installed?'○ 서버 중지':'○ 설치 필요'}</span>
-          </div>
-          <div><b>설치:</b> {ollamaRuntime.installed?'설치됨':'설치되지 않음'}</div>
-          {ollamaRuntime.ollama_exe&&<div><b>실행 파일:</b> {ollamaRuntime.ollama_exe}</div>}
-          <div><b>API:</b> {ollamaRuntime.base_url||valueOf('OLLAMA_BASE_URL')}</div>
-          {ollamaRuntime.version&&<div><b>버전:</b> {ollamaRuntime.version}</div>}
-          {ollamaRuntime.models?.length>0&&<div><b>모델:</b> {ollamaRuntime.models.join(', ')}</div>}
-          {ollamaRuntime.managed_by_agentstudio&&<div><b>관리:</b> AgentStudio가 시작한 서버 · PID {ollamaRuntime.managed_pid}</div>}
-          {!ollamaRuntime.running&&ollamaRuntime.last_error&&<div><b>최근 상태:</b> {ollamaRuntime.last_error}</div>}
-          {ollamaRuntime.log_path&&<div className="connection-log-path">
-            <b>서버 로그:</b><code>{ollamaRuntime.log_path}</code>
-            <button type="button" onClick={()=>navigator.clipboard?.writeText?.(ollamaRuntime.log_path)}>경로 복사</button>
-          </div>}
-        </div>}
-
-        <div className="panel-actions">
-          <button disabled={busy} onClick={()=>saveGroup(['OLLAMA_BASE_URL','OLLAMA_MODEL','OLLAMA_EMBEDDING_MODEL','OLLAMA_AUTO_START'])}>Ollama 설정 저장</button>
-          <button disabled={ollamaRuntimeBusy} onClick={()=>{refreshOllamaRuntime();testOne('ollama')}}>Ollama 연결 테스트</button>
-          {ollamaRuntime?.installed&&!ollamaRuntime?.running&&ollamaRuntime?.manageable&&
-            <button className="primary-install" disabled={ollamaRuntimeBusy} onClick={startOllamaRuntime}>
-              {ollamaRuntimeBusy?'Ollama 시작 중...':'Ollama 실행'}
-            </button>}
-          {ollamaRuntime?.running&&ollamaRuntime?.managed_by_agentstudio&&
-            <button disabled={ollamaRuntimeBusy} onClick={stopOllamaRuntime}>Ollama 중지</button>}
-          {ollamaRuntime&&!ollamaRuntime.installed&&ollamaRuntime.local&&!ollamaRuntime.running&&
-            <button className="primary-install" disabled={busy} onClick={installOllama}>
-              {ollamaInstall&&['QUEUED','RUNNING'].includes(ollamaInstall.status)?'Ollama 설치 중...':'Ollama 설치'}
-            </button>}
-          <button disabled={ollamaRuntimeBusy} onClick={refreshOllamaRuntime}>상태 새로고침</button>
-        </div>
-        {renderTestResult("ollama")}
-        {ollamaInstall&&<div className={
-          ollamaInstall.status==='SUCCESS'?'test-result okbox':
-          ollamaInstall.status==='FAILED'?'test-result badbox':
-          'test-result install-running'
-        }>
-          <div><b>설치 상태:</b> {ollamaInstall.status}</div>
-          <progress max="100" value={ollamaInstall.progress||0}/>
-          <div>{ollamaInstall.message}</div>
-          {ollamaInstall.result?.ollama_exe&&<div>Ollama: {ollamaInstall.result.ollama_exe}</div>}
-          {ollamaInstall.result?.models_path&&<div>모델 경로: {ollamaInstall.result.models_path}</div>}
-        </div>}
-      </section>
+      <OllamaSettingsPanel
+        busy={busy}
+        runtimeBusy={ollamaRuntimeBusy}
+        runtime={ollamaRuntime}
+        install={ollamaInstall}
+        valueOf={valueOf}
+        setValue={setValue}
+        renderField={renderField}
+        renderTestResult={renderTestResult}
+        onSave={()=>saveGroup(['OLLAMA_BASE_URL','OLLAMA_MODEL','OLLAMA_EMBEDDING_MODEL','OLLAMA_AUTO_START'])}
+        onTest={()=>{refreshOllamaRuntime();testOne('ollama')}}
+        onStart={startOllamaRuntime}
+        onStop={stopOllamaRuntime}
+        onInstall={installOllama}
+        onRefresh={refreshOllamaRuntime}
+      />
 
       <section className="settings-panel">
         <h2>Tavily</h2>
@@ -1214,24 +1087,7 @@ function SystemPage() {
       </section>
     </div>
 
-    <section className="status-summary">
-      <h2>현재 상태 요약</h2>
-      <div className="system-grid">
-        {[
-          ['Python',status.python],['Node.js',status.node],['npm',status.npm],['Git',status.git],
-          ['PostgreSQL',status.postgres],['FastAPI',status.fastapi],['LangGraph',status.langgraph],
-          ['LangGraph 영속화',status.langgraph_persistent],['Ollama',status.ollama],
-          ['OpenAI Key',status.openai_key],['Tavily Key',status.tavily_key],['LangSmith Key',status.langsmith_key]
-        ].map(([n,ok])=><div className="status-row" key={n}>
-          <span><StatusDot ok={ok}/>{n}</span><strong>{ok?'정상/설정됨':'확인 필요'}</strong>
-        </div>)}
-      </div>
-      {!status.langgraph_persistent && status.langgraph_persistent_message && (
-        <div className="hint-box" style={{marginTop:12}}>
-          LangGraph 영속화 진단: {String(status.langgraph_persistent_message)}
-        </div>
-      )}
-    </section>
+    <SystemStatusSummary status={status}/>
   </div></div>
 }
 

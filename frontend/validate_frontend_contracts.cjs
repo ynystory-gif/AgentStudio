@@ -37,6 +37,7 @@ const componentContracts = [
   ['./components/llm/LlmCatalogPanel', ['LlmCatalogPanel']],
   ['./components/database/DatabaseBrowsers', ['DatabaseBrowserContextMenus', 'FirestoreBrowserPanel', 'RedisBrowserPanel', 'SqlObjectTreePanel']],
   ['./components/terminal/TerminalPanel', ['TerminalPanel']],
+  ['./components/system/SystemRuntimePanels', ['OllamaSettingsPanel', 'RuntimeDatabasePanel', 'ServicePortSettingsPanel', 'SystemStatusSummary']],
 ]
 
 for (const [modulePath, names] of componentContracts) {
