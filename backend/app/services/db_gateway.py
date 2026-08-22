@@ -66,6 +66,9 @@ class DatabaseGateway:
         session: AsyncSession,
         **values: Any,
     ) -> Project:
+        # Shared PostgreSQL/Supabase can be used by multiple PCs. Every new
+        # project is therefore owned by the current AgentStudio PC scope.
+        values.setdefault("pc_name", current_pc_name())
         row = Project(**values)
         session.add(row)
         return row

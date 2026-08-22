@@ -1,6 +1,6 @@
 -- ============================================================
 -- THEANOVA AgentStudio - Supabase PostgreSQL Full Schema
--- v5.297 SupabaseRuntimeSearchPathPinFix
+-- v5.308 ProjectMachineIsolation
 --
 -- Target layout:
 --   theanova_agentstudio : AgentStudio ORM + LangGraph Checkpointer
@@ -39,8 +39,9 @@ SET LOCAL search_path TO theanova_agentstudio, extensions, public;
 
 CREATE TABLE IF NOT EXISTS theanova_agentstudio.projects (
     id SERIAL PRIMARY KEY,
+    pc_name VARCHAR(255) NOT NULL DEFAULT '',
     name VARCHAR(200) NOT NULL,
-    root_path VARCHAR(1000) NOT NULL UNIQUE,
+    root_path VARCHAR(1000) NOT NULL,
     cache_path VARCHAR(1000) NOT NULL DEFAULT '',
     temp_path VARCHAR(1000) NOT NULL DEFAULT '',
     output_path VARCHAR(1000) NOT NULL DEFAULT '',
@@ -49,7 +50,8 @@ CREATE TABLE IF NOT EXISTS theanova_agentstudio.projects (
     description TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_opened_at TIMESTAMP NULL,
-    is_favorite BOOLEAN NOT NULL DEFAULT FALSE
+    is_favorite BOOLEAN NOT NULL DEFAULT FALSE,
+    CONSTRAINT uq_projects_pc_name_root_path UNIQUE (pc_name, root_path)
 );
 
 CREATE TABLE IF NOT EXISTS theanova_agentstudio.conversation_messages (
@@ -195,6 +197,8 @@ CREATE INDEX IF NOT EXISTS ix_app_settings_pc_name
     ON theanova_agentstudio.app_settings(pc_name);
 CREATE INDEX IF NOT EXISTS ix_agentstudio_machines_pc_name
     ON theanova_agentstudio.agentstudio_machines(pc_name);
+CREATE INDEX IF NOT EXISTS ix_projects_pc_name
+    ON theanova_agentstudio.projects(pc_name);
 
 CREATE TABLE IF NOT EXISTS theanova_agentstudio.project_analyses (
     id SERIAL PRIMARY KEY,
@@ -215,6 +219,45 @@ CREATE TABLE IF NOT EXISTS theanova_agentstudio.project_analyses (
 -- ------------------------------------------------------------
 -- Compatibility upgrades for existing AgentStudio schema
 -- ------------------------------------------------------------
+
+ALTER TABLE IF EXISTS theanova_agentstudio.projects
+    ADD COLUMN IF NOT EXISTS pc_name VARCHAR(255) NOT NULL DEFAULT '';
+
+-- v5.308: root_path used to be globally UNIQUE. Shared Supabase must allow the
+-- same local path on different PCs, so uniqueness is now (pc_name, root_path).
+DO $$
+DECLARE r RECORD;
+BEGIN
+  IF to_regclass('theanova_agentstudio.projects') IS NOT NULL THEN
+    FOR r IN
+      SELECT c.conname
+      FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = 'theanova_agentstudio'
+        AND t.relname = 'projects'
+        AND c.contype = 'u'
+        AND array_length(c.conkey, 1) = 1
+        AND EXISTS (
+          SELECT 1
+          FROM unnest(c.conkey) AS k(attnum)
+          JOIN pg_attribute a
+            ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+          WHERE a.attname = 'root_path'
+        )
+    LOOP
+      EXECUTE format(
+        'ALTER TABLE %I.%I DROP CONSTRAINT %I',
+        'theanova_agentstudio', 'projects', r.conname
+      );
+    END LOOP;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS ix_projects_pc_name
+    ON theanova_agentstudio.projects(pc_name);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_pc_name_root_path
+    ON theanova_agentstudio.projects(pc_name, root_path);
 
 ALTER TABLE IF EXISTS theanova_agentstudio.projects ADD COLUMN IF NOT EXISTS cache_path VARCHAR(1000) NOT NULL DEFAULT '';
 ALTER TABLE IF EXISTS theanova_agentstudio.projects ADD COLUMN IF NOT EXISTS temp_path VARCHAR(1000) NOT NULL DEFAULT '';

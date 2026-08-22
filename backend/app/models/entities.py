@@ -6,9 +6,13 @@ from app.core.database import Base
 
 class Project(Base):
     __tablename__ = "projects"
+    __table_args__ = (
+        UniqueConstraint("pc_name", "root_path", name="uq_projects_pc_name_root_path"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
+    pc_name: Mapped[str] = mapped_column(String(255), default="", index=True)
     name: Mapped[str] = mapped_column(String(200))
-    root_path: Mapped[str] = mapped_column(String(1000), unique=True)
+    root_path: Mapped[str] = mapped_column(String(1000))
     cache_path: Mapped[str] = mapped_column(String(1000), default="")
     temp_path: Mapped[str] = mapped_column(String(1000), default="")
     output_path: Mapped[str] = mapped_column(String(1000), default="")

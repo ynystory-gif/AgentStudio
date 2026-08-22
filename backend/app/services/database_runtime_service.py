@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.core.database import (
     Base,
     create_agentstudio_async_engine,
+    migrate_agentstudio_schema,
     migrate_agentstudio_schema_on_connection,
     normalize_async_database_url,
     normalize_schema_name,
@@ -804,6 +805,7 @@ async def activate_database_provider(
         write_env_values({ENV_PROVIDER_KEY: PROVIDER_LOCAL})
         get_settings.cache_clear()
         await rebind_database(target_database_url)
+        await migrate_agentstudio_schema()
         await agent_graph_runtime.set_database_url(target_langgraph_url, restart=True)
         _ACTIVE_PROVIDER = PROVIDER_LOCAL
         _LAST_ERROR = ""
@@ -867,6 +869,9 @@ async def activate_database_provider(
 
     try:
         await rebind_database(database_url, schema=target_schema)
+        # v5.308: project machine-scope schema changes must also be present when
+        # callers skip the full schema initializer. The migration is idempotent.
+        await migrate_agentstudio_schema()
         scoped_langgraph_url = _postgres_url_with_search_path(langgraph_url, target_schema)
         langgraph_ok = bool(await agent_graph_runtime.set_database_url(scoped_langgraph_url, restart=True))
         if not langgraph_ok:
@@ -967,6 +972,10 @@ async def apply_saved_database_provider() -> dict[str, Any]:
 
     try:
         await rebind_database(database_url, schema=target_schema)
+        # Saved Supabase providers are rebound after the local bootstrap migration.
+        # Apply the current AgentStudio compatibility migration to the actual
+        # Supabase schema before any project list/root restore query runs.
+        await migrate_agentstudio_schema()
         scoped_langgraph_url = _postgres_url_with_search_path(
             langgraph_url or _langgraph_url_from_database_url(database_url),
             target_schema,

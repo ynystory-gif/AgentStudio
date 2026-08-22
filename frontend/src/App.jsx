@@ -17,7 +17,7 @@ import { parseTerminalServerMessage, serializeTerminalClientMessage, terminalCel
 import { getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isNotebookFile, isPdfFile, isPresentationFile } from './utils/editor'
 import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSqlCode } from './utils/notebook'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.307'
+const AGENTSTUDIO_FRONTEND_VERSION='5.308'
 
 const joinWin = (root, file) => `${root}\\${file}`.replaceAll('\\\\', '\\')
 const localIsoDate = () => {

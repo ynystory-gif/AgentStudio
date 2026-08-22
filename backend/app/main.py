@@ -66,9 +66,15 @@ async def lifespan(app: FastAPI):
             f"[완료되었습니다] 등록 프로젝트 허용 경로 복원: "
             f"{project_roots.get('restored_count', 0)}개"
         )
+        legacy_adoption = dict(project_roots.get("legacy_adoption") or {})
+        if legacy_adoption.get("claimed_count"):
+            print(
+                f"[완료되었습니다] 레거시 프로젝트 현재 PC 귀속: "
+                f"{legacy_adoption.get('claimed_count', 0)}개 · PC={project_roots.get('pc_name', '')}"
+            )
         if project_roots.get("missing_count"):
             print(
-                f"[안내] 현재 존재하지 않는 등록 프로젝트 경로: "
+                f"[안내] 현재 PC에 존재하지 않는 등록 프로젝트 경로: "
                 f"{project_roots.get('missing_count', 0)}개"
             )
 
@@ -98,7 +104,7 @@ async def lifespan(app: FastAPI):
         await mcp_registry_monitor.stop()
         await agent_graph_runtime.stop()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.307", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.308", lifespan=lifespan)
 
 # Frontend 개발 서버(Vite)와 Backend API 간 CORS 허용
 app.add_middleware(

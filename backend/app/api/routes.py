@@ -26,7 +26,7 @@ from app.services.database_runtime_service import (
 )
 from app.services.weather_service import build_weather_dashboard, weather_config
 from app.services.llm_catalog_service import build_llm_catalog
-from app.services.project_root_registry import ensure_persisted_project_root
+from app.services.project_root_registry import adopt_legacy_projects_for_current_pc, ensure_persisted_project_root
 from app.services.terminal_completion_service import complete_terminal_input
 from app.services.managed_process_service import managed_process_service
 from app.services.python_execution_service import python_execution_manager
@@ -71,6 +71,7 @@ from pydantic import BaseModel
 from langgraph.types import Command
 from sqlalchemy import select, func
 from app.core.database import SessionLocal, migrate_agentstudio_schema, verify_project_schema, current_event_loop_name
+from app.core.machine_identity import current_pc_name
 from app.models.entities import MCPServer, ToolRecord
 from app.services.ws_hub import hub
 from app.services.job_manager import job_manager
@@ -1185,10 +1186,11 @@ async def analyze_external_project(req: ExternalProjectAnalyzeRequest):
             message="프로젝트 정보를 PostgreSQL에 저장하고 있습니다.",
         )
 
+        await adopt_legacy_projects_for_current_pc()
         async with SessionLocal() as session:
             project = (
                 await session.execute(
-                    select(Project).where(Project.root_path == root)
+                    select(Project).where(Project.pc_name == current_pc_name(), Project.root_path == root)
                 )
             ).scalar_one_or_none()
 
@@ -1284,7 +1286,14 @@ async def analyze_external_project(req: ExternalProjectAnalyzeRequest):
 @router.post("/projects/{project_id}/favorite")
 async def set_project_favorite(project_id: int, req: ProjectFavoriteRequest):
     async with SessionLocal() as session:
-        project = await session.get(Project, project_id)
+        project = (
+            await session.execute(
+                select(Project).where(
+                    Project.id == project_id,
+                    Project.pc_name == current_pc_name(),
+                )
+            )
+        ).scalar_one_or_none()
         if not project:
             return {
                 "ok": False,
@@ -1322,11 +1331,15 @@ async def create_agent_project(req: AgentProjectCreateRequest):
     # 신규 생성 프로젝트도 현재 실행 세션의 허용 루트로 등록
     register_runtime_project_root(paths["project_root"])
 
+    # v5.308 이전의 미귀속 row가 이 PC의 실제 경로와 일치하면 먼저
+    # 현재 PC 소유로 승격해 중복 Project row를 만들지 않습니다.
+    await adopt_legacy_projects_for_current_pc()
+
     async with SessionLocal() as session:
         # 같은 프로젝트 경로가 이미 등록되어 있으면 중복 생성하지 않음
         existing = (
             await session.execute(
-                select(Project).where(Project.root_path == paths["project_root"])
+                select(Project).where(Project.pc_name == current_pc_name(), Project.root_path == paths["project_root"])
             )
         ).scalar_one_or_none()
 
@@ -1426,16 +1439,19 @@ async def project_list_diagnostics():
     schema_status = {"ok": False, "message": "DB 연결 확인 전"}
     try:
         schema_status = await verify_project_schema()
+        legacy = await adopt_legacy_projects_for_current_pc()
+        pc_name = current_pc_name()
         async with SessionLocal() as session:
             count = (
                 await session.execute(
-                    select(func.count(Project.id))
+                    select(func.count(Project.id)).where(Project.pc_name == pc_name)
                 )
             ).scalar_one()
 
             sample = (
                 await session.execute(
                     select(Project)
+                    .where(Project.pc_name == pc_name)
                     .order_by(Project.id.desc())
                     .limit(5)
                 )
@@ -1445,6 +1461,8 @@ async def project_list_diagnostics():
             "ok": True,
             "path": "Frontend -> FastAPI -> PostgreSQL",
             "database_connected": True,
+            "pc_name": pc_name,
+            "legacy_adoption": legacy,
             "project_count": int(count or 0),
             "sample_projects": [
                 {
@@ -1482,8 +1500,17 @@ async def project_list_diagnostics():
 
 @router.get("/projects/{project_id}")
 async def get_agent_project(project_id: int):
+    await adopt_legacy_projects_for_current_pc()
+    pc_name = current_pc_name()
     async with SessionLocal() as session:
-        project = await session.get(Project, project_id)
+        project = (
+            await session.execute(
+                select(Project).where(
+                    Project.id == project_id,
+                    Project.pc_name == pc_name,
+                )
+            )
+        ).scalar_one_or_none()
 
         if not project:
             return {
@@ -1567,15 +1594,17 @@ async def database_health():
 
     try:
         async with SessionLocal() as session:
+            pc_name = current_pc_name()
             count = (
                 await session.execute(
-                    select(func.count(Project.id))
+                    select(func.count(Project.id)).where(Project.pc_name == pc_name)
                 )
             ).scalar_one()
 
         return {
             "ok": True,
             "database_connected": True,
+            "pc_name": pc_name,
             "project_count": int(count or 0),
             "log_path": str(log_path),
         }
@@ -1598,10 +1627,14 @@ async def database_health():
 @router.get("/projects")
 async def list_agent_projects():
     try:
+        await adopt_legacy_projects_for_current_pc()
+        pc_name = current_pc_name()
         async with SessionLocal() as session:
             rows = (
                 await session.execute(
-                    select(Project).order_by(
+                    select(Project)
+                    .where(Project.pc_name == pc_name)
+                    .order_by(
                         Project.last_opened_at.desc().nullslast(),
                         Project.id.desc(),
                     )
@@ -1621,6 +1654,7 @@ async def list_agent_projects():
     return [
         {
             "id": p.id,
+            "pc_name": getattr(p, "pc_name", ""),
             "name": p.name,
             "description": p.description,
             "project_root": p.root_path,
@@ -2022,7 +2056,7 @@ async def sql_workspace_postgresql_admin_script(req: SqlWorkspaceDatabaseAdminSc
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.307", "build": "TypeScriptSystemRuntimeUiMigration"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.308", "build": "ProjectMachineIsolation"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():

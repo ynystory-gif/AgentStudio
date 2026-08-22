@@ -258,6 +258,37 @@ async def migrate_agentstudio_schema_on_connection(conn, *, schema: str = "") ->
         f"CREATE UNIQUE INDEX IF NOT EXISTS uq_app_settings_pc_name_key ON {app_settings}(pc_name, key)",
     ]
 
+    project_scope_statements = [
+        f"ALTER TABLE {projects} ADD COLUMN IF NOT EXISTS pc_name VARCHAR(255) NOT NULL DEFAULT ''",
+        f"""
+        DO $$
+        DECLARE r RECORD;
+        BEGIN
+          FOR r IN
+            SELECT c.conname
+            FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = '{target_schema}'
+              AND t.relname = 'projects'
+              AND c.contype = 'u'
+              AND array_length(c.conkey, 1) = 1
+              AND EXISTS (
+                SELECT 1
+                FROM unnest(c.conkey) AS k(attnum)
+                JOIN pg_attribute a
+                  ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+                WHERE a.attname = 'root_path'
+              )
+          LOOP
+            EXECUTE format('ALTER TABLE %I.%I DROP CONSTRAINT %I', '{target_schema}', 'projects', r.conname);
+          END LOOP;
+        END $$
+        """,
+        f"CREATE INDEX IF NOT EXISTS ix_projects_pc_name ON {projects}(pc_name)",
+        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_pc_name_root_path ON {projects}(pc_name, root_path)",
+    ]
+
     statements = [
         f"ALTER TABLE {projects} ADD COLUMN IF NOT EXISTS cache_path VARCHAR(1000) NOT NULL DEFAULT ''",
         f"ALTER TABLE {projects} ADD COLUMN IF NOT EXISTS temp_path VARCHAR(1000) NOT NULL DEFAULT ''",
@@ -280,6 +311,10 @@ async def migrate_agentstudio_schema_on_connection(conn, *, schema: str = "") ->
     applied.append(f"{target_schema}.app_settings legacy rows -> pc_name={pc_name}")
 
     for sql in machine_setting_statements[1:]:
+        await conn.execute(text(sql))
+        applied.append(" ".join(sql.strip().split()))
+
+    for sql in project_scope_statements:
         await conn.execute(text(sql))
         applied.append(" ".join(sql.strip().split()))
 
@@ -307,7 +342,7 @@ def current_event_loop_name() -> str:
 async def verify_project_schema() -> dict:
     """현재 projects 테이블의 필수 컬럼 존재 여부를 확인합니다."""
     required = {
-        "id", "name", "root_path", "cache_path", "temp_path", "output_path",
+        "id", "pc_name", "name", "root_path", "cache_path", "temp_path", "output_path",
         "venv_path", "models_path", "description", "created_at", "last_opened_at", "is_favorite",
     }
 

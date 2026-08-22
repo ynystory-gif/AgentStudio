@@ -1,4 +1,11 @@
-## v5.307 TypeScript System Runtime UI Migration
+## v5.308 Project Machine Isolation
+
+- Shared PostgreSQL/Supabase project rows are scoped by `projects.pc_name`.
+- Project list/open/favorite/analyze/create and runtime project-root restore only use the current AgentStudio PC scope.
+- Legacy rows with empty `pc_name` are never globally claimed. Only project roots that physically exist on the current PC are atomically adopted once.
+- `root_path` uniqueness changed from global to `(pc_name, root_path)` so two PCs can use the same local path independently.
+- Renaming the AgentStudio PC name also moves that PC's project ownership rows.
+- v5.307 TypeScript System/Runtime UI migration remains unchanged.
 
 Frontend TypeScript Phase 7. v5.306 Terminal/WebSocket migration을 기반으로 System / Settings / Runtime 표시 계층을 단계적으로 TypeScript로 분리했습니다.
 

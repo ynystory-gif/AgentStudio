@@ -10,7 +10,7 @@ import platform
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.models.entities import AppSetting, AgentStudioMachine
+from app.models.entities import AppSetting, AgentStudioMachine, Project
 from app.core.machine_identity import (
     current_pc_name,
     ensure_pc_name_env,
@@ -334,7 +334,12 @@ async def rename_current_machine(new_pc_name: str) -> dict:
                     select(AppSetting.id).where(AppSetting.pc_name == new_name).limit(1)
                 )
             ).first()
-            if duplicate_machine is not None or duplicate_setting is not None:
+            duplicate_project = (
+                await session.execute(
+                    select(Project.id).where(Project.pc_name == new_name).limit(1)
+                )
+            ).first()
+            if duplicate_machine is not None or duplicate_setting is not None or duplicate_project is not None:
                 raise ValueError(
                     f"PC 이름 [{new_name}]은(는) 이미 공용 DB에서 사용 중입니다. 다른 유니크한 이름을 입력하세요."
                 )
@@ -347,6 +352,11 @@ async def rename_current_machine(new_pc_name: str) -> dict:
             settings_rows = (
                 await session.execute(
                     select(AppSetting).where(AppSetting.pc_name == old_name)
+                )
+            ).scalars().all()
+            project_rows = (
+                await session.execute(
+                    select(Project).where(Project.pc_name == old_name)
                 )
             ).scalars().all()
 
@@ -366,6 +376,8 @@ async def rename_current_machine(new_pc_name: str) -> dict:
                 source_machine.last_seen_at = datetime.utcnow()
 
             for row in settings_rows:
+                row.pc_name = new_name
+            for row in project_rows:
                 row.pc_name = new_name
 
             await session.commit()
