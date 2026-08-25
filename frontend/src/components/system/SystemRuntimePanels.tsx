@@ -311,7 +311,7 @@ export function SystemStatusSummary({ status }: SystemStatusSummaryProps) {
     ['Python', status.python], ['Node.js', status.node], ['npm', status.npm], ['Git', status.git],
     ['PostgreSQL', status.postgres], ['FastAPI', status.fastapi], ['LangGraph', status.langgraph],
     ['LangGraph 영속화', status.langgraph_persistent], ['Ollama', status.ollama],
-    ['OpenAI Key', status.openai_key], ['Tavily Key', status.tavily_key], ['LangSmith Key', status.langsmith_key],
+    ['Tavily Key', status.tavily_key], ['LangSmith Key', status.langsmith_key],
   ]
 
   return (
@@ -321,6 +321,10 @@ export function SystemStatusSummary({ status }: SystemStatusSummaryProps) {
         {items.map(([name, ok]) => <div className="status-row" key={name}>
           <span><StatusDot ok={!!ok}/>{name}</span><strong>{ok ? '정상/설정됨' : '확인 필요'}</strong>
         </div>)}
+        <div className="status-row">
+          <span><StatusDot ok={status.openai_enabled === false || !!status.openai_key}/>OpenAI</span>
+          <strong>{status.openai_enabled === false ? '비사용 · Ollama 전용' : status.openai_key ? '사용 · Key 설정됨' : '사용 · Key 확인 필요'}</strong>
+        </div>
       </div>
       {!status.langgraph_persistent && status.langgraph_persistent_message && (
         <div className="hint-box" style={{ marginTop: 12 }}>

@@ -28,3 +28,14 @@ google-cloud-firestore>=2.21
 
 # Redis Key-Value database provider
 redis>=5.0
+
+# External Web Browser CDP client (system Chrome/Edge, no Playwright browser download required)
+playwright>=1.55
+
+# AI attachment document text extraction
+pypdf>=5.0
+python-docx>=1.1
+openpyxl>=3.1
+python-pptx>=1.0
+
+watchfiles>=1.2

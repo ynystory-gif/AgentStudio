@@ -11,6 +11,7 @@ export interface SystemStatus {
   langgraph_persistent?: boolean
   langgraph_persistent_message?: string
   ollama?: boolean
+  openai_enabled?: boolean
   openai_key?: boolean
   tavily_key?: boolean
   langsmith_key?: boolean

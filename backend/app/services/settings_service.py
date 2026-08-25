@@ -54,6 +54,9 @@ SETTING_KEYS = [
     "DEFAULT_TEMP_ROOT",
     "DEFAULT_OUTPUT_ROOT",
     "COMMON_MODELS_ROOT",
+    "OPENAI_ENABLED",
+    "CODEX_ENABLED",
+    "AI_PROVIDER_STRATEGY",
     "OPENAI_API_KEY",
     "OPENAI_MODEL",
     "OPENAI_EMBEDDING_MODEL",
@@ -64,6 +67,7 @@ SETTING_KEYS = [
     "LOCAL_LLM_PROVIDER",
     "CODING_LLM_PROVIDER",
     "REQUIREMENTS_LLM_PROVIDER",
+    "MEMORY_EMBEDDING_PROVIDER",
     "TAVILY_API_KEY",
     "LANGSMITH_TRACING",
     "LANGSMITH_API_KEY",
@@ -90,6 +94,13 @@ SECRET_KEYS = {
 LOCAL_PENDING_SETTINGS_KEY = "AGENTSTUDIO_SETTINGS_PENDING"
 
 DEFAULT_SETTING_VALUES = {
+    "OPENAI_ENABLED": "true",
+    "CODEX_ENABLED": "false",
+    "AI_PROVIDER_STRATEGY": "ollama_first",
+    "LOCAL_LLM_PROVIDER": "auto",
+    "CODING_LLM_PROVIDER": "auto",
+    "REQUIREMENTS_LLM_PROVIDER": "auto",
+    "MEMORY_EMBEDDING_PROVIDER": "ollama",
     "AGENTSTUDIO_BACKEND_PORT": "8000",
     "AGENTSTUDIO_FRONTEND_PORT": "5173",
     "OLLAMA_AUTO_START": "true",
@@ -736,6 +747,44 @@ async def update_settings(
             raise ValueError(
                 "Backend와 Frontend는 서로 다른 포트를 사용해야 합니다."
             )
+
+    # v5.330: OpenAI OFF means OpenAI is removed from the adaptive fallback
+    # chain, but Codex can remain available when the user explicitly enabled it.
+    # Embeddings stay local because Codex is not an embedding provider.
+    normalized_openai_enabled = None
+    if "OPENAI_ENABLED" in values and values.get("OPENAI_ENABLED") is not None:
+        raw_enabled = str(values.get("OPENAI_ENABLED") or "").strip().lower()
+        normalized_openai_enabled = raw_enabled not in {"0", "false", "no", "off"}
+        values = dict(values)
+        values["OPENAI_ENABLED"] = "true" if normalized_openai_enabled else "false"
+        if not normalized_openai_enabled:
+            values["MEMORY_EMBEDDING_PROVIDER"] = "ollama"
+
+    if "CODEX_ENABLED" in values and values.get("CODEX_ENABLED") is not None:
+        raw_codex = str(values.get("CODEX_ENABLED") or "").strip().lower()
+        values = dict(values)
+        values["CODEX_ENABLED"] = "false" if raw_codex in {"0", "false", "no", "off"} else "true"
+
+    if "AI_PROVIDER_STRATEGY" in values and values.get("AI_PROVIDER_STRATEGY") is not None:
+        strategy = str(values.get("AI_PROVIDER_STRATEGY") or "ollama_first").strip().lower()
+        if strategy not in {"ollama_first", "manual"}:
+            raise ValueError("AI Provider 전략은 ollama_first 또는 manual만 사용할 수 있습니다.")
+        values = dict(values)
+        values["AI_PROVIDER_STRATEGY"] = strategy
+
+    provider_rules = {
+        "LOCAL_LLM_PROVIDER": {"auto", "ollama", "openai"},
+        "CODING_LLM_PROVIDER": {"auto", "ollama", "openai", "codex"},
+        "REQUIREMENTS_LLM_PROVIDER": {"auto", "ollama", "openai", "codex"},
+    }
+    for key, allowed in provider_rules.items():
+        if key not in values or values.get(key) is None:
+            continue
+        provider = str(values.get(key) or "auto").strip().lower()
+        if provider not in allowed:
+            raise ValueError(f"{key} Provider는 {', '.join(sorted(allowed))} 중 하나여야 합니다.")
+        values = dict(values)
+        values[key] = provider
 
     # 비밀값이 빈 문자열이면 기존 DB 값을 유지
     for key, value in values.items():

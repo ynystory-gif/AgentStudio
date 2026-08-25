@@ -45,6 +45,62 @@ def _agentstudio_notebook_pip(arguments):
     importlib.invalidate_caches()
     return None
 
+def _agentstudio_notebook_shell(command):
+    """Execute a Jupyter-style ``!command`` from the Notebook CWD.
+
+    ``!pip``/``!pip3`` and ``!python``/``!python3`` are pinned to the exact
+    interpreter backing the current AgentStudio Notebook session so package
+    installation and Python subprocesses cannot silently escape the project's
+    ``.venv``.  Other commands (for example ``!uv add ...``) run through the
+    platform shell while preserving the Notebook file directory as CWD.
+    """
+    raw = str(command or "").strip()
+    if not raw:
+        return None
+
+    try:
+        tokens = shlex.split(raw, posix=(os.name != "nt"))
+    except ValueError as exc:
+        raise ValueError(f"Notebook ! 명령을 해석하지 못했습니다: {exc}") from exc
+    if not tokens:
+        return None
+
+    def _clean_token(value):
+        text = str(value or "")
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"\"", "'"}:
+            return text[1:-1]
+        return text
+
+    tokens = [_clean_token(token) for token in tokens]
+    command_name = os.path.basename(tokens[0]).casefold()
+
+    if command_name in {"pip", "pip.exe", "pip3", "pip3.exe"}:
+        argv = [sys.executable, "-m", "pip", *tokens[1:]]
+        completed = subprocess.run(argv, check=False)
+    elif command_name in {"python", "python.exe", "python3", "python3.exe", "py", "py.exe"}:
+        argv = [sys.executable, *tokens[1:]]
+        completed = subprocess.run(argv, check=False)
+    elif os.name == "nt":
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        if powershell:
+            completed = subprocess.run(
+                [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", raw],
+                check=False,
+            )
+        else:
+            completed = subprocess.run(raw, shell=True, check=False)
+    else:
+        shell_path = os.environ.get("SHELL") or "/bin/sh"
+        completed = subprocess.run(raw, shell=True, executable=shell_path, check=False)
+
+    if completed.returncode != 0:
+        raise RuntimeError(f"Notebook ! 명령이 실패했습니다. 종료 코드: {completed.returncode}")
+
+    # A successful package-management command can make a newly installed
+    # module importable in the same persistent Notebook worker immediately.
+    importlib.invalidate_caches()
+    return None
+
 def _agentstudio_notebook_writefile(arguments, body, project_root):
     """Implement the safe Notebook subset of Jupyter ``%%writefile``.
 
@@ -96,8 +152,9 @@ def _agentstudio_notebook_writefile(arguments, body, project_root):
 def _preprocess_notebook_code(source, project_root):
     """Translate supported Jupyter magics to executable Python.
 
-    ``%pip`` stays line-oriented so traceback line numbers remain aligned.
-    ``%%writefile`` is a cell magic: the first line is the directive and every
+    ``%pip`` and Jupyter-style ``!command`` stay line-oriented so traceback
+    line numbers remain aligned. ``%%writefile`` is a cell magic: the first
+    line is the directive and every
     following character is written to disk as UTF-8 instead of being executed.
     """
     text = str(source or "")
@@ -143,10 +200,15 @@ def _preprocess_notebook_code(source, project_root):
             arguments = stripped[4:].strip()
             translated.append(f"{indent}_agentstudio_notebook_pip({arguments!r}){newline}")
             continue
+        if stripped.startswith("!"):
+            command = stripped[1:].strip()
+            translated.append(f"{indent}_agentstudio_notebook_shell({command!r}){newline}")
+            continue
         translated.append(raw_line)
     return "".join(translated)
 
 namespace["_agentstudio_notebook_pip"] = _agentstudio_notebook_pip
+namespace["_agentstudio_notebook_shell"] = _agentstudio_notebook_shell
 namespace["_agentstudio_notebook_writefile"] = _agentstudio_notebook_writefile
 
 for raw in sys.stdin:
@@ -177,6 +239,7 @@ for raw in sys.stdin:
                 "__package__": None,
                 "__builtins__": builtins,
                 "_agentstudio_notebook_pip": _agentstudio_notebook_pip,
+                "_agentstudio_notebook_shell": _agentstudio_notebook_shell,
                 "_agentstudio_notebook_writefile": _agentstudio_notebook_writefile,
             }
 

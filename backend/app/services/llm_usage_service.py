@@ -32,6 +32,11 @@ def usage_log_path() -> Path:
     return path
 
 
+def current_usage_context() -> dict:
+    """Return a copy of the current request-scoped LLM usage context."""
+    return dict(_usage_context.get() or {})
+
+
 @contextmanager
 def usage_context(**values):
     current = dict(_usage_context.get() or {})

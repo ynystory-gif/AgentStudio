@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     # v5.295: Supabase AgentStudio/LangGraph objects are isolated from public.
     supabase_db_schema: str = "theanova_agentstudio"
 
+    # OpenAI API master switch. OFF filters OpenAI from the adaptive provider chain.
+    openai_enabled: bool = True
     openai_api_key: str = ""
     openai_model: str = "gpt-5-mini"
     openai_embedding_model: str = "text-embedding-3-small"
@@ -26,11 +28,20 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen2.5:7b"
     ollama_embedding_model: str = "nomic-embed-text"
     ollama_auto_start: bool = True
+
+    # v5.330: unified AI routing. ``ollama_first`` makes local Ollama the default
+    # for every compatible text task, then falls back to OpenAI API and (for
+    # higher-value coding/requirements tasks) ChatGPT Codex when enabled.
+    ai_provider_strategy: str = "ollama_first"
     llm_provider: str = "ollama"
-    local_llm_provider: str = "ollama"
-    coding_llm_provider: str = "openai"
-    requirements_llm_provider: str = "openai"
+    local_llm_provider: str = "auto"
+    coding_llm_provider: str = "auto"
+    requirements_llm_provider: str = "auto"
     memory_embedding_provider: str = "ollama"
+
+    # Codex OAuth credentials are owned by the official Codex CLI. AgentStudio
+    # stores only whether Codex integration may be used.
+    codex_enabled: bool = False
 
     tavily_api_key: str = ""
     langsmith_tracing: str = "true"

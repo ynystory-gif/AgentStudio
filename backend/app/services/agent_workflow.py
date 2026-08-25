@@ -10,6 +10,7 @@ from langgraph.types import interrupt
 
 from app.core.config import get_settings
 from app.services.agent_factory_workflow_design import design_agent_factory
+from app.services.as_built_architecture import analyze_as_built_architecture, build_as_built_architecture, compare_architectures
 from app.services.approval_service import approval_payload, requires_approval
 from app.services.debug_service import analyze_failure
 from app.services.git_service import checkpoint
@@ -45,6 +46,10 @@ class AgentState(TypedDict, total=False):
     capability_plan: dict
     tool_mcp_plan: dict
     agent_architecture: dict
+    as_built_architecture: dict
+    architecture_conformance: dict
+    architecture_repair_iteration: int
+    database_plan: dict
     target_agent_workflow: dict
     file_plan: dict
     settings_plan: dict
@@ -162,12 +167,26 @@ def _canonical_planned_path(file_plan: dict, raw_path: str, group: str = "") -> 
 def _normalize_settings_plan_paths(plan: dict, file_plan: dict) -> tuple[dict, dict]:
     normalized = dict(plan or {})
     changes: list[dict] = []
+    frontend_contract = file_plan.get("frontend_contract") or {}
+    frontend_typescript = str(frontend_contract.get("language") or "").casefold() == "typescript"
+
+    def normalize_frontend_extension(raw: str) -> str:
+        value = str(raw or "").replace("\\", "/")
+        low = value.casefold()
+        if frontend_typescript and low.startswith("frontend/src/"):
+            if low.endswith(".jsx"):
+                return value[:-4] + ".tsx"
+            if low.endswith(".js"):
+                return value[:-3] + ".ts"
+        return value
+
     for group in ("backend", "frontend"):
         values = dict(normalized.get(group) or {})
         for key, value in list(values.items()):
             if not isinstance(value, str) or not value.strip():
                 continue
-            canonical = _canonical_planned_path(file_plan, value, group)
+            source_value = normalize_frontend_extension(value) if group == "frontend" else value
+            canonical = _canonical_planned_path(file_plan, source_value, group)
             if canonical != value.replace("\\", "/"):
                 changes.append({"group": group, "key": key, "from": value, "to": canonical})
             values[key] = canonical
@@ -196,6 +215,7 @@ async def requirement_analysis_node(state: AgentState):
     return {
         "design_bundle": design,
         "requirement_spec": design.get("requirement_spec") or {},
+        "database_plan": design.get("database_plan") or {},
         "status": "REQUIREMENTS_ANALYZED",
     }
 
@@ -267,6 +287,12 @@ async def agent_architecture_node(state: AgentState):
     }
 
 
+async def database_design_node(state: AgentState):
+    """사용자가 Workflow 화면에서 확인/확정한 DB Module 설계를 개발 State에 고정합니다."""
+    value = _bundle(state).get("database_plan") or state.get("database_plan") or {}
+    return {"database_plan": value, "status": "DATABASE_DESIGNED"}
+
+
 async def target_workflow_design_node(state: AgentState):
     """
     생성 대상 Agent의 실제 업무 Workflow입니다.
@@ -285,6 +311,133 @@ async def target_workflow_design_node(state: AgentState):
         "target_agent_workflow": value,
         "status": "TARGET_WORKFLOW_DESIGNED",
     }
+
+
+async def as_built_architecture_node(state: AgentState):
+    """생성된 실제 소스를 역분석해 As-Built Architecture를 만듭니다.
+
+    v5.345: 재작업에서는 변경 영향이 없으면 이전 As-Built semantic review를
+    재사용하고, 구조와 무관한 부분 변경이면 deterministic scan만 다시 수행합니다.
+    """
+    revision = _incremental_revision_info(state)
+    mode = str(revision.get("mode") or "")
+    affected = {str(x or "") for x in revision.get("affected_sections") or []}
+    previous_state = (_bundle(state).get("previous_build_state") or {}) if isinstance(_bundle(state), dict) else {}
+    previous_as_built = previous_state.get("as_built_architecture") or {}
+
+    try:
+        if mode == "FULL_REUSE" and previous_as_built:
+            current = build_as_built_architecture(
+                project_root=state["project_root"],
+                design_architecture=state.get("agent_architecture") or {},
+                file_plan=state.get("file_plan") or {},
+            )
+            if (
+                str(current.get("source_fingerprint") or "")
+                and str(current.get("source_fingerprint") or "") == str(previous_as_built.get("source_fingerprint") or "")
+            ):
+                value = json.loads(json.dumps(previous_as_built, ensure_ascii=False))
+                value["analysis_mode"] = "incremental_full_reuse_no_llm"
+                value["incremental_reused"] = True
+                value["scan"] = current.get("scan") or value.get("scan") or {}
+                value["source_fingerprint"] = current.get("source_fingerprint")
+                return {
+                    "as_built_architecture": value,
+                    "status": "AS_BUILT_ARCHITECTURE_ANALYZED",
+                }
+
+        structural_sections = {"agent_architecture", "target_agent_workflow", "database_plan", "tool_mcp_plan"}
+        if mode == "PARTIAL_REVISE" and not structural_sections.intersection(affected):
+            value = build_as_built_architecture(
+                project_root=state["project_root"],
+                design_architecture=state.get("agent_architecture") or {},
+                file_plan=state.get("file_plan") or {},
+            )
+            value["analysis_mode"] = "incremental_static_scan_no_llm"
+            value["analysis_provider"] = "not_required"
+        else:
+            value = await analyze_as_built_architecture(
+                project_root=state["project_root"],
+                design_architecture=state.get("agent_architecture") or {},
+                file_plan=state.get("file_plan") or {},
+                provider=state.get("provider"),
+            )
+    except Exception as exc:
+        return {
+            "as_built_architecture": {
+                "project_root": state.get("project_root") or "",
+                "components": [],
+                "interfaces": [],
+                "persistence": [],
+                "security": [],
+                "state": [],
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+            "status": "AS_BUILT_ARCHITECTURE_FAILED",
+            "error": f"As-Built Architecture 분석 실패: {type(exc).__name__}: {exc}",
+        }
+
+    return {
+        "as_built_architecture": value,
+        "status": "AS_BUILT_ARCHITECTURE_ANALYZED",
+    }
+
+
+async def architecture_conformance_node(state: AgentState):
+    """Design Architecture와 실제 구현을 비교하고 자동 보정 여부를 결정합니다."""
+    if state.get("status") != "AS_BUILT_ARCHITECTURE_ANALYZED":
+        return {
+            "architecture_conformance": {
+                "ok": False,
+                "score": 0,
+                "status": "ERROR",
+                "mismatches": [],
+                "error": "As-Built Architecture 분석이 완료되지 않았습니다.",
+            },
+            "status": "ARCHITECTURE_CONFORMANCE_FAILED",
+        }
+
+    conformance = compare_architectures(
+        state.get("agent_architecture") or {},
+        state.get("as_built_architecture") or {},
+        state.get("file_plan") or {},
+    )
+    iteration = int(state.get("architecture_repair_iteration") or 0)
+    conformance["repair_iteration"] = iteration
+    conformance["analysis_provider"] = (state.get("as_built_architecture") or {}).get("analysis_provider") or ""
+
+    if conformance.get("ok"):
+        return {
+            "architecture_conformance": conformance,
+            "status": "ARCHITECTURE_CONFORMANCE_PASSED",
+            "error": "",
+        }
+
+    if iteration < 2:
+        return {
+            "architecture_conformance": conformance,
+            "status": "ARCHITECTURE_REPAIR_READY",
+            "error": "",
+        }
+
+    return {
+        "architecture_conformance": conformance,
+        "status": "ARCHITECTURE_CONFORMANCE_FAILED",
+        "error": (
+            "Design Architecture와 실제 구현의 핵심 차이가 자동 보정 2회 후에도 남아 있습니다. "
+            "아키텍처 탭의 차이점을 확인하십시오."
+        ),
+    }
+
+
+def route_after_architecture_conformance(
+    state: AgentState,
+) -> Literal["environment_configuration", "code_generation", "end"]:
+    if state.get("status") == "ARCHITECTURE_CONFORMANCE_PASSED":
+        return "environment_configuration"
+    if state.get("status") == "ARCHITECTURE_REPAIR_READY":
+        return "code_generation"
+    return "end"
 
 
 def _append_planned_file(
@@ -318,17 +471,106 @@ def _map_component_file(
     paths: list[str],
 ) -> None:
     rows = value.setdefault("component_file_map", [])
-    existing = {
-        str(item.get("component") or "").casefold()
-        for item in rows
-        if isinstance(item, dict)
-    }
-    if component.casefold() not in existing:
-        rows.append({
-            "component": component,
-            "files": paths,
-            "status": "planned",
-        })
+    target = component.casefold()
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("component") or "").casefold() != target:
+            continue
+        merged = []
+        seen = set()
+        for raw in list(item.get("files") or []) + list(paths or []):
+            path = str(raw or "").replace("\\", "/")
+            key = path.casefold()
+            if path and key not in seen:
+                merged.append(path)
+                seen.add(key)
+        item["files"] = merged
+        item.setdefault("status", "planned")
+        return
+
+    rows.append({
+        "component": component,
+        "files": list(paths or []),
+        "status": "planned",
+    })
+
+
+
+def _normalize_react_frontend_plan_extensions(value: dict, *, typescript: bool) -> dict:
+    """React Frontend의 언어 계약에 맞춰 src 경로 확장자를 결정적으로 정규화합니다.
+
+    React + TypeScript가 확정된 Agent에서 LLM이 App.jsx/main.jsx/api.js를 제안하더라도
+    실제 File Plan에는 .tsx/.ts만 남깁니다. JavaScript React는 반대로 기존 확장자를 유지합니다.
+    """
+    if not typescript:
+        return value
+
+    def convert(raw: str) -> str:
+        path = str(raw or "").replace("\\", "/")
+        low = path.casefold()
+        if low.startswith("frontend/src/"):
+            if low.endswith(".jsx"):
+                return path[:-4] + ".tsx"
+            if low.endswith(".js"):
+                return path[:-3] + ".ts"
+        return path
+
+    normalized_rows = []
+    seen = set()
+    for item in value.get("new_files") or []:
+        if isinstance(item, str):
+            converted = convert(item)
+            key = converted.casefold()
+            if key not in seen:
+                normalized_rows.append(converted)
+                seen.add(key)
+            continue
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        row["path"] = convert(row.get("path") or "")
+        key = str(row.get("path") or "").casefold()
+        if key and key not in seen:
+            normalized_rows.append(row)
+            seen.add(key)
+    value["new_files"] = normalized_rows
+
+    normalized_map = []
+    for item in value.get("component_file_map") or []:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        row["files"] = [convert(x) for x in row.get("files") or []]
+        normalized_map.append(row)
+    value["component_file_map"] = normalized_map
+    return value
+
+
+def _react_frontend_minimum_files(*, typescript: bool) -> list[tuple[str, str]]:
+    """생성 Agent React UI를 App 한 파일에 몰아넣지 않는 최소 분리 구조입니다."""
+    ext = "tsx" if typescript else "jsx"
+    service_ext = "ts" if typescript else "js"
+    rows = [
+        ("frontend/package.json", "React/Vite 실행, build, typecheck scripts와 의존성"),
+        ("frontend/index.html", "Vite HTML entrypoint"),
+        (f"frontend/src/main.{ext}", "React Application bootstrap만 담당"),
+        (f"frontend/src/App.{ext}", "최상위 Route/Page 조립만 담당하며 대형 UI 구현 금지"),
+        (f"frontend/src/layouts/AppLayout.{ext}", "Top/Sidebar/Main/Footer를 조립하는 공통 Layout"),
+        (f"frontend/src/components/layout/TopHeader.{ext}", "상단 헤더/전역 액션 영역"),
+        (f"frontend/src/components/layout/Sidebar.{ext}", "좌측 메뉴/Navigation 영역"),
+        (f"frontend/src/components/layout/Footer.{ext}", "하단 Footer/상태 영역"),
+        (f"frontend/src/pages/HomePage.{ext}", "기본 본문 Page; 업무별 Page는 pages 아래 추가 분리"),
+        (f"frontend/src/services/api.{service_ext}", "FastAPI API Client와 통신 함수"),
+        ("frontend/src/styles/global.css", "전역 Layout/Theme 스타일; Page/Component 전용 스타일과 분리"),
+    ]
+    if typescript:
+        rows.extend([
+            ("frontend/tsconfig.json", "React TypeScript compiler 설정"),
+            ("frontend/vite.config.ts", "Vite React TypeScript build 설정"),
+            ("frontend/src/types/index.ts", "공통 API/Domain Type 정의"),
+        ])
+    return rows
 
 
 def _ensure_minimum_agent_file_plan(
@@ -348,7 +590,20 @@ def _ensure_minimum_agent_file_plan(
 
     is_fastapi = "fastapi" in text
     is_react = "react" in text or "vite" in text
+    is_react_typescript = is_react and any(
+        token in text
+        for token in (
+            "typescript", "type script", "타입스크립트", "타입 스크립트", ".tsx", "react+ts", "react + ts"
+        )
+    )
     has_mcp = "mcp" in text
+
+    # LLM이 React + TypeScript 요구를 App.jsx 같은 JS 경로로 제안해도
+    # Code Generation 전에 File Plan 자체를 TS 계약으로 정규화합니다.
+    value = _normalize_react_frontend_plan_extensions(
+        value,
+        typescript=is_react_typescript,
+    )
     needs_settings = bool(
         (design_bundle.get("settings_plan") or {}).get("enabled")
     )
@@ -425,14 +680,9 @@ def _ensure_minimum_agent_file_plan(
         )
 
     if is_react:
-        frontend_files = [
-            ("frontend/package.json", "React/Vite 실행 및 build scripts"),
-            ("frontend/index.html", "Vite HTML entrypoint"),
-            ("frontend/src/main.jsx", "React Application bootstrap"),
-            ("frontend/src/App.jsx", "요약 UI와 Settings navigation"),
-            ("frontend/src/pages/SummaryPage.jsx", "파일 선택, 요약 실행, 결과 표시/저장 UI"),
-            ("frontend/src/services/api.js", "FastAPI 호출 Client"),
-        ]
+        frontend_files = _react_frontend_minimum_files(
+            typescript=is_react_typescript,
+        )
         for path, purpose in frontend_files:
             _append_planned_file(value, path, purpose, "frontend")
         _map_component_file(
@@ -440,6 +690,19 @@ def _ensure_minimum_agent_file_plan(
             "React Frontend",
             [x[0] for x in frontend_files],
         )
+        value["frontend_contract"] = {
+            "framework": "React",
+            "build_tool": "Vite",
+            "language": "TypeScript" if is_react_typescript else "JavaScript",
+            "app_entry": (
+                "frontend/src/App.tsx" if is_react_typescript else "frontend/src/App.jsx"
+            ),
+            "modular_layout_required": True,
+            "app_max_lines": 220,
+            "required_layers": [
+                "layouts", "components/layout", "pages", "services", "styles"
+            ] + (["types"] if is_react_typescript else []),
+        }
 
     if needs_settings:
         settings_plan = design_bundle.get("settings_plan") or {}
@@ -455,6 +718,25 @@ def _ensure_minimum_agent_file_plan(
                         "Settings Generator가 관리하는 설정 구성요소",
                         "settings",
                     )
+
+
+    database_plan = design_bundle.get("database_plan") or {}
+    if database_plan.get("enabled"):
+        migration_paths = []
+        for item in database_plan.get("migration_files") or []:
+            path = str((item or {}).get("path") or "").replace("\\", "/").strip()
+            if not path:
+                continue
+            migration_paths.append(path)
+            _append_planned_file(
+                value,
+                path,
+                str((item or {}).get("purpose") or "확정된 PostgreSQL DB Migration"),
+                "database",
+                required=False,
+            )
+        if migration_paths:
+            _map_component_file(value, "Database Migration", migration_paths)
 
     return value
 
@@ -540,6 +822,16 @@ def _requirement_contracts(state: AgentState) -> dict:
         "react": (
             "react" in payload
             or "vite" in payload
+        ),
+        "react_typescript": (
+            ("react" in payload or "vite" in payload)
+            and any(
+                token in payload
+                for token in (
+                    "typescript", "type script", "타입스크립트", "타입 스크립트",
+                    ".tsx", "react+ts", "react + ts"
+                )
+            )
         ),
         "mcp": "mcp" in payload,
         "stdio": (
@@ -658,12 +950,34 @@ async def requirement_coverage_gate_node(state: AgentState):
         require("backend/app/core/config.py", "환경/Provider 설정 중앙화")
 
     if contracts["react"]:
+        ext = "tsx" if contracts["react_typescript"] else "jsx"
+        service_ext = "ts" if contracts["react_typescript"] else "js"
         require("frontend/package.json", "React/Vite Frontend 의존성 및 scripts")
         require("frontend/index.html", "Vite HTML entrypoint")
-        require("frontend/src/main.jsx", "React bootstrap")
-        require("frontend/src/app.jsx", "React UI")
-        require("frontend/src/pages/summarypage.jsx", "요약 결과 페이지")
-        require("frontend/src/services/api.js", "FastAPI API Client")
+        require(f"frontend/src/main.{ext}", "React bootstrap")
+        require(f"frontend/src/app.{ext}", "React 최상위 조립")
+        require(f"frontend/src/layouts/applayout.{ext}", "공통 Layout 분리")
+        require(f"frontend/src/components/layout/topheader.{ext}", "Top Header 분리")
+        require(f"frontend/src/components/layout/sidebar.{ext}", "좌측 Navigation 분리")
+        require(f"frontend/src/components/layout/footer.{ext}", "Footer 분리")
+        require(f"frontend/src/pages/homepage.{ext}", "본문 Page 분리")
+        require(f"frontend/src/services/api.{service_ext}", "FastAPI API Client")
+        require("frontend/src/styles/global.css", "전역 Layout 스타일")
+        if contracts["react_typescript"]:
+            require("frontend/tsconfig.json", "TypeScript compiler 설정")
+            require("frontend/vite.config.ts", "Vite TypeScript 설정")
+            require("frontend/src/types/index.ts", "공통 Type 정의")
+            forbidden_ts_paths = {
+                "frontend/src/main.jsx",
+                "frontend/src/app.jsx",
+                "frontend/src/services/api.js",
+            }
+            conflicting = sorted(paths & forbidden_ts_paths)
+            if conflicting:
+                missing.append(
+                    "React + TypeScript 요구에 JavaScript/JSX 경로가 포함되어 있습니다: "
+                    + ", ".join(conflicting)
+                )
 
     if contracts["mcp"]:
         require("backend/app/mcp/client.py", "MCP Client")
@@ -2280,6 +2594,72 @@ def _normalize_generated_fastapi_imports(project_root: str) -> dict:
         "working_directory": str(backend_dir),
     }
 
+def _incremental_revision_info(state: AgentState) -> dict:
+    runtime = (_bundle(state).get("design_runtime") or {}) if isinstance(_bundle(state), dict) else {}
+    value = runtime.get("incremental_revision") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _incremental_focus_paths(state: AgentState, revision: dict) -> set[str]:
+    root = Path(state["project_root"]).resolve()
+    groups = {str(x or "").casefold() for x in revision.get("changed_groups") or []}
+    affected = {str(x or "") for x in revision.get("affected_sections") or []}
+    paths: set[str] = set()
+
+    def add(raw):
+        rel = _normalize_relative_path(str(raw or ""), state["project_root"])
+        if rel and not re.match(r"^[a-z]:/", rel):
+            paths.add(rel)
+
+    for raw in state.get("target_files") or []:
+        add(raw)
+
+    file_plan = state.get("file_plan") or {}
+    planned = []
+    for item in file_plan.get("new_files") or []:
+        if isinstance(item, str):
+            rel = item
+        elif isinstance(item, dict):
+            rel = str(item.get("path") or "")
+        else:
+            continue
+        rel = rel.replace("\\", "/").lstrip("./")
+        if not rel:
+            continue
+        planned.append(rel)
+        if not (root / rel).is_file():
+            add(rel)
+
+    def add_matching(tokens):
+        for rel in planned:
+            low = rel.casefold()
+            if any(token in low for token in tokens):
+                add(rel)
+
+    if "ui" in groups:
+        add_matching(("frontend/", "ui", "page", "component"))
+    if "backend" in groups:
+        add_matching(("backend/", "api", "router", "service"))
+    if "llm" in groups:
+        add_matching(("llm", "provider", "model", "config", "settings"))
+    if "mcp" in groups or "tool_mcp_plan" in affected:
+        add_matching(("mcp", "tool"))
+    if "database" in groups or "database_plan" in affected:
+        add_matching(("database", "db", "repository", "model", "schema", "migration"))
+    if "auth" in groups:
+        add_matching(("auth", "user", "role", "security", "permission"))
+    if "settings_plan" in affected:
+        for group in ("backend", "frontend"):
+            for raw in (state.get("settings_plan") or {}).get(group, {}).values():
+                add(raw)
+
+    # Keep incremental edits bounded. Missing required files are never dropped.
+    required = _required_manifest_paths(state)
+    existing = _existing_project_manifest_paths(state)
+    paths.update(required - existing)
+    return set(sorted(paths))
+
+
 async def code_generation_node(state: AgentState):
     files = await _read_existing_context(state)
 
@@ -2289,6 +2669,7 @@ async def code_generation_node(state: AgentState):
         "capability_plan": state.get("capability_plan", {}),
         "tool_mcp_plan": state.get("tool_mcp_plan", {}),
         "agent_architecture": state.get("agent_architecture", {}),
+        "database_plan": state.get("database_plan", {}) or design_bundle.get("database_plan", {}),
         "target_agent_workflow": state.get("target_agent_workflow", {}),
         "file_plan": state.get("file_plan", {}),
         "settings_plan": state.get("settings_plan", {}),
@@ -2318,9 +2699,116 @@ async def code_generation_node(state: AgentState):
         and bool(state.get("build_artifact_validation"))
         and not bool((state.get("build_artifact_validation") or {}).get("ok"))
     )
+    architecture_repair_mode = state.get("status") == "ARCHITECTURE_REPAIR_READY"
+    revision = _incremental_revision_info(state)
+    revision_mode = str(revision.get("mode") or "")
+    _existing_manifest = _existing_project_manifest_paths(state)
+    _required_manifest = _required_manifest_paths(state)
+    incremental_reuse_mode = (
+        revision_mode == "FULL_REUSE"
+        and bool(_existing_manifest)
+        and _required_manifest.issubset(_existing_manifest)
+    )
+    incremental_partial_mode = (
+        revision_mode == "PARTIAL_REVISE"
+        and bool(_existing_project_manifest_paths(state))
+    )
     repair_validation: dict = {}
 
-    if test_repair_mode:
+    if architecture_repair_mode:
+        conformance = state.get("architecture_conformance") or {}
+        as_built = state.get("as_built_architecture") or {}
+        root = Path(state["project_root"]).resolve()
+        focused_paths: list[str] = []
+        for row in (state.get("file_plan") or {}).get("component_file_map") or []:
+            if isinstance(row, dict):
+                focused_paths.extend(str(x or "") for x in row.get("files") or [])
+        for row in conformance.get("mismatches") or []:
+            if isinstance(row, dict) and row.get("path"):
+                focused_paths.append(str(row.get("path") or ""))
+        for row in (state.get("file_plan") or {}).get("new_files") or []:
+            if isinstance(row, dict) and row.get("required", True):
+                focused_paths.append(str(row.get("path") or ""))
+
+        for raw in focused_paths[:80]:
+            rel = str(raw or "").replace("\\", "/").strip().lstrip("./")
+            if not rel:
+                continue
+            path = (root / rel).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError:
+                continue
+            if path.is_file() and path.stat().st_size <= 512_000:
+                try:
+                    files[rel] = path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+
+        compact_as_built = {
+            key: as_built.get(key)
+            for key in ("components", "interfaces", "persistence", "security", "state", "frameworks", "required_files", "analysis_provider")
+        }
+        patch_request = (
+            state["request"]
+            + "\n\n[Design Architecture - source of truth]\n"
+            + json.dumps(state.get("agent_architecture") or {}, ensure_ascii=False, indent=2)
+            + "\n\n[As-Built Architecture - actual code evidence]\n"
+            + json.dumps(compact_as_built, ensure_ascii=False, indent=2)
+            + "\n\n[Architecture Conformance mismatches]\n"
+            + json.dumps(conformance.get("mismatches") or [], ensure_ascii=False, indent=2)
+            + "\n\n[File Plan]\n"
+            + json.dumps(state.get("file_plan") or {}, ensure_ascii=False, indent=2)
+            + "\n\nDesign과 실제 구현의 차이만 보정하십시오. "
+            "missing_required_file은 반드시 create_file=true로 생성하고, missing_component는 component_file_map의 실제 파일에 구현하십시오. "
+            "이미 검증된 기능을 삭제하거나 전체 프로젝트를 불필요하게 재작성하지 마십시오. "
+            "Workflow/LangGraph/DB/MCP 계약은 확정 설계를 유지하십시오. 수정 후 정적 As-Built 분석에서 증거가 확인되도록 실제 코드를 구현하십시오."
+        )
+        try:
+            plan = await create_patch(
+                patch_request,
+                files,
+                state.get("provider"),
+                project_scope=True,
+            )
+        except Exception as exc:
+            return {
+                "plan": {"changes": []},
+                "repair_plan_validation": {
+                    "ok": False,
+                    "repair_type": "architecture_conformance",
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                "status": "ARCHITECTURE_REPAIR_PLAN_FAILED",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        plan = _normalize_patch_plan(
+            plan,
+            state["project_root"],
+            _required_manifest_paths(state),
+        )
+        changes = list(plan.get("changes") or []) if isinstance(plan, dict) else []
+        repair_validation = {
+            "ok": bool(changes),
+            "repair_type": "architecture_conformance",
+            "mismatch_count": len(conformance.get("mismatches") or []),
+            "planned_change_count": len(changes),
+            "score_before": conformance.get("score"),
+        }
+        if not changes:
+            return {
+                "plan": plan,
+                "repair_plan_validation": repair_validation,
+                "status": "ARCHITECTURE_REPAIR_PLAN_INCOMPLETE",
+                "error": "Architecture Conformance Repair가 필요한 코드 변경을 제안하지 못했습니다.",
+            }
+        code_plan_validation = {
+            "ok": True,
+            "repair_type": "architecture_conformance",
+            "planned_change_count": len(changes),
+        }
+
+    elif test_repair_mode:
         try:
             plan, repair_validation = await _focused_test_failure_repair_plan(
                 state,
@@ -2395,7 +2883,8 @@ async def code_generation_node(state: AgentState):
             "MCP stdio 요구에서는 Flask/requests/localhost HTTP 서버를 사용하지 마십시오. "
             "기본 LLM은 설정에서 gpt-4o-mini를 읽고 Ollama로 전환 가능해야 하며 "
             "gpt-4를 소스에 직접 하드코딩하지 마십시오. "
-            "React + Vite, FastAPI + Uvicorn, MCP stdio 계약을 확정 요구사항 그대로 유지하십시오."
+            "React + Vite, FastAPI + Uvicorn, MCP stdio 계약을 확정 요구사항 그대로 유지하십시오. "
+            "React + TypeScript 요구이면 App.tsx/main.tsx와 분리된 Layout/Header/Sidebar/Footer/Page 구조를 유지하고 .jsx/.js로 후퇴하지 마십시오."
         )
 
         try:
@@ -2457,6 +2946,73 @@ async def code_generation_node(state: AgentState):
             plan,
         )
 
+    elif incremental_reuse_mode:
+        # No requirement/design change: do not spend another code-generation LLM call.
+        # Existing artifacts are still validated, As-Built analyzed and tested below.
+        plan = {"changes": []}
+        code_plan_validation = _validate_code_plan_manifest(state, plan)
+        fastapi_import_validation = _normalize_generated_fastapi_imports(state["project_root"])
+        return {
+            "plan": plan,
+            "patch_result": list(fastapi_import_validation.get("patch_rows") or []),
+            "code_plan_validation": {**code_plan_validation, "incremental_mode": "FULL_REUSE", "llm_called": False},
+            "fastapi_import_validation": fastapi_import_validation,
+            "file_apply_validation": {"ok": True, "verified_count": 0, "incremental_reuse": True},
+            "status": "CODE_GENERATED",
+        }
+
+    elif incremental_partial_mode:
+        focus_paths = _incremental_focus_paths(state, revision)
+        root = Path(state["project_root"]).resolve()
+        focused_files: dict[str, str] = {}
+        for rel in sorted(focus_paths)[:24]:
+            path = (root / rel).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError:
+                continue
+            if path.is_file() and path.stat().st_size <= 768_000:
+                focused_files[rel] = path.read_text(encoding="utf-8", errors="replace")
+        if focused_files:
+            files = focused_files
+        change_request = str(revision.get("change_request") or state["request"])
+        affected_sections = {
+            key: build_context.get(key)
+            for key in revision.get("affected_sections") or []
+            if key in build_context
+        }
+        patch_request = (
+            "[증분 재작업 - 이번 변경분만]\n" + change_request
+            + "\n\n[변경된 요구사항]\n" + json.dumps(revision.get("changed_values") or {}, ensure_ascii=False, indent=2)
+            + "\n\n[영향받은 설계 section]\n" + json.dumps(affected_sections, ensure_ascii=False, indent=2)
+            + "\n\n[수정 허용/우선 파일]\n" + json.dumps(sorted(focus_paths), ensure_ascii=False, indent=2)
+            + "\n\n전체 프로젝트를 처음부터 다시 생성하지 마십시오. 기존 정상 파일은 보존하고 이번 변경에 영향받은 파일만 수정하십시오. "
+            "새 설계에서 추가된 required 파일은 생성할 수 있습니다. 변경과 무관한 파일은 changes[]에 넣지 마십시오."
+        )
+        try:
+            plan = await create_patch(patch_request, files, state.get("provider"), project_scope=True)
+        except Exception as exc:
+            return {
+                "plan": {"changes": []},
+                "status": "CODE_GENERATION_FAILED",
+                "error": f"{type(exc).__name__}: {exc}",
+                "code_generation_error_type": type(exc).__name__,
+            }
+        required_paths = _required_manifest_paths(state)
+        plan = _normalize_patch_plan(plan, state["project_root"], required_paths)
+        allowed = set(focus_paths) | (required_paths - _existing_project_manifest_paths(state))
+        plan = _filter_patch_plan_paths(plan, state["project_root"], allowed, required_paths)
+        code_plan_validation = _validate_code_plan_manifest(state, plan)
+        code_plan_validation["incremental_mode"] = "PARTIAL_REVISE"
+        code_plan_validation["focus_path_count"] = len(focus_paths)
+        if not code_plan_validation.get("ok"):
+            return {
+                "plan": plan,
+                "code_plan_validation": code_plan_validation,
+                "status": "CODE_PLAN_INCOMPLETE",
+                "error": "증분 Code Plan에서 새로 필요한 필수 파일이 누락되었습니다.",
+            }
+
     else:
         patch_request = (
             state["request"]
@@ -2471,7 +3027,11 @@ async def code_generation_node(state: AgentState):
             "대상 프로젝트에 이미 존재하는 파일은 필요한 경우 수정하고, "
             "존재하지 않는 required 파일은 모두 create_file=true로 생성하십시오. "
             "한두 파일만 생성하고 종료하지 마십시오. "
-            "React + Vite가 요구되면 Frontend 전체 실행 골격을 생성하고, "
+            "React + Vite가 요구되면 Frontend 전체 실행 골격을 생성하십시오. "
+            "React + TypeScript가 확정되면 frontend/src는 .tsx/.ts를 사용하고 App.jsx/main.jsx/api.js를 만들지 마십시오. "
+            "package.json에는 TypeScript/Vite/@types/react/@types/react-dom과 build 스크립트를 포함하십시오. "
+            "App.tsx에는 화면 전체 구현을 몰아넣지 말고 Route/Page/Layout 조립만 두며, "
+            "AppLayout, TopHeader, Sidebar, Footer, pages, services, types, styles로 기능을 분리하십시오. "
             "FastAPI가 요구되면 main/router/schema/service/config/dependency/test 골격을 생성하십시오. "
             "backend/app 구조에서는 SYSTEM_ADMIN이 backend 폴더에서 uvicorn app.main:app을 실행하므로 내부 import는 from app.routers..., from app.services...처럼 app.* 또는 올바른 상대 import를 사용하고 from routers... 또는 from backend.app...를 혼용하지 마십시오. "
             "MCP stdio 요구에서는 Flask/requests 기반 localhost HTTP 서버로 대체하지 마십시오. "
@@ -2619,10 +3179,15 @@ async def code_generation_node(state: AgentState):
         "code_plan_validation": code_plan_validation,
         "repair_plan_validation": (
             repair_validation
-            if (repair_mode or test_repair_mode)
+            if (architecture_repair_mode or repair_mode or test_repair_mode)
             else {}
         ),
         "fastapi_import_validation": fastapi_import_validation,
+        "architecture_repair_iteration": (
+            int(state.get("architecture_repair_iteration") or 0) + 1
+            if architecture_repair_mode
+            else int(state.get("architecture_repair_iteration") or 0)
+        ),
         "file_apply_validation": {
             "ok": True,
             "verified_count": len(result),
@@ -3032,18 +3597,95 @@ async def build_artifact_validation_node(state: AgentState):
                 missing.append(str(path))
 
     if contracts["react"]:
+        ext = "tsx" if contracts["react_typescript"] else "jsx"
+        service_ext = "ts" if contracts["react_typescript"] else "js"
         react_required = [
             root / "frontend/package.json",
             root / "frontend/index.html",
-            root / "frontend/src/main.jsx",
-            root / "frontend/src/App.jsx",
-            root / "frontend/src/pages/SummaryPage.jsx",
-            root / "frontend/src/services/api.js",
+            root / f"frontend/src/main.{ext}",
+            root / f"frontend/src/App.{ext}",
+            root / f"frontend/src/layouts/AppLayout.{ext}",
+            root / f"frontend/src/components/layout/TopHeader.{ext}",
+            root / f"frontend/src/components/layout/Sidebar.{ext}",
+            root / f"frontend/src/components/layout/Footer.{ext}",
+            root / f"frontend/src/pages/HomePage.{ext}",
+            root / f"frontend/src/services/api.{service_ext}",
+            root / "frontend/src/styles/global.css",
         ]
+        if contracts["react_typescript"]:
+            react_required.extend([
+                root / "frontend/tsconfig.json",
+                root / "frontend/vite.config.ts",
+                root / "frontend/src/types/index.ts",
+            ])
 
         for path in react_required:
             if not path.is_file() and str(path) not in missing:
                 missing.append(str(path))
+
+        app_entry = root / f"frontend/src/App.{ext}"
+        if app_entry.is_file():
+            app_text = app_entry.read_text(encoding="utf-8", errors="replace")
+            app_lines = len(app_text.splitlines())
+            if app_lines > 220:
+                architecture_errors.append({
+                    "path": str(app_entry),
+                    "message": (
+                        f"App.{ext}가 {app_lines}줄입니다. App은 Route/Layout 조립만 담당하고 "
+                        "Header/Sidebar/Footer/Page/Feature UI는 별도 파일로 분리해야 합니다."
+                    ),
+                })
+            required_import_tokens = ("AppLayout", "HomePage")
+            missing_imports = [token for token in required_import_tokens if token not in app_text]
+            if missing_imports:
+                architecture_errors.append({
+                    "path": str(app_entry),
+                    "message": (
+                        "App 진입 파일이 분리된 Layout/Page를 조립하지 않습니다: "
+                        + ", ".join(missing_imports)
+                    ),
+                })
+
+        if contracts["react_typescript"]:
+            forbidden = [
+                root / "frontend/src/App.jsx",
+                root / "frontend/src/main.jsx",
+                root / "frontend/src/services/api.js",
+            ]
+            for path in forbidden:
+                if path.is_file():
+                    architecture_errors.append({
+                        "path": str(path),
+                        "message": "React + TypeScript 확정 요구에서 .jsx/.js Frontend entry가 생성되었습니다.",
+                    })
+
+            package_path = root / "frontend/package.json"
+            if package_path.is_file():
+                try:
+                    package = json.loads(package_path.read_text(encoding="utf-8", errors="replace"))
+                except Exception as exc:
+                    architecture_errors.append({
+                        "path": str(package_path),
+                        "message": f"package.json 파싱 실패: {type(exc).__name__}: {exc}",
+                    })
+                else:
+                    deps = {**(package.get("dependencies") or {}), **(package.get("devDependencies") or {})}
+                    required_packages = {"typescript", "@types/react", "@types/react-dom", "vite"}
+                    missing_packages = sorted(required_packages - set(deps))
+                    if missing_packages:
+                        architecture_errors.append({
+                            "path": str(package_path),
+                            "message": (
+                                "React + TypeScript build 의존성이 누락되었습니다: "
+                                + ", ".join(missing_packages)
+                            ),
+                        })
+                    scripts = package.get("scripts") or {}
+                    if not scripts.get("build"):
+                        architecture_errors.append({
+                            "path": str(package_path),
+                            "message": "React + TypeScript Agent는 npm run build 스크립트가 필요합니다.",
+                        })
 
 
     ok = (
@@ -3158,9 +3800,9 @@ async def build_artifact_validation_node(state: AgentState):
 
 def route_after_build_artifact_validation(
     state: AgentState,
-) -> Literal["environment_configuration", "code_generation", "end"]:
+) -> Literal["as_built_architecture", "code_generation", "end"]:
     if state.get("status") == "BUILD_ARTIFACTS_VALIDATED":
-        return "environment_configuration"
+        return "as_built_architecture"
 
     if (
         state.get("status") == "DEBUG_PATCH_READY"
@@ -3298,7 +3940,7 @@ def route_after_debug(
 
 
 def _generated_system_admin_cmd() -> str:
-    return '@echo off\nsetlocal EnableExtensions\nchcp 65001 >nul\ntitle THEANOVA Generated Agent - System Manager\n\ncd /d "%~dp0"\n\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0SYSTEM_ADMIN.ps1"\nset "EXITCODE=%ERRORLEVEL%"\n\necho.\necho ============================================================\nif "%EXITCODE%"=="0" (\n    echo [COMPLETED] Agent program started successfully.\n) else (\n    echo [FAILED] SYSTEM_ADMIN failed. ExitCode=%EXITCODE%\n)\necho ============================================================\necho.\necho This window will remain open.\necho.\npause\n\nendlocal\nexit /b %EXITCODE%\n'
+    return '@echo off\nsetlocal EnableExtensions\nchcp 65001 >nul\ntitle THEANOVA Generated Agent - System Manager\n\ncd /d "%~dp0"\n\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0SYSTEM_ADMIN.ps1"\nset "EXITCODE=%ERRORLEVEL%"\n\necho.\necho ============================================================\nif "%EXITCODE%"=="0" (\n    echo [COMPLETED] Agent program started successfully.\n) else if "%EXITCODE%"=="2" (\n    echo [SETUP_REQUIRED] Initial settings are not complete.\n    echo Edit the opened .env file, save it, then run SYSTEM_ADMIN.cmd again.\n) else (\n    echo [FAILED] SYSTEM_ADMIN failed. ExitCode=%EXITCODE%\n)\necho ============================================================\necho.\necho This window will remain open.\necho.\npause\n\nendlocal\nexit /b %EXITCODE%\n'
 
 
 def _generated_system_admin_ps1() -> str:
@@ -3324,6 +3966,10 @@ $BackendImportOut = Join-Path $LogDir "backend_import.out.log"
 $BackendImportErr = Join-Path $LogDir "backend_import.err.log"
 $FrontendOut = Join-Path $LogDir "frontend.out.log"
 $FrontendErr = Join-Path $LogDir "frontend.err.log"
+$SetupManifest = Join-Path $RuntimeRoot "setup_requirements.json"
+$EnvFile = Join-Path $Root ".env"
+$BackendEnvFile = Join-Path $BackendDir ".env"
+$EnvExample = Join-Path $Root ".env.example"
 
 New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -3344,6 +3990,119 @@ function Write-Ok {
     param([string]$Message)
     Write-Host "[완료] $Message" -ForegroundColor Green
     Write-Log "완료: $Message"
+}
+
+function Read-EnvValues {
+    param([string[]]$Paths)
+    $values = @{}
+    foreach ($path in $Paths) {
+        if (-not (Test-Path $path)) { continue }
+        foreach ($line in Get-Content $path -ErrorAction SilentlyContinue) {
+            $trimmed = [string]$line
+            if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+            $trimmed = $trimmed.Trim()
+            if ($trimmed.StartsWith("#") -or -not $trimmed.Contains("=")) { continue }
+            $parts = $trimmed.Split("=", 2)
+            $key = $parts[0].Trim()
+            if (-not $key) { continue }
+            $value = if ($parts.Count -gt 1) { $parts[1].Trim().Trim('"').Trim("'") } else { "" }
+            $values[$key] = $value
+        }
+    }
+    return $values
+}
+
+function Test-SetupValueReady {
+    param([string]$Value)
+    $v = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($v)) { return $false }
+    $normalized = $v.Trim().ToLowerInvariant()
+    return -not ($normalized -in @(
+        "your-key-here", "change-me", "changeme", "todo", "null", "none",
+        "your-password", "your-token", "replace-me", "<required>"
+    ))
+}
+
+function Test-InitialConfiguration {
+    if (-not (Test-Path $SetupManifest)) {
+        Write-Ok "초기 설정 Manifest 없음 - 별도 필수 설정 없이 실행 가능"
+        return $true
+    }
+
+    try {
+        $manifest = Get-Content $SetupManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        throw "초기 설정 Manifest를 읽을 수 없습니다: $SetupManifest"
+    }
+
+    $required = @($manifest.required_env)
+    if ($required.Count -eq 0) {
+        Write-Ok "필수 초기 설정 항목 없음"
+        return $true
+    }
+
+    if (-not (Test-Path $EnvFile)) {
+        if (Test-Path $EnvExample) {
+            Copy-Item $EnvExample $EnvFile -Force
+        }
+        else {
+            New-Item -ItemType File -Path $EnvFile -Force | Out-Null
+        }
+    }
+
+    $envText = Get-Content $EnvFile -Raw -ErrorAction SilentlyContinue
+    foreach ($item in $required) {
+        $key = [string]$item.key
+        if (-not $key) { continue }
+        if ($envText -notmatch "(?m)^\s*$([regex]::Escape($key))\s*=") {
+            Add-Content -Path $EnvFile -Value ("{0}=" -f $key) -Encoding UTF8
+            $envText += "`n$key="
+        }
+    }
+
+    $values = Read-EnvValues @($EnvFile, $BackendEnvFile)
+    $missing = @()
+    foreach ($item in $required) {
+        $key = [string]$item.key
+        if (-not $key) { continue }
+        $value = if ($values.ContainsKey($key)) { [string]$values[$key] } else { "" }
+        if (-not (Test-SetupValueReady $value)) {
+            $processValue = [Environment]::GetEnvironmentVariable($key, "Process")
+            if (-not (Test-SetupValueReady $processValue)) {
+                $userValue = [Environment]::GetEnvironmentVariable($key, "User")
+                if (Test-SetupValueReady $userValue) { $value = $userValue }
+            }
+            else { $value = $processValue }
+        }
+        if (-not (Test-SetupValueReady $value)) {
+            $missing += $item
+        }
+    }
+
+    if ($missing.Count -eq 0) {
+        Write-Ok "초기 설정 확인"
+        return $true
+    }
+
+    Write-Host ""
+    Write-Host "[SETUP_REQUIRED] Agent 실행 전 기본 설정이 필요합니다." -ForegroundColor Yellow
+    Write-Host "FastAPI/Frontend를 시작하거나 app.main을 import하지 않습니다." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "미설정 필수 항목:"
+    foreach ($item in $missing) {
+        $label = [string]$item.label
+        $key = [string]$item.key
+        if (-not $label) { $label = $key }
+        Write-Host (" - {0} ({1})" -f $label, $key)
+    }
+    Write-Host ""
+    Write-Host "설정 파일: $EnvFile" -ForegroundColor Cyan
+    Write-Host "값을 입력하고 저장한 후 SYSTEM_ADMIN.cmd를 다시 실행하세요."
+    Write-Log ("SETUP_REQUIRED: " + (($missing | ForEach-Object { $_.key }) -join ", "))
+
+    try { Start-Process notepad.exe -ArgumentList @($EnvFile) | Out-Null } catch { }
+    return $false
 }
 
 function Stop-PidFileProcess {
@@ -3516,6 +4275,13 @@ try {
     Write-Host ""
     Write-Log "SYSTEM_ADMIN 시작"
 
+    # v5.345: Configuration gate comes before dependency install/import/runtime.
+    # A generated Agent with DB/Redis/LLM secrets not configured must never import
+    # app.main just to discover a connection/config error.
+    if (-not (Test-InitialConfiguration)) {
+        exit 2
+    }
+
     Ensure-Python312
     Ensure-BackendDependencies
     Ensure-FrontendDependencies
@@ -3553,12 +4319,203 @@ catch {
 }
 '''
 
-def _ensure_generated_system_admin(project_root: str) -> dict:
+def _build_generated_setup_manifest(
+    project_root: str,
+    settings_plan: dict | None = None,
+    database_plan: dict | None = None,
+    environment_plan: dict | None = None,
+    requirement_spec: dict | None = None,
+) -> dict:
+    settings_plan = settings_plan if isinstance(settings_plan, dict) else {}
+    database_plan = database_plan if isinstance(database_plan, dict) else {}
+    environment_plan = environment_plan if isinstance(environment_plan, dict) else {}
+    requirement_spec = requirement_spec if isinstance(requirement_spec, dict) else {}
+    required: dict[str, dict] = {}
+
+    def add(key: str, label: str = "", category: str = "", secret: bool = False, reason: str = ""):
+        key = str(key or "").strip()
+        if not key:
+            return
+        required[key] = {
+            "key": key,
+            "label": str(label or key),
+            "category": str(category or "runtime"),
+            "secret": bool(secret),
+            "reason": str(reason or "Agent 실행 전 필요한 초기 설정"),
+        }
+
+    for category in settings_plan.get("categories") or []:
+        if not isinstance(category, dict):
+            continue
+        category_label = str(category.get("label") or category.get("id") or "settings")
+        for field in category.get("fields") or []:
+            if not isinstance(field, dict):
+                continue
+            if not field.get("required"):
+                continue
+            if str(field.get("storage") or "env").casefold() != "env":
+                continue
+            default = field.get("default")
+            if default not in (None, "", []):
+                continue
+            add(
+                field.get("key"),
+                field.get("label"),
+                category_label,
+                bool(field.get("secret")),
+                field.get("description") or "필수 Settings 값",
+            )
+
+    for item in environment_plan.get("env_vars") or []:
+        if isinstance(item, str):
+            continue
+        if not isinstance(item, dict) or not item.get("required"):
+            continue
+        if item.get("default") not in (None, "", []):
+            continue
+        add(
+            item.get("key") or item.get("name"),
+            item.get("label") or item.get("name") or item.get("key"),
+            "environment",
+            bool(item.get("secret")),
+            item.get("description") or "필수 환경변수",
+        )
+
+    # If the DB is part of the finalized architecture but the LLM omitted a required
+    # settings field, use an existing .env.example DB connection key as a safe gate.
+    root = Path(project_root).resolve()
+    env_example = root / ".env.example"
+    example_keys: list[str] = []
+    if env_example.is_file():
+        for line in env_example.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            if not value.strip():
+                example_keys.append(key.strip())
+
+    if database_plan.get("enabled") and not any(
+        any(token in key.upper() for token in ("DATABASE", "POSTGRES", "PG"))
+        for key in required
+    ):
+        db_candidates = [
+            key for key in example_keys
+            if (
+                key.upper() in {
+                    "DATABASE_URL", "POSTGRES_URL", "PG_DSN", "PGHOST", "PGPORT",
+                    "PGDATABASE", "PGUSER", "PGPASSWORD", "DB_HOST", "DB_PORT",
+                    "DB_NAME", "DB_USER", "DB_PASSWORD",
+                }
+                or key.upper().startswith("POSTGRES_")
+            )
+        ]
+        preferred = [key for key in db_candidates if key.upper() in {"DATABASE_URL", "POSTGRES_URL", "PG_DSN"}]
+        if preferred:
+            add(preferred[0], "PostgreSQL 연결", "database", False, "DB 사용 Agent의 초기 연결 설정")
+        elif db_candidates:
+            for key in db_candidates:
+                add(
+                    key,
+                    "PostgreSQL " + key,
+                    "database",
+                    any(token in key.upper() for token in ("PASSWORD", "SECRET")),
+                    "DB 사용 Agent의 초기 연결 설정",
+                )
+        else:
+            # The design finalized a DB but the generated .env.example omitted a key.
+            # Force a setup stop instead of importing FastAPI with an unknown DB state.
+            add(
+                "DATABASE_URL",
+                "PostgreSQL 연결 URL",
+                "database",
+                True,
+                "DB 사용 Agent는 첫 Runtime 전에 연결 정보를 설정해야 합니다.",
+            )
+
+    runtime_requirement_text = json.dumps(
+        {
+            "environment": environment_plan,
+            "requirements": requirement_spec,
+            "settings": settings_plan,
+            "database": database_plan,
+        },
+        ensure_ascii=False,
+    ).casefold()
+    if "redis" in runtime_requirement_text and not any("REDIS" in key.upper() for key in required):
+        redis_candidates = [key for key in example_keys if "REDIS" in key.upper()]
+        preferred = [key for key in redis_candidates if "URL" in key.upper() or "DSN" in key.upper()]
+        if preferred:
+            add(preferred[0], "Redis 연결", "redis", False, "Redis 사용 Agent의 초기 연결 설정")
+        elif redis_candidates:
+            for key in redis_candidates:
+                add(
+                    key,
+                    "Redis " + key,
+                    "redis",
+                    any(token in key.upper() for token in ("PASSWORD", "SECRET", "TOKEN")),
+                    "Redis 사용 Agent의 초기 연결 설정",
+                )
+        else:
+            add(
+                "REDIS_URL",
+                "Redis 연결 URL",
+                "redis",
+                True,
+                "Redis 사용 Agent는 첫 Runtime 전에 연결 정보를 설정해야 합니다.",
+            )
+
+    # If an OpenAI-backed target explicitly appears but the design omitted a key field,
+    # keep the first-run setup safe rather than failing later during app import/start.
+    if "openai" in runtime_requirement_text and not any("OPENAI_API_KEY" == key.upper() for key in required):
+        openai_candidates = [key for key in example_keys if key.upper() == "OPENAI_API_KEY"]
+        if openai_candidates or "api" in runtime_requirement_text:
+            add(
+                "OPENAI_API_KEY",
+                "OpenAI API Key",
+                "llm",
+                True,
+                "OpenAI 사용 Agent의 필수 인증 값",
+            )
+
+    return {
+        "version": 1,
+        "mode": "CONFIG_BEFORE_RUNTIME",
+        "required_env": list(required.values()),
+        "database_enabled": bool(database_plan.get("enabled")),
+        "instructions": [
+            "SYSTEM_ADMIN.cmd는 이 필수값이 준비되기 전 FastAPI app.main을 import/start하지 않습니다.",
+            ".env 값을 저장한 후 SYSTEM_ADMIN.cmd를 다시 실행합니다.",
+        ],
+    }
+
+
+def _ensure_generated_system_admin(
+    project_root: str,
+    settings_plan: dict | None = None,
+    database_plan: dict | None = None,
+    environment_plan: dict | None = None,
+    requirement_spec: dict | None = None,
+) -> dict:
     root = Path(project_root).resolve()
     cmd_path = root / "SYSTEM_ADMIN.cmd"
     ps1_path = root / "SYSTEM_ADMIN.ps1"
     cmd_existed = cmd_path.exists()
     ps1_existed = ps1_path.exists()
+    setup_manifest_path = root / ".agentstudio" / "setup_requirements.json"
+    setup_manifest_existed = setup_manifest_path.exists()
+    setup_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    setup_manifest = _build_generated_setup_manifest(
+        project_root=project_root,
+        settings_plan=settings_plan,
+        database_plan=database_plan,
+        environment_plan=environment_plan,
+        requirement_spec=requirement_spec,
+    )
+    setup_manifest_path.write_text(
+        json.dumps(setup_manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
     cmd_path.write_text(
         _generated_system_admin_cmd(),
@@ -3581,6 +4538,8 @@ def _ensure_generated_system_admin(project_root: str) -> dict:
         "ps1_utf8_bom": ps1_path.read_bytes().startswith(b"\xef\xbb\xbf"),
         "venv_dot_name": '".venv"' in ps1_check,
         "backend_start": "uvicorn" in ps1_check.casefold(),
+        "setup_before_runtime": "Test-InitialConfiguration" in ps1_check and ps1_check.index("Test-InitialConfiguration") < ps1_check.index("Test-BackendImport"),
+        "setup_exit_code": "exit 2" in ps1_check and "SETUP_REQUIRED" in ps1_check,
         "backend_import_preflight": "FastAPI import 경로 사전 검증" in ps1_check and "importlib.import_module('app.main')" in ps1_check,
         "backend_working_directory": '-WorkingDirectory $BackendDir' in ps1_check and '"app.main:app"' in ps1_check,
         "frontend_start": "npm" in ps1_check.casefold(),
@@ -3589,7 +4548,9 @@ def _ensure_generated_system_admin(project_root: str) -> dict:
     }
     return {
         "ok": all(checks.values()),
-        "files": [str(cmd_path), str(ps1_path)],
+        "files": [str(cmd_path), str(ps1_path), str(setup_manifest_path)],
+        "setup_manifest": setup_manifest,
+        "setup_manifest_path": str(setup_manifest_path),
         "checks": checks,
         "primary_entrypoint": str(cmd_path),
         "patch_rows": [
@@ -3607,6 +4568,13 @@ def _ensure_generated_system_admin(project_root: str) -> dict:
                 "verified": True,
                 "reason": "SYSTEM_ADMIN Windows 실행 관리자 생성",
             },
+            {
+                "path": str(setup_manifest_path),
+                "changed": True,
+                "created": not setup_manifest_existed,
+                "verified": True,
+                "reason": "FastAPI 실행 전 초기 설정 Gate Manifest 생성",
+            },
         ],
     }
 
@@ -3615,7 +4583,13 @@ async def package_completion_node(state: AgentState):
     changes = list(state.get("patch_result") or [])
 
     try:
-        launcher_result = _ensure_generated_system_admin(state["project_root"])
+        launcher_result = _ensure_generated_system_admin(
+            state["project_root"],
+            settings_plan=state.get("settings_plan") or {},
+            database_plan=state.get("database_plan") or {},
+            environment_plan=state.get("environment_plan") or {},
+            requirement_spec=state.get("requirement_spec") or {},
+        )
     except Exception as exc:
         return {
             "launcher_generation_result": {
@@ -3662,6 +4636,10 @@ async def package_completion_node(state: AgentState):
             "target_agent_workflow",
             {},
         ),
+        "database_plan": state.get(
+            "database_plan",
+            {},
+        ),
         "environment_plan": state.get(
             "environment_plan",
             {},
@@ -3678,6 +4656,9 @@ async def package_completion_node(state: AgentState):
             "build_artifact_validation",
             {},
         ),
+        "design_architecture": state.get("agent_architecture", {}),
+        "as_built_architecture": state.get("as_built_architecture", {}),
+        "architecture_conformance": state.get("architecture_conformance", {}),
         "launcher_generation": launcher_result,
         "fastapi_import_validation": state.get("fastapi_import_validation", {}),
         "coding_style": {
@@ -3731,6 +4712,17 @@ async def review_node(state: AgentState):
             "error": "계획 파일/Coding Style 검증 미완료",
         }
 
+    conformance = state.get("architecture_conformance") or {}
+    if not conformance.get("ok"):
+        return {
+            "review": (
+                "생성된 실제 Agent의 As-Built Architecture가 Design Architecture와 "
+                "일치하지 않아 COMPLETED 처리하지 않습니다."
+            ),
+            "status": "INCOMPLETE",
+            "error": "Architecture Conformance Gate 미통과",
+        }
+
     return {
         "review": (
             "Agent Factory 제작 Workflow가 완료되었습니다. "
@@ -3766,6 +4758,10 @@ def build_workflow(checkpointer=None):
     graph.add_node(
         "agent_architecture",
         agent_architecture_node,
+    )
+    graph.add_node(
+        "database_design",
+        database_design_node,
     )
     graph.add_node(
         "target_workflow_design",
@@ -3816,6 +4812,14 @@ def build_workflow(checkpointer=None):
         build_artifact_validation_node,
     )
     graph.add_node(
+        "as_built_architecture",
+        as_built_architecture_node,
+    )
+    graph.add_node(
+        "architecture_conformance",
+        architecture_conformance_node,
+    )
+    graph.add_node(
         "environment_configuration",
         environment_configuration_node,
     )
@@ -3858,6 +4862,10 @@ def build_workflow(checkpointer=None):
     )
     graph.add_edge(
         "agent_architecture",
+        "database_design",
+    )
+    graph.add_edge(
+        "database_design",
         "target_workflow_design",
     )
     graph.add_edge(
@@ -3929,6 +4937,19 @@ def build_workflow(checkpointer=None):
     graph.add_conditional_edges(
         "build_artifact_validation",
         route_after_build_artifact_validation,
+        {
+            "as_built_architecture": "as_built_architecture",
+            "code_generation": "code_generation",
+            "end": END,
+        },
+    )
+    graph.add_edge(
+        "as_built_architecture",
+        "architecture_conformance",
+    )
+    graph.add_conditional_edges(
+        "architecture_conformance",
+        route_after_architecture_conformance,
         {
             "environment_configuration": "environment_configuration",
             "code_generation": "code_generation",

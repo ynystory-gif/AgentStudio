@@ -247,6 +247,13 @@ async def test_ollama() -> dict:
 
 async def test_openai() -> dict:
     s = get_settings()
+    if not s.openai_enabled:
+        return {
+            "ok": True,
+            "skipped": True,
+            "enabled": False,
+            "message": "OpenAI 비사용 설정입니다. 외부 OpenAI API는 호출하지 않습니다. LLM 작업은 Ollama를 우선 사용하고, Codex가 켜져 있으면 지원 작업에서 Codex fallback을 사용할 수 있습니다.",
+        }
     if not s.openai_api_key:
         return {"ok": False, "message": "OPENAI_API_KEY가 설정되지 않았습니다."}
     try:

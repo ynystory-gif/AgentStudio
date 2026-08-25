@@ -1,32 +1,52 @@
-## v5.308 Project Machine Isolation
+## v5.345 Generated Agent Setup + Incremental Build Trace + Modular React TypeScript
 
-- Shared PostgreSQL/Supabase project rows are scoped by `projects.pc_name`.
-- Project list/open/favorite/analyze/create and runtime project-root restore only use the current AgentStudio PC scope.
-- Legacy rows with empty `pc_name` are never globally claimed. Only project roots that physically exist on the current PC are atomically adopted once.
-- `root_path` uniqueness changed from global to `(pc_name, root_path)` so two PCs can use the same local path independently.
-- Renaming the AgentStudio PC name also moves that PC's project ownership rows.
-- v5.307 TypeScript System/Runtime UI migration remains unchanged.
+### v5.345 변경 사항
 
-Frontend TypeScript Phase 7. v5.306 Terminal/WebSocket migration을 기반으로 System / Settings / Runtime 표시 계층을 단계적으로 TypeScript로 분리했습니다.
+- 생성된 Agent `SYSTEM_ADMIN.cmd`에 **초기 설정 Gate** 추가
+  - DB / Redis / LLM / 외부 API 필수 설정이 없으면 `SETUP_REQUIRED (ExitCode=2)`
+  - 설정 완료 전 pip/npm 설치, `app.main:app` import, FastAPI/Frontend 실행을 하지 않음
+  - `.env`가 없으면 `.env.example` 기반으로 만들고 필수 Key를 준비한 뒤 편집기로 열어줌
+- Agent 개발에 **실제 LangGraph Node 기반 생성 진행 로그** 추가
+  - 추가 LLM 호출 없음
+  - Token 단위 로그가 아니라 Node 완료 이벤트만 메모리/WebSocket으로 전달
+- 재작업에 **Incremental Regeneration** 추가
+  - `FULL_REUSE`: 변경 없음 → 이전 설계 재사용, 설계 LLM 0회
+  - `PARTIAL_REVISE`: 변경된 요구사항 영향 섹션/파일만 재설계·수정
+  - `FULL_REDESIGN`: 목적/Workflow/Architecture가 크게 변하면 전체 재설계
+- DB 변경은 증분 모드에서도 고성능 `Codex → OpenAI → Ollama` 설계 + 기존 DB Validator 유지
+- As-Built Architecture는 Source Fingerprint로 변경 여부를 확인해 의미 분석 LLM 재호출을 줄임
+- 생성 대상 Agent가 **React + TypeScript**를 요구하면 `.tsx/.ts` Frontend 계약을 강제
+  - `App.tsx`, `main.tsx`, `services/api.ts` 사용
+  - `App.jsx`, `main.jsx`, `services/api.js` 생성 시 완료 검증 실패
+  - `App.tsx`는 Route/Layout/Page 조립만 담당하고 대형 단일 파일 UI 금지
+- 생성 Agent React UI를 기본 분리 구조로 계획
+  - `layouts/AppLayout.tsx`
+  - `components/layout/TopHeader.tsx`
+  - `components/layout/Sidebar.tsx`
+  - `components/layout/Footer.tsx`
+  - `pages/HomePage.tsx` 및 업무별 Page
+  - `services/api.ts`, `types/index.ts`, `styles/global.css`
+- 기존 v5.344 우측 패널 / 실시간 DB Preview / Architecture State Fix 및 이전 기능 유지
 
-- 서비스 포트 설정 UI → `src/components/system/SystemRuntimePanels.tsx`
-- AgentStudio Runtime DB / Supabase 설정 UI → `SystemRuntimePanels.tsx`
-- Ollama Runtime 상태/실행/중지/설치 UI → `SystemRuntimePanels.tsx`
-- 시스템 상태 요약 UI → `SystemRuntimePanels.tsx`
-- System/Runtime 계약 타입 → `src/types/system.ts`
-- 실제 Backend API orchestration, 비밀번호 ref, 설정 저장/테스트 로직은 `App.jsx`에 유지하여 회귀 범위를 제한
-- v5.306의 Notebook/DB Browser/Terminal TypeScript 전환과 SystemAdmin UTF-8 BOM self-heal 유지
+자세한 내용: `docs/GENERATED_AGENT_SETUP_INCREMENTAL_BUILD_TRACE_V5345.md`
 
-### 이전 버전 메모
+## v5.344 Right Panel Live DB + Architecture State Fix
 
-## v5.306 TypeScript Terminal WebSocket Migration
+### v5.344 변경 사항
 
-v5.305를 기반으로 Frontend TypeScript Phase 6를 진행했습니다.
+- 우측 `Agent 제작 진행` 버튼을 `설계 검토 / 프로젝트 생성 / 개발 시작`으로 정리
+- 요구사항 카드의 중복 Workflow 설계 버튼 제거
+- 대화가 변경될 때만 갱신되는 `DB 실시간 설계 · 초안` 추가
+  - Module / Entity / 관계 / DDL 탭
+  - PostgreSQL / pgvector 기술 표시
+  - Redis Session / Search Cache / Cart / Order Draft Key 초안 표시
+  - 실시간 Preview는 LLM 없이 검증된 Module Registry로 생성
+  - 최종 DB Entity/PK/FK는 설계 검토 단계에서 고성능 Provider + Validator로 확정
+- Workflow 인터뷰 Context의 `\\n` 문자열 조합 오류를 실제 줄바꿈으로 수정
+- Architecture fallback이 전체 Requirement State/대화 JSON을 `goal`로 출력하지 않도록 Backend Sanitizer 추가
+- Architecture 화면을 Design / As-Built / Conformance lifecycle로 분리
+- `NOT_STARTED`에서는 Raw JSON 대신 Empty State 표시
+- Architecture component/description의 Raw State 문자열을 Frontend에서도 차단
+- v5.343 Live Requirement Summary 및 기존 Codex/DB/Attachment/Native Watcher 기능 유지
 
-- 멀티 터미널 탭/이름변경/닫기/재시작/실행정지/Clear UI를 `src/components/terminal/TerminalPanel.tsx`로 분리했습니다.
-- 터미널 오류 상세, 프로젝트 `.venv` 상태, xterm container, 자동완성 popup을 TypeScript 컴포넌트로 이동했습니다.
-- Terminal session/process/error/completion/WebSocket 계약 타입을 `src/types/terminal.ts`에 추가했습니다.
-- WebSocket 수신 JSON parse와 `input`/`command`/`interrupt`/`clear` 송신 serialization을 `src/utils/terminal.ts`의 typed boundary로 이동했습니다.
-- 한글/CJK cell width 및 이전/다음 문자 helper를 `src/utils/terminal.ts`로 이동했습니다.
-- xterm instance/FitAddon/WebSocket session lifecycle, Ctrl+C 종료 확인, command history/keyboard 처리와 Backend orchestration은 App.jsx에 그대로 유지했습니다.
-- System/Runtime, MCP/Agent 본체 로직은 이번 단계에서 변경하지 않았습니다.
+자세한 내용: `docs/RIGHT_PANEL_LIVE_DB_ARCHITECTURE_STATE_FIX_V5344.md`

@@ -73,6 +73,7 @@ export function getEditorModelPath(projectRoot = '', filePath = ''): string {
 
 export const isNotebookFile = (filePath = ''): boolean => String(filePath || '').toLowerCase().endsWith('.ipynb')
 export const isPdfFile = (filePath = ''): boolean => String(filePath || '').toLowerCase().endsWith('.pdf')
+export const isDatabaseDiagramFile = (filePath = ''): boolean => String(filePath || '').toLowerCase().endsWith('.agentdiag.json')
 
 export function isPresentationFile(filePath = ''): boolean {
   const value = String(filePath || '').toLowerCase()

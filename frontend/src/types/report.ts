@@ -39,8 +39,46 @@ export interface AgentArchitecture {
   state?: ArchitectureListItem[]
 }
 
+export interface AsBuiltArchitecture extends AgentArchitecture {
+  frameworks?: string[]
+  analysis_mode?: string
+  analysis_provider?: string
+  scan?: {
+    source_file_count?: number
+    truncated?: boolean
+  }
+  required_files?: Array<{
+    path?: string
+    purpose?: string
+    exists?: boolean
+  }>
+}
+
+export interface ArchitectureMismatch {
+  type?: string
+  severity?: string
+  expected?: string
+  category?: string
+  path?: string
+  status?: string
+}
+
+export interface ArchitectureConformance {
+  ok?: boolean
+  score?: number
+  threshold?: number
+  status?: string
+  critical_count?: number
+  warning_count?: number
+  repair_iteration?: number
+  analysis_provider?: string
+  mismatches?: ArchitectureMismatch[]
+}
+
 export interface GeneratedAgentArchitectureReport {
   architecture?: AgentArchitecture
+  asBuiltArchitecture?: AsBuiltArchitecture
+  architectureConformance?: ArchitectureConformance
   requirementSpec?: {
     goal?: string
   }

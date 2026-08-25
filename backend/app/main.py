@@ -20,6 +20,8 @@ from app.core.machine_identity import ensure_pc_name_env
 from app.services.project_root_registry import restore_registered_project_roots
 from app.services.llm_usage_service import prune_llm_history
 from app.services.database_runtime_service import apply_saved_database_provider
+from app.services.chromium_browser_service import chromium_browser_manager
+from app.services.codex_app_server_service import codex_app_server_manager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -96,15 +98,35 @@ async def lifespan(app: FastAPI):
         else:
             print(f"[경고] PostgreSQL 초기화 실패: {e}")
 
+    # v5.326: BrowserRuntime stale cleanup must never hold FastAPI startup at
+    # "Waiting for application startup". SYSTEM_ADMIN already performs a bounded
+    # bulk cleanup; direct backend launches get the same cleanup in background.
     await agent_graph_runtime.start()
     await mcp_registry_monitor.start()
+
+    async def _background_browser_cleanup():
+        try:
+            browser_cleanup = await chromium_browser_manager.cleanup_stale_processes()
+            if browser_cleanup.get("killed") or browser_cleanup.get("remaining"):
+                print(
+                    f"[완료되었습니다] 이전 BrowserRuntime 백그라운드 정리: "
+                    f"kill {browser_cleanup.get('killed', 0)} · remaining {browser_cleanup.get('remaining', 0)}"
+                )
+        except Exception as browser_cleanup_error:
+            print(f"[경고] 이전 BrowserRuntime 백그라운드 정리 실패: {browser_cleanup_error}")
+
+    browser_cleanup_task = asyncio.create_task(_background_browser_cleanup())
     try:
         yield
     finally:
+        if not browser_cleanup_task.done():
+            browser_cleanup_task.cancel()
         await mcp_registry_monitor.stop()
         await agent_graph_runtime.stop()
+        await chromium_browser_manager.shutdown()
+        await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.308", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.345", lifespan=lifespan)
 
 # Frontend 개발 서버(Vite)와 Backend API 간 CORS 허용
 app.add_middleware(

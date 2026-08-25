@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 import httpx
 
 from app.core.config import get_settings
+from app.services.codex_app_server_service import codex_app_server_manager
+from app.services.model_router import LLMTask, provider_candidates_for
 
 
 def _tcp_open(host: str, port: int) -> bool:
@@ -60,69 +62,103 @@ async def _ollama_status(base_url: str) -> dict:
 
 
 def _provider_model(provider: str, *, openai_model: str, ollama_model: str) -> str:
-    return ollama_model if provider.lower() == "ollama" else openai_model
+    name = provider.lower()
+    if name == "ollama":
+        return ollama_model
+    if name == "openai":
+        return openai_model
+    if name == "codex":
+        return "ChatGPT Codex"
+    return ""
 
 
 async def get_llm_runtime_status() -> dict:
     settings = get_settings()
-    local_provider = (settings.local_llm_provider or "ollama").lower()
-    coding_provider = (settings.coding_llm_provider or "openai").lower()
-    requirements_provider = (settings.requirements_llm_provider or "openai").lower()
-
-    providers = {local_provider, coding_provider, requirements_provider}
-    if providers == {"openai"}:
-        mode = "openai"
-    elif providers == {"ollama"}:
-        mode = "ollama"
-    else:
-        mode = "auto"
-
     ollama = await _ollama_status(settings.ollama_base_url)
     openai_configured = bool((settings.openai_api_key or "").strip())
+    codex_status = codex_app_server_manager.status()
 
-    routing = {
-        "local": {
-            "provider": local_provider,
-            "model": _provider_model(
-                local_provider,
-                openai_model=settings.openai_model,
-                ollama_model=settings.ollama_model,
-            ),
-        },
-        "coding": {
-            "provider": coding_provider,
-            "model": _provider_model(
-                coding_provider,
-                openai_model=settings.openai_model,
-                ollama_model=settings.ollama_model,
-            ),
-        },
-        "requirements": {
-            "provider": requirements_provider,
-            "model": _provider_model(
-                requirements_provider,
-                openai_model=settings.openai_model,
-                ollama_model=settings.ollama_model,
-            ),
-        },
+    task_map = {
+        "local": LLMTask.SIMPLE_QUESTION,
+        "coding": LLMTask.CODE_GENERATION,
+        "requirements": LLMTask.REQUIREMENTS_ANALYSIS,
+        "workflow_design": LLMTask.WORKFLOW_DESIGN,
+        "database_design": LLMTask.DATABASE_SCHEMA_DESIGN,
+        "multi_file_change": LLMTask.MULTI_FILE_CODE_CHANGE,
+        "debugging": LLMTask.EXECUTION_DEBUG_REPAIR,
     }
+    routing: dict[str, dict] = {}
+    for label, task in task_map.items():
+        candidates = provider_candidates_for(task)
+        primary = candidates[0]
+        routing[label] = {
+            "provider": primary,
+            "model": _provider_model(
+                primary,
+                openai_model=settings.openai_model,
+                ollama_model=settings.ollama_model,
+            ),
+            "candidates": candidates,
+        }
+
+    strategy = (settings.ai_provider_strategy or "ollama_first").lower()
+    if strategy == "ollama_first":
+        mode = "auto"
+    else:
+        configured_local = (settings.local_llm_provider or "auto").lower()
+        configured_coding = (settings.coding_llm_provider or "auto").lower()
+        configured_requirements = (settings.requirements_llm_provider or "auto").lower()
+        if configured_coding == "codex" and configured_requirements == "codex":
+            mode = "codex"
+        elif configured_local == configured_coding == configured_requirements and configured_local in {"ollama", "openai"}:
+            mode = configured_local
+        else:
+            mode = "auto"
 
     primary = routing["coding"]
     return {
         "ok": True,
         "mode": mode,
+        "strategy": strategy,
+        "openai_enabled": bool(settings.openai_enabled),
+        "codex_enabled": bool(settings.codex_enabled),
+        "local_only": not settings.openai_enabled and not settings.codex_enabled,
         "primary_provider": primary["provider"],
         "primary_model": primary["model"],
         "routing": routing,
         "providers": {
             "openai": {
+                "enabled": bool(settings.openai_enabled),
                 "configured": openai_configured,
                 "model": settings.openai_model,
-                "status": "설정됨" if openai_configured else "API Key 미설정",
+                "status": (
+                    "비사용"
+                    if not settings.openai_enabled
+                    else ("설정됨" if openai_configured else "API Key 미설정")
+                ),
             },
             "ollama": {
                 **ollama,
+                "enabled": True,
                 "model": settings.ollama_model,
+            },
+            "codex": {
+                "enabled": bool(settings.codex_enabled),
+                "installed": bool(codex_status.get("installed")),
+                "running": bool(codex_status.get("running")),
+                "initialized": bool(codex_status.get("initialized")),
+                "connected": bool(codex_status.get("account")),
+                "account": codex_status.get("account"),
+                "version": codex_status.get("version") or "",
+                "status": (
+                    "비사용"
+                    if not settings.codex_enabled
+                    else (
+                        "ChatGPT 연결됨"
+                        if codex_status.get("account")
+                        else ("Codex 준비됨 · 로그인 필요" if codex_status.get("initialized") else "Codex 시작 필요")
+                    )
+                ),
             },
         },
     }

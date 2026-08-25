@@ -5,6 +5,25 @@ import type {
   GeneratedAgentArchitectureReport,
 } from '../../types/report'
 
+function safeArchitectureText(value: unknown, fallback = ''): string {
+  const text = String(value ?? '').replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!text) return fallback
+  const lower = text.toLowerCase()
+  const rawStateMarkers = [
+    'original_request',
+    'user_answers',
+    'confirmed_requirements',
+    'latest_analysis',
+    'attachment_summary',
+    'assistant:',
+    'user:',
+  ]
+  if (rawStateMarkers.some(marker => lower.includes(marker)) || (text.match(/[{}\[\]]/g)?.length || 0) > 10) {
+    return fallback
+  }
+  return text.length > 220 ? `${text.slice(0, 220)}…` : text
+}
+
 function normalizeArchitectureList(
   value: ArchitectureListItem | ArchitectureListItem[] | null | undefined,
 ): ArchitectureListItem[] {
@@ -23,12 +42,14 @@ function ArchitectureList({ items = [], empty = '정보가 없습니다.' }: Arc
   if (!rows.length) return <div className="report-empty-mini">{empty}</div>
   return <div className="architecture-chip-list">
     {rows.map((item, index) => {
-      const label = typeof item === 'string'
+      const rawLabel = typeof item === 'string'
         ? item
-        : (item.label || item.name || item.component || item.title || item.path || JSON.stringify(item))
-      const detail = typeof item === 'string'
+        : (item.label || item.name || item.component || item.title || item.path || '')
+      const rawDetail = typeof item === 'string'
         ? ''
         : (item.description || item.purpose || item.reason || item.type || '')
+      const label = safeArchitectureText(rawLabel, `구조 항목 ${index + 1}`)
+      const detail = safeArchitectureText(rawDetail)
       return <div className="architecture-chip-card" key={index}>
         <strong>{label}</strong>
         {detail && <small>{detail}</small>}
@@ -88,7 +109,7 @@ export function GeneratedAgentArchitecturePanel({ report }: GeneratedAgentArchit
         <small>TARGET AGENT ARCHITECTURE</small>
         <strong>신규 에이전트 아키텍처</strong>
       </div>
-      <span>{report?.requirementSpec?.goal || '확정된 요구사항을 기반으로 구성 요소를 시각화합니다.'}</span>
+      <span>{safeArchitectureText(report?.requirementSpec?.goal, '확정된 요구사항을 기반으로 구성 요소를 시각화합니다.')}</span>
     </div>
 
     <div className="architecture-canvas generated-agent">
@@ -213,5 +234,104 @@ export function AgentStudioArchitecturePanel() {
         ]} />
       </ReportSection>
     </div>
+  </div>
+}
+
+
+export function AsBuiltAgentArchitecturePanel({ report }: GeneratedAgentArchitecturePanelProps) {
+  const architecture = report?.asBuiltArchitecture || {}
+  const components = normalizeArchitectureList(architecture.components)
+  const interfaces = normalizeArchitectureList(architecture.interfaces)
+  const persistence = normalizeArchitectureList(architecture.persistence)
+  const security = normalizeArchitectureList(architecture.security)
+  const stateRows = normalizeArchitectureList(architecture.state)
+  const provider = architecture.analysis_provider || 'deterministic'
+  const sourceFiles = Number(architecture.scan?.source_file_count || 0)
+
+  return <div className="architecture-panel as-built-architecture-panel">
+    <div className="architecture-panel-head">
+      <div>
+        <small>AS-BUILT ARCHITECTURE</small>
+        <strong>실제 생성 Agent 아키텍처</strong>
+      </div>
+      <span>생성된 프로젝트 파일 {sourceFiles}개를 실제 증거로 재분석 · {provider}</span>
+    </div>
+
+    <div className="architecture-canvas generated-agent as-built">
+      <div className="architecture-stage-board">
+        <div className="architecture-stage-row">
+          <ArchitectureNode title="Generated Source" subtitle={`${sourceFiles} source files`} tone="soft" />
+          <ArchitectureArrow label="static scan" />
+          <ArchitectureNode title="As-Built Analyzer" subtitle="파일 · 클래스 · 함수 · Framework 증거" tone="accent" />
+          <ArchitectureArrow label="evidence" />
+          <ArchitectureNode title={`${components.length} Components`} subtitle="실제 구현 구조" tone="purple" />
+        </div>
+        <div className="architecture-side-band">
+          <ArchitectureNode title={`${stateRows.length} State`} subtitle="LangGraph / Runtime State" tone="soft" />
+          <ArchitectureNode title={`${interfaces.length} Interfaces`} subtitle="API / UI / MCP / Realtime" tone="soft" />
+        </div>
+      </div>
+    </div>
+
+    <div className="architecture-detail-grid">
+      <ReportSection icon="⬢" title="실제 구성 요소" subtitle="Implemented Components">
+        <ArchitectureList items={components} empty="아직 실제 구현 증거가 없습니다." />
+      </ReportSection>
+      <ReportSection icon="⇄" title="실제 인터페이스" subtitle="Detected Interfaces">
+        <ArchitectureList items={interfaces} />
+      </ReportSection>
+      <ReportSection icon="💾" title="실제 영속성" subtitle="Detected Persistence">
+        <ArchitectureList items={persistence} />
+      </ReportSection>
+      <ReportSection icon="🔐" title="실제 보안 / 상태" subtitle="Security & State">
+        <ArchitectureList items={[...security, ...stateRows]} />
+      </ReportSection>
+    </div>
+  </div>
+}
+
+export function ArchitectureConformancePanel({ report }: GeneratedAgentArchitecturePanelProps) {
+  const conformance = report?.architectureConformance || {}
+  const mismatches = conformance.mismatches || []
+  const score = Number(conformance.score ?? 0)
+  const passed = Boolean(conformance.ok)
+
+  return <div className="architecture-panel architecture-conformance-panel">
+    <div className="architecture-panel-head">
+      <div>
+        <small>DESIGN ↔ AS-BUILT CONFORMANCE GATE</small>
+        <strong>설계 / 실제 아키텍처 일치 검증</strong>
+      </div>
+      <span>기준 {Number(conformance.threshold ?? 85)}점 · 자동 보정 {Number(conformance.repair_iteration ?? 0)}/2회</span>
+    </div>
+
+    <div className={`architecture-conformance-score ${passed ? 'pass' : 'fail'}`}>
+      <div>
+        <strong>{score.toFixed(1)}</strong>
+        <span>/ 100</span>
+      </div>
+      <div>
+        <b>{passed ? 'PASS · 설계와 실제 구현이 일치합니다.' : 'CHECK · 설계와 실제 구현 차이가 있습니다.'}</b>
+        <small>분석 Provider: {conformance.analysis_provider || '정적 분석'}</small>
+      </div>
+      <div className="architecture-conformance-counts">
+        <span>Critical <b>{Number(conformance.critical_count || 0)}</b></span>
+        <span>Warning <b>{Number(conformance.warning_count || 0)}</b></span>
+      </div>
+    </div>
+
+    <ReportSection icon="≠" title="설계와 실제 차이" subtitle="Mismatches">
+      {!mismatches.length
+        ? <div className="report-empty-mini">차이가 없습니다. Design Architecture 계약을 충족했습니다.</div>
+        : <div className="architecture-mismatch-list">
+          {mismatches.map((item, index) => <div className={`architecture-mismatch-row ${item.severity || 'warning'}`} key={`${item.type || 'mismatch'}-${index}`}>
+            <span>{item.severity === 'critical' ? '●' : '△'}</span>
+            <div>
+              <strong>{item.expected || item.path || item.category || item.type || 'Architecture mismatch'}</strong>
+              <small>{item.type || 'mismatch'} · {item.severity || 'warning'}</small>
+            </div>
+          </div>)}
+        </div>}
+    </ReportSection>
   </div>
 }

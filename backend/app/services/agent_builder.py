@@ -13,7 +13,7 @@ SYSTEM = """당신은 AI Agent + MCP 프로그램 전문 소프트웨어 아키�
 """
 
 async def build_plan(requirements: str, provider: str | None = None) -> str:
-    llm = model_for_task(LLMTask.CODE_GENERATION)
+    llm = model_for_task(LLMTask.WORKFLOW_DESIGN, provider)
     factory_policy = format_agent_factory_policy_for_prompt()
     result = await llm.ainvoke([
         SystemMessage(content=f"{SYSTEM}\n\n[Agent Factory 제작 기본 방향]\n{factory_policy}"),

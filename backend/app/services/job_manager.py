@@ -61,6 +61,9 @@ class Job:
     progress: int = 0
     message: str = ""
     result: dict = field(default_factory=dict)
+    # v5.345: lightweight build trace. Node-boundary events only; never token logs.
+    events: list[dict] = field(default_factory=list)
+    last_node: str = ""
 
 class JobManager:
     """
@@ -84,7 +87,13 @@ class JobManager:
         progress: int | None = None,
         message: str | None = None,
         result: dict | None = None,
+        node: str | None = None,
+        event_detail: str | None = None,
     ):
+        old_status = job.status
+        old_progress = job.progress
+        old_message = job.message
+        old_node = job.last_node
         if status is not None:
             job.status = status
         if progress is not None:
@@ -93,6 +102,35 @@ class JobManager:
             job.message = message
         if result is not None:
             job.result = result
+        if node is not None:
+            job.last_node = str(node or "")
+
+        # Keep only coarse state/node changes. This does not invoke an LLM and does
+        # not write one line per token, so build performance and disk I/O stay stable.
+        changed = (
+            job.status != old_status
+            or job.progress != old_progress
+            or job.message != old_message
+            or job.last_node != old_node
+            or bool(event_detail)
+        )
+        if changed:
+            event = {
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "status": job.status,
+                "progress": job.progress,
+                "node": job.last_node,
+                "message": job.message,
+            }
+            if event_detail:
+                event["detail"] = str(event_detail)[:600]
+            if not job.events or any(
+                job.events[-1].get(key) != event.get(key)
+                for key in ("status", "progress", "node", "message", "detail")
+            ):
+                job.events.append(event)
+                if len(job.events) > 80:
+                    del job.events[:-80]
 
         await hub.broadcast({
             "type": "job",

@@ -20,6 +20,7 @@ async def get_status():
     postgres_port_open = _port_open("127.0.0.1", 5432)
     postgres_test = await test_postgresql(current_runtime_database_url())
     database_runtime = await get_database_runtime_status()
+    llm_routes = routing_table()
     return {
         "pc_name": current_pc_name(),
         "system_host_name": detect_system_pc_name(),
@@ -34,10 +35,13 @@ async def get_status():
         "database_runtime_target": database_runtime.get("supabase_target") if database_runtime.get("active_provider")=="supabase" else database_runtime.get("local_target"),
         "fastapi": True,
         "ollama": _port_open("127.0.0.1", 11434),
+        "openai_enabled": bool(s.openai_enabled),
         "openai_key": bool(s.openai_api_key),
         "tavily_key": bool(s.tavily_api_key),
         "langsmith_key": bool(s.langsmith_api_key),
-        "llm_provider": s.llm_provider,
+        "llm_provider": llm_routes[0]["provider"] if llm_routes else "ollama",
+        "codex_enabled": bool(s.codex_enabled),
+        "local_only": not bool(s.openai_enabled) and not bool(s.codex_enabled),
         "project_roots": s.project_roots,
         "auto_approve_risk_level": s.auto_approve_risk_level,
         "langgraph": True,
@@ -51,5 +55,5 @@ async def get_status():
         "max_debug_iterations": s.max_debug_iterations,
         "mcp_registry_refresh_seconds": s.mcp_registry_refresh_seconds,
         "mcp_spec_target": "2026-07-28",
-        "llm_routing": routing_table(),
+        "llm_routing": llm_routes,
     }

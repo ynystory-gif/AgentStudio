@@ -17,6 +17,7 @@ import type {
   SqlObjectCategory,
   SqlObjectContextMenuState,
   SqlObjectSchema,
+  SqlSchemaContextMenuState,
 } from '../../types/database'
 import {
   buildRedisKeyTree,
@@ -437,6 +438,7 @@ export interface SqlObjectTreePanelProps {
   toggleObject: (key: string) => void
   openObject: (schemaName: string, category: SqlObjectCategory, item: SqlDatabaseObjectItem) => unknown
   openObjectContextMenu: (event: React.MouseEvent<HTMLElement>, schemaName: string, category: SqlObjectCategory, item: SqlDatabaseObjectItem) => unknown
+  openSchemaContextMenu: (event: React.MouseEvent<HTMLElement>, schemaName: string) => unknown
   openDatabaseContextMenu: (event: React.MouseEvent<HTMLElement>) => unknown
 }
 
@@ -452,6 +454,7 @@ export function SqlObjectTreePanel({
   toggleObject,
   openObject,
   openObjectContextMenu,
+  openSchemaContextMenu,
   openDatabaseContextMenu,
 }: SqlObjectTreePanelProps) {
   if (!connected) return <div className="sql-object-empty">DB에 연결하면 개발 객체 목록이 표시됩니다.</div>
@@ -478,7 +481,7 @@ export function SqlObjectTreePanel({
       const categories = SQL_CATEGORIES.filter(([key]) => (schema[key] || []).length)
       const schemaCount = categories.reduce((sum, [key]) => sum + (schema[key]?.length || 0), 0)
       return <div className="sql-object-schema" key={schemaName}>
-        <button type="button" className="sql-object-tree-row schema" onClick={() => toggleObject(schemaKey)}>
+        <button type="button" className="sql-object-tree-row schema" onClick={() => toggleObject(schemaKey)} onContextMenu={event => openSchemaContextMenu(event, schemaName)} title={`${schemaName} · 우클릭: 스키마 전체 다이어그램 보기`}>
           <span className="tree-caret">{schemaOpen ? '−' : '+'}</span>
           <span className="tree-icon">◈</span>
           <strong>{schemaName}</strong>
@@ -547,7 +550,10 @@ interface ContextMenuProps {
   redisScriptBusy: string
   createRedisPythonScript: (action: string) => unknown
   sqlObjectContextMenu: SqlObjectContextMenuState | null
+  sqlSchemaContextMenu: SqlSchemaContextMenuState | null
   sqlObjectActionBusy: string
+  createSqlTableDiagram: (schemaName: string, item: SqlDatabaseObjectItem) => unknown
+  createSqlSchemaDiagram: (schemaName: string) => unknown
   createSqlTableScript: (schemaName: string, item: SqlDatabaseObjectItem) => unknown
   createSqlTableAlterScript: (schemaName: string, item: SqlDatabaseObjectItem) => unknown
   createSqlTableDmlScript: (schemaName: string, item: SqlDatabaseObjectItem, action: string) => unknown
@@ -569,7 +575,10 @@ export function DatabaseBrowserContextMenus({
   redisScriptBusy,
   createRedisPythonScript,
   sqlObjectContextMenu,
+  sqlSchemaContextMenu,
   sqlObjectActionBusy,
+  createSqlTableDiagram,
+  createSqlSchemaDiagram,
   createSqlTableScript,
   createSqlTableAlterScript,
   createSqlTableDmlScript,
@@ -641,11 +650,30 @@ export function DatabaseBrowserContextMenus({
       <div className="redis-context-note">임시 `.py` 파일만 생성하며 자동 실행하지 않습니다. 저장된 비밀번호는 파일에 평문으로 넣지 않습니다.</div>
     </div>}
 
+    {sqlSchemaContextMenu && <div
+      className="sql-object-context-menu sql-schema-context-menu"
+      style={{ left: sqlSchemaContextMenu.x, top: sqlSchemaContextMenu.y }}
+      onMouseDown={event => event.stopPropagation()}
+    >
+      <div className="sql-context-menu-title">
+        <strong>{sqlSchemaContextMenu.schemaName}</strong>
+        <small>Schema · PostgreSQL ERD</small>
+      </div>
+      {['postgresql', 'supabase'].includes(String(dbObjects?.db_type || profile.db_type || '').toLowerCase())
+        ? <button type="button" onClick={() => createSqlSchemaDiagram(sqlSchemaContextMenu.schemaName)} disabled={!!sqlObjectActionBusy}>
+            <span>▦</span><div><strong>전체 다이어그램 보기</strong><small>스키마의 모든 테이블 + 내부 FK 관계를 임시 ERD 탭으로 열기 · PNG 내보내기</small></div>
+          </button>
+        : <div className="sql-context-menu-disabled-note">스키마 전체 다이어그램은 PostgreSQL / Supabase PostgreSQL 연결에서 지원합니다.</div>}
+    </div>}
+
     {sqlObjectContextMenu && <div
       className="sql-object-context-menu"
       style={{ left: sqlObjectContextMenu.x, top: sqlObjectContextMenu.y }}
       onMouseDown={event => event.stopPropagation()}
     >
+      {['postgresql', 'supabase'].includes(String(dbObjects?.db_type || profile.db_type || '').toLowerCase()) && <button type="button" onClick={() => createSqlTableDiagram(sqlObjectContextMenu.schemaName, sqlObjectContextMenu.item)} disabled={!!sqlObjectActionBusy}>
+        <span>▦</span><div><strong>다이어그램 보기</strong><small>선택 테이블 + 직접 FK 관계를 임시 ERD 탭으로 열기 · PNG 내보내기</small></div>
+      </button>}
       <button type="button" onClick={() => createSqlTableScript(sqlObjectContextMenu.schemaName, sqlObjectContextMenu.item)} disabled={!!sqlObjectActionBusy}>
         <span>📜</span><div><strong>테이블 스크립트 보기</strong><small>CREATE TABLE DDL을 임시 SQL로 열기</small></div>
       </button>

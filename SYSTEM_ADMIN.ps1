@@ -28,7 +28,25 @@ if (-not $IsAdministrator) {
             -Verb RunAs `
             -Wait `
             -PassThru
-        exit $ElevatedProcess.ExitCode
+
+        $ElevatedExitCode = [int]$ElevatedProcess.ExitCode
+        if ($ElevatedExitCode -ne 0) {
+            $LauncherRoot = Split-Path -Parent $PSCommandPath
+            $LauncherFailureLog = Join-Path $LauncherRoot "logs\system_manager_failure.log"
+            Write-Host ""
+            Write-Host "[실패] 관리자 권한으로 실행된 AgentStudio가 ExitCode=$ElevatedExitCode 로 종료되었습니다." -ForegroundColor Red
+            if (Test-Path $LauncherFailureLog) {
+                Write-Host "실패 상세 로그: $LauncherFailureLog" -ForegroundColor Yellow
+                Write-Host "========== 실패 상세 ==========" -ForegroundColor DarkYellow
+                Get-Content -LiteralPath $LauncherFailureLog -Tail 120 -ErrorAction SilentlyContinue |
+                    ForEach-Object { Write-Host $_ }
+                Write-Host "================================" -ForegroundColor DarkYellow
+            }
+            else {
+                Write-Host "실패 상세 로그가 생성되지 않았습니다. SYSTEM_ADMIN.ps1 파싱/초기화 단계 오류일 수 있습니다." -ForegroundColor Yellow
+            }
+        }
+        exit $ElevatedExitCode
     }
     catch {
         Write-Host "[실패] 관리자 권한 승격이 취소되었거나 실패했습니다." -ForegroundColor Red
@@ -37,7 +55,7 @@ if (-not $IsAdministrator) {
     }
 }
 
-$ExpectedAgentStudioVersion = "5.308"
+$ExpectedAgentStudioVersion = "5.345"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BackendDir = Join-Path $Root "backend"
@@ -47,6 +65,7 @@ $LogDir = Join-Path $Root "logs"
 $SystemLog = Join-Path $LogDir "system_manager.log"
 $BackendLog = Join-Path $LogDir "backend_console.log"
 $FrontendLog = Join-Path $LogDir "frontend_console.log"
+$FailureLog = Join-Path $LogDir "system_manager_failure.log"
 $DbHealthLog = Join-Path $LogDir "database_health.log"
 $BackendStartupLog = Join-Path $LogDir "backend_startup.log"
 $BackendEnvPath = Join-Path $BackendDir ".env"
@@ -250,9 +269,42 @@ function Stop-AgentStudioProcesses {
             }
         }
 
+    # v5.326: BrowserRuntime leak cleanup is bounded and bulk-based.
+    # Every selected PID is already scoped by the AgentStudio BrowserRuntime command line,
+    # so ordinary user Chrome/Edge windows remain untouched.
+    $browserProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -in @("chrome.exe", "msedge.exe") -and
+            $_.CommandLine -and
+            $_.CommandLine -match "THEANOVA\\AgentStudio\\BrowserRuntime"
+        })
+    if ($browserProcesses.Count -gt 0) {
+        $browserIds = @($browserProcesses | ForEach-Object { [int]$_.ProcessId })
+        Stop-Process -Id $browserIds -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 350
+        $remainingBrowser = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -in @("chrome.exe", "msedge.exe") -and
+                $_.CommandLine -and
+                $_.CommandLine -match "THEANOVA\\AgentStudio\\BrowserRuntime"
+            })
+        if ($remainingBrowser.Count -gt 0) {
+            $remainingIds = @($remainingBrowser | ForEach-Object { [int]$_.ProcessId })
+            Stop-Process -Id $remainingIds -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 250
+        }
+        $remainingBrowser = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -in @("chrome.exe", "msedge.exe") -and
+                $_.CommandLine -and
+                $_.CommandLine -match "THEANOVA\\AgentStudio\\BrowserRuntime"
+            })
+        Write-Log "AgentStudio BrowserRuntime bulk 정리: before=$($browserProcesses.Count) remaining=$($remainingBrowser.Count)"
+    }
+
     Start-Sleep -Milliseconds 700
     Write-Ok "기존 AgentStudio 프로세스 트리 종료"
-    Write-Log "외부 uvicorn/npm/vite 프로세스는 종료 대상에서 제외했습니다."
+    Write-Log "외부 uvicorn/npm/vite 및 일반 Chrome/Edge 프로세스는 종료 대상에서 제외했습니다."
 }
 
 function Wait-HttpOk {
@@ -394,6 +446,9 @@ function Wait-ApiHealth {
 }
 
 try {
+    if (Test-Path $FailureLog) {
+        Remove-Item -LiteralPath $FailureLog -Force -ErrorAction SilentlyContinue
+    }
     Write-Log "SYSTEM_ADMIN 시작"
 
     Write-Host ""
@@ -793,8 +848,30 @@ else {
     exit 0
 }
 catch {
+    $FailureLines = @(
+        ("[{0}] SYSTEM_ADMIN 실패" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff")),
+        ("Version: {0}" -f $ExpectedAgentStudioVersion),
+        ("Root: {0}" -f $Root),
+        ("Message: {0}" -f $_.Exception.Message),
+        ("Type: {0}" -f $_.Exception.GetType().FullName),
+        ("NativeExitCode: {0}" -f $LASTEXITCODE),
+        "",
+        "Exception:",
+        $_.Exception.ToString(),
+        "",
+        "ScriptStackTrace:",
+        ([string]$_.ScriptStackTrace)
+    )
+    try {
+        Set-Content -LiteralPath $FailureLog -Value ($FailureLines -join [Environment]::NewLine) -Encoding UTF8
+    }
+    catch {
+        # Failure reporting must never hide the original startup exception.
+    }
+
     Write-Fail $_.Exception.Message
     Write-Host ""
+    Write-Host "실패 상세 로그: $FailureLog" -ForegroundColor Yellow
     Write-Host "상세 오류:"
     Write-Host $_.Exception.ToString()
     exit 1

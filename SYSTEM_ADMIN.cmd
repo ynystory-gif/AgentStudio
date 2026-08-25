@@ -35,8 +35,24 @@ if "%EXITCODE%"=="0" (
 )
 echo ============================================================
 echo.
+if not "%EXITCODE%"=="0" (
+    echo Failure detail log : %~dp0logs\system_manager_failure.log
+    echo System manager log : %~dp0logs\system_manager.log
+    echo Backend log        : %~dp0logs\backend_console.log
+    echo Frontend log       : %~dp0logs\frontend_console.log
+    echo.
+    if exist "%~dp0logs\system_manager_failure.log" (
+        echo ================= FAILURE DETAIL =================
+        type "%~dp0logs\system_manager_failure.log"
+        echo ==================================================
+        echo.
+    ) else (
+        echo Failure detail log was not created.
+        echo The error may have happened before SYSTEM_ADMIN.ps1 entered its startup handler.
+        echo.
+    )
+)
 echo This window will remain open.
-echo Check the log paths printed above.
 echo.
 pause
 

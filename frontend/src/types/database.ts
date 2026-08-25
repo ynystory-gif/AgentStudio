@@ -206,6 +206,13 @@ export interface SqlObjectContextMenuState {
   item: SqlDatabaseObjectItem
 }
 
+
+export interface SqlSchemaContextMenuState {
+  x: number
+  y: number
+  schemaName: string
+}
+
 export interface SqlDatabaseContextMenuState {
   x: number
   y: number
@@ -218,4 +225,82 @@ export interface SqlAdminPromptState {
   placeholder: string
   value: string
   danger?: boolean
+}
+
+export interface DatabaseDiagramColumn {
+  name: string
+  data_type?: string
+  nullable?: boolean
+  primary_key?: boolean
+  foreign_key?: boolean
+}
+
+export interface DatabaseDiagramTable {
+  id: string
+  schema: string
+  name: string
+  columns: DatabaseDiagramColumn[]
+}
+
+export interface DatabaseDiagramRelationship {
+  name?: string
+  from_table: string
+  from_columns: string[]
+  to_table: string
+  to_columns: string[]
+}
+
+export interface DatabaseDiagramDocument {
+  version: number
+  kind: 'database_table_diagram' | 'database_schema_diagram'
+  db_type?: string
+  database?: string
+  root_table: string
+  schema_name?: string
+  generated_at?: string
+  tables: DatabaseDiagramTable[]
+  relationships: DatabaseDiagramRelationship[]
+}
+
+export type SqlResultCell = unknown
+
+export interface SqlExecutionResultSet {
+  result_index: number
+  statement_index: number
+  sql?: string
+  columns: string[]
+  rows: SqlResultCell[][]
+  row_count: number
+  truncated?: boolean
+}
+
+export interface SqlStatementExecutionResult {
+  index?: number
+  sql?: string
+  columns?: string[]
+  row_count?: number
+  affected_rows?: number
+  truncated?: boolean
+}
+
+export interface SqlExecutionResult {
+  ok?: boolean
+  columns?: string[]
+  rows?: SqlResultCell[][]
+  row_count?: number
+  affected_rows?: number
+  truncated?: boolean
+  elapsed_ms?: number
+  message?: string
+  db_type?: string
+  statement_count?: number
+  statement_results?: SqlStatementExecutionResult[]
+  result_set_count?: number
+  result_sets?: SqlExecutionResultSet[]
+}
+
+export interface SqlExecutionMessage {
+  type?: 'success' | 'error' | 'warning' | 'info' | string
+  text: string
+  time: string
 }

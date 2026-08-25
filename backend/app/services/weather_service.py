@@ -213,7 +213,7 @@ async def _geocode_open_meteo(query: str) -> WeatherLocation | None:
                 "language": "ko",
                 "format": "json",
             },
-            headers={"User-Agent": "THEANOVA-AgentStudio/5.308"},
+            headers={"User-Agent": "THEANOVA-AgentStudio/5.345"},
         )
         response.raise_for_status()
         payload = response.json()
@@ -256,7 +256,7 @@ async def _geocode_nominatim(query: str) -> WeatherLocation | None:
                     "accept-language": "ko",
                 },
                 headers={
-                    "User-Agent": "THEANOVA-AgentStudio/5.308 (local desktop weather geocoding)",
+                    "User-Agent": "THEANOVA-AgentStudio/5.345 (local desktop weather geocoding)",
                     "Accept-Language": "ko,en;q=0.8",
                 },
             )
@@ -338,7 +338,7 @@ async def _fetch_today_forecast_remote(location: WeatherLocation) -> dict[str, A
                 "forecast_days": 1,
                 "timezone": "auto",
             },
-            headers={"User-Agent": "THEANOVA-AgentStudio/5.308"},
+            headers={"User-Agent": "THEANOVA-AgentStudio/5.345"},
         )
         response.raise_for_status()
         payload = response.json()

@@ -8,16 +8,23 @@ import { NotebookEditor } from './components/notebook/NotebookEditor'
 import { PdfViewer, PresentationViewer } from './components/viewers/DocumentViewers'
 import { MiniBadge, SectionTitle, StatusDot, StudioIcon } from './components/common/CommonUi'
 import { FileChangeList, KeyValueGrid, MetricCard, ReportSection, StatusBadge, WorkflowMiniMap } from './components/reports/ReportComponents'
-import { AgentStudioArchitecturePanel, GeneratedAgentArchitecturePanel } from './components/architecture/ArchitecturePanels'
+import { AgentStudioArchitecturePanel, ArchitectureConformancePanel, AsBuiltAgentArchitecturePanel, GeneratedAgentArchitecturePanel } from './components/architecture/ArchitecturePanels'
 import { LlmCatalogPanel } from './components/llm/LlmCatalogPanel'
 import { DatabaseBrowserContextMenus, FirestoreBrowserPanel, RedisBrowserPanel, SqlObjectTreePanel } from './components/database/DatabaseBrowsers'
+import { DatabaseDiagramViewer } from './components/database/DatabaseDiagramViewer'
+import { SqlResultsPane } from './components/database/SqlResultsPane'
 import { TerminalPanel } from './components/terminal/TerminalPanel'
 import { OllamaSettingsPanel, RuntimeDatabasePanel, ServicePortSettingsPanel, SystemStatusSummary } from './components/system/SystemRuntimePanels'
+import { WebBrowserWorkspace } from './components/browser/WebBrowserWorkspace'
+import { CodexPanel } from './components/codex/CodexPanel'
+import { CodexSettingsPanel } from './components/codex/CodexSettingsPanel'
+import { AiAttachmentPicker } from './components/ai/AiAttachmentPicker'
 import { parseTerminalServerMessage, serializeTerminalClientMessage, terminalCellWidth, terminalNextCharacter, terminalPreviousCharacter } from './utils/terminal'
-import { getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isNotebookFile, isPdfFile, isPresentationFile } from './utils/editor'
+import { getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isDatabaseDiagramFile, isNotebookFile, isPdfFile, isPresentationFile } from './utils/editor'
 import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSqlCode } from './utils/notebook'
+import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.308'
+const AGENTSTUDIO_FRONTEND_VERSION='5.345'
 
 const joinWin = (root, file) => `${root}\\${file}`.replaceAll('\\\\', '\\')
 const localIsoDate = () => {
@@ -27,6 +34,47 @@ const localIsoDate = () => {
 }
 const localIsoMonth = () => localIsoDate().slice(0,7)
 const normalizeProjectRelativePath=(value='')=>String(value||'').replace(/\\/g,'/').replace(/^\/+/, '')
+const sanitizeInterviewDisplayText=(value='')=>{
+  let text=String(value||'')
+  // v5.334 and older stored attachment labels in every user message. They are
+  // session metadata, not conversation content, so strip them when restoring
+  // old drafts and before rendering.
+  text=text.replace(/(?:\r?\n){0,2}📎\s*참고 파일:[^\r\n]*/g,'')
+
+  // Never render credentials that may have existed in an older saved draft.
+  text=text.replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g,'[REDACTED_TOKEN]')
+  text=text.replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g,'[REDACTED_TOKEN]')
+  text=text.replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,'[REDACTED_TOKEN]')
+  text=text.replace(/\bxox[baprs]-[A-Za-z0-9-]{16,}\b/g,'[REDACTED_TOKEN]')
+  text=text.replace(/((?:postgres(?:ql)?|mysql|mariadb|redis):\/\/[^:\s/@]+:)([^@\s/]+)(@)/gi,'$1[REDACTED]$3')
+  text=text.replace(/(^|\n)(\s*(?:OPENAI_API_KEY|TAVILY_API_KEY|GEMINI_API_KEY|LANGCHAIN_API_KEY|SUPABASE_DB_PASSWORD|PGPASSWORD|[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD))\s*=\s*)([^\r\n]+)/g,(_m,start,prefix,raw)=>{
+    const value=String(raw||'').trim().toLowerCase()
+    if(value.includes('getenv(')||value.includes('os.getenv')||value.startsWith('${')||value.startsWith('$env:')||value.startsWith('<')||value.includes('[redacted]')){
+      return `${start}${prefix}${raw}`
+    }
+    return `${start}${prefix}[REDACTED]`
+  })
+  return text.trim()
+}
+const protectInterviewAssistantAnswer=(value='')=>{
+  const text=sanitizeInterviewDisplayText(value)
+  if(!text) return text
+
+  // Legacy v5.334~v5.336 drafts can contain an attachment body copied almost
+  // verbatim by a local model. Some of those dumps were flattened into one
+  // very long visual line, so do not rely only on line-start code markers.
+  const lineCodeSignals=(text.match(/(?:^|\n)\s*(?:```|import\s+|from\s+\S+\s+import|def\s+|class\s+|SELECT\s+|CREATE\s+)/gim)||[]).length
+  const inlineCodeSignals=(text.match(/\b(?:import|from|def|class|streamlit|langchain|psycopg|redis|pgvector|openai|pinecone|chromadb|faiss|select|create|insert|update|delete)\b/gi)||[]).length
+  const hasLargeFence=/```(?:python|py|javascript|typescript|sql|json|bash|powershell)?/i.test(text)&&text.length>=1200
+  const looksLikeFlattenedDump=text.length>=1800&&inlineCodeSignals>=12
+  const looksLikeMultilineDump=text.length>=2200&&lineCodeSignals>=4
+
+  if(hasLargeFence||looksLikeFlattenedDump||looksLikeMultilineDump){
+    return '이전에 저장된 첨부 파일 원문/긴 코드 출력은 현재 인터뷰에서 제외했습니다. 참고 파일은 다시 선택하면 안전한 분석 Context로만 반영됩니다.\n\n현재 요구사항을 이어서 진행해 주세요.'
+  }
+  return text
+}
+const DEFAULT_WEB_BROWSER_ID='web-browser-fixed'
 function SystemPage() {
   const [status,setStatus]=useState({})
   const [runtimeLoopStatus,setRuntimeLoopStatus]=useState(null)
@@ -1015,15 +1063,36 @@ function SystemPage() {
         <div className="settings-column settings-column-right">
       <section className="settings-panel">
         <h2>OpenAI</h2>
+        <label className="setting-checkbox-row">
+          <input
+            type="checkbox"
+            checked={String(valueOf('OPENAI_ENABLED')||'true').toLowerCase()!=='false'}
+            onChange={e=>setValue('OPENAI_ENABLED',e.target.checked?'true':'false')}
+          />
+          <span>OpenAI 사용</span>
+        </label>
+        <div className="hint-box">
+          <b>OpenAI 사용</b>을 끄면 OpenAI API를 Provider 후보에서 제외합니다. 일반 AI 작업과 Embedding은 Ollama를 우선 사용하며,
+          Codex를 별도로 켠 경우 복잡한 코딩/요구사항 작업은 Codex까지 마지막 보조 Provider로 사용할 수 있습니다. 저장된 OpenAI API Key는 삭제하지 않습니다.
+        </div>
         {renderField("OpenAI API Key","OPENAI_API_KEY","password","")}
         {renderField("GPT 코딩 모델","OPENAI_MODEL","text","")}
         {renderField("Embedding 모델","OPENAI_EMBEDDING_MODEL","text","")}
         <div className="panel-actions">
-          <button disabled={busy} onClick={()=>saveGroup(['OPENAI_API_KEY','OPENAI_MODEL','OPENAI_EMBEDDING_MODEL'])}>OpenAI 설정 저장</button>
-          <button onClick={()=>testOne('openai')}>OpenAI 연결 테스트</button>
+          <button disabled={busy} onClick={()=>saveGroup(['OPENAI_ENABLED','OPENAI_API_KEY','OPENAI_MODEL','OPENAI_EMBEDDING_MODEL'])}>OpenAI 설정 저장</button>
+          <button disabled={String(valueOf('OPENAI_ENABLED')||'true').toLowerCase()==='false'} onClick={()=>testOne('openai')}>OpenAI 연결 테스트</button>
         </div>
+        {String(valueOf('OPENAI_ENABLED')||'true').toLowerCase()==='false'&&
+          <div className="test-result okbox">OpenAI 비사용 · OpenAI API 호출을 하지 않습니다. Ollama가 우선이며 Codex 사용 설정은 별도로 적용됩니다.</div>}
         {renderTestResult("openai")}
       </section>
+
+      <CodexSettingsPanel
+        enabled={String(valueOf('CODEX_ENABLED')||'false').toLowerCase()==='true'}
+        busy={busy}
+        onEnabledChange={enabled=>setValue('CODEX_ENABLED',enabled?'true':'false')}
+        onSave={()=>saveGroup(['CODEX_ENABLED'])}
+      />
 
       <OllamaSettingsPanel
         busy={busy}
@@ -1053,13 +1122,35 @@ function SystemPage() {
       </section>
 
       <section className="settings-panel">
-        <h2>AI 모델 라우팅</h2>
-        {renderField("로컬 작업 Provider","LOCAL_LLM_PROVIDER","text","")}
-        {renderField("코딩 Provider","CODING_LLM_PROVIDER","text","")}
-        {renderField("요구사항 분석 Provider","REQUIREMENTS_LLM_PROVIDER","text","")}
-        <div className="hint-box">권장: local=ollama / coding=openai / requirements=openai</div>
+        <h2>AI Provider 라우팅</h2>
+        <label>Provider 전략
+          <select value={String(valueOf('AI_PROVIDER_STRATEGY')||'ollama_first')} onChange={e=>setValue('AI_PROVIDER_STRATEGY',e.target.value)}>
+            <option value="ollama_first">자동 · 일반 Ollama 우선 / 고난도 Codex 우선</option>
+            <option value="manual">수동 Provider 지정</option>
+          </select>
+        </label>
+        <label>로컬/일반 작업 Provider
+          <select value={String(valueOf('LOCAL_LLM_PROVIDER')||'auto')} onChange={e=>setValue('LOCAL_LLM_PROVIDER',e.target.value)}>
+            <option value="auto">자동</option><option value="ollama">Ollama</option><option value="openai">OpenAI API</option>
+          </select>
+        </label>
+        <label>코딩 Provider
+          <select value={String(valueOf('CODING_LLM_PROVIDER')||'auto')} onChange={e=>setValue('CODING_LLM_PROVIDER',e.target.value)}>
+            <option value="auto">자동</option><option value="ollama">Ollama</option><option value="openai">OpenAI API</option><option value="codex">Codex</option>
+          </select>
+        </label>
+        <label>요구사항/Agent 설계 Provider
+          <select value={String(valueOf('REQUIREMENTS_LLM_PROVIDER')||'auto')} onChange={e=>setValue('REQUIREMENTS_LLM_PROVIDER',e.target.value)}>
+            <option value="auto">자동</option><option value="ollama">Ollama</option><option value="openai">OpenAI API</option><option value="codex">Codex</option>
+          </select>
+        </label>
+        <div className="hint-box">
+          자동 모드에서는 일반 요약·분류·인터뷰·간단한 코드 작업은 <b>Ollama 우선</b>으로 처리하고 필요한 작업만 OpenAI/Codex로 보조합니다.
+          반대로 <b>Workflow 전체/LangGraph 분기, DB Entity·관계, 복잡한 다중파일 변경, 실행·디버깅·대규모 수정</b>은
+          활성화된 Provider 기준 <b>Codex → OpenAI → Ollama</b> 순으로 품질을 우선합니다. 수동 모드에서는 아래 Provider 선택값을 존중합니다.
+        </div>
         <div className="panel-actions">
-          <button disabled={busy} onClick={()=>saveGroup(['LOCAL_LLM_PROVIDER','CODING_LLM_PROVIDER','REQUIREMENTS_LLM_PROVIDER'])}>라우팅 설정 저장</button>
+          <button disabled={busy} onClick={()=>saveGroup(['AI_PROVIDER_STRATEGY','LOCAL_LLM_PROVIDER','CODING_LLM_PROVIDER','REQUIREMENTS_LLM_PROVIDER'])}>라우팅 설정 저장</button>
         </div>
       </section>
         </div>
@@ -1581,7 +1672,7 @@ function AgentBuildActionBar({
       <i>→</i>
 
       <span className={workflowReady?'done':'active'}>2</span>
-      <b>Workflow</b>
+      <b>설계</b>
       <i>→</i>
 
       <span className={projectReady?'done':''}>3</span>
@@ -1589,7 +1680,7 @@ function AgentBuildActionBar({
       <i>→</i>
 
       <span className={stage==='BUILDING'?'done':''}>4</span>
-      <b>개발</b>
+      <b>개발/검증</b>
     </div>
 
     <div className="shared-build-buttons">
@@ -1599,14 +1690,15 @@ function AgentBuildActionBar({
         disabled={busy||!workflowEnabled||stage==='BUILDING'}
         onClick={onWorkflow}
       >
-        ◇ Workflow 설계
+        ◇ 설계 검토
       </button>
 
       <button
         type="button"
-        className={stage==='WORKFLOW_READY'?'primary':''}
-        disabled={busy||stage!=='WORKFLOW_READY'}
+        className={stage==='WORKFLOW_READY'||(stage==='REQUIREMENTS'&&workflowEnabled)?'primary':''}
+        disabled={busy||stage==='BUILDING'||stage==='PROJECT_CREATED'||(stage==='REQUIREMENTS'&&!workflowEnabled)}
         onClick={onCreateProject}
+        title={stage==='REQUIREMENTS'?'Workflow/DB 설계를 준비합니다. DB가 필요하면 설계 확인 후 프로젝트를 생성합니다.':'확정된 설계를 기준으로 프로젝트를 생성합니다.'}
       >
         ＋ 프로젝트 생성
       </button>
@@ -1628,6 +1720,11 @@ function AgentBuildActionBar({
 
 function IDE() {
   const [root,setRoot]=useState('')
+  // Keep the last authoritative project root that successfully populated the
+  // file tree. React project/root state can briefly be empty while project
+  // switching or DB metadata refreshes are in flight; file operations must not
+  // lose the root during that transient window.
+  const workspaceRootRef=useRef('')
 
   const [newAgentName,setNewAgentName]=useState('')
   const [newAgentProjectRoot,setNewAgentProjectRoot]=useState('')
@@ -1756,6 +1853,7 @@ function IDE() {
   const [loadedProjectAnalysis,setLoadedProjectAnalysis]=useState(null)
   const [files,setFiles]=useState([])
   const [fileLoading,setFileLoading]=useState(false)
+  const [fileLoadingPath,setFileLoadingPath]=useState('')
   const [editorLoadErrors,setEditorLoadErrors]=useState({})
   const [fileCreateLoading,setFileCreateLoading]=useState(false)
   const fileCreateBusyRef=useRef(false)
@@ -1779,6 +1877,19 @@ function IDE() {
   const [editorTabMenu,setEditorTabMenu]=useState(null)
   const [editorFilesMenu,setEditorFilesMenu]=useState(null)
   const [editorCloseConfirm,setEditorCloseConfirm]=useState(null)
+  const [webBrowserTabs,setWebBrowserTabs]=useState(()=>[{
+    id:DEFAULT_WEB_BROWSER_ID,
+    title:'Chrome',
+    url:'',
+    history:[],
+    historyIndex:-1,
+    revision:0,
+    fixed:true
+  }])
+  const [activeWebBrowserId,setActiveWebBrowserId]=useState(DEFAULT_WEB_BROWSER_ID)
+  const [webUrlDetectionEnabled,setWebUrlDetectionEnabled]=useState(true)
+  const [detectedWebService,setDetectedWebService]=useState(null)
+  const detectedWebUrlsRef=useRef(new Set())
   const [fileTreeSelectedPaths,setFileTreeSelectedPaths]=useState([])
   const fileTreeSelectionAnchorRef=useRef('')
   const [fileTreeContextMenu,setFileTreeContextMenu]=useState(null)
@@ -1788,7 +1899,7 @@ function IDE() {
   const [externalNotificationOpen,setExternalNotificationOpen]=useState(false)
 
 
-  const [code,setCode]=useState('// 파일을 선택하세요.')
+  const [code,setCode]=useState('')
   const [focusOwner,setFocusOwner]=useState('editor')
   const focusOwnerRef=useRef('editor')
   const editorInstanceRef=useRef(null)
@@ -1810,6 +1921,163 @@ function IDE() {
 
   const canAutoFocusTerminal=()=>
     focusOwnerRef.current==='terminal'&&!isTextEntryFocused()
+
+  const activeWebBrowserTab=webBrowserTabs.find(tab=>tab.id===activeWebBrowserId)||webBrowserTabs[0]||null
+
+  const activateWebBrowser=(tabId)=>{
+    if(!tabId) return
+    setWorkspaceTab('BROWSER')
+    setActiveWebBrowserId(tabId)
+    setEditorTabMenu(null)
+    setEditorFilesMenu(null)
+    setFocusOwnerSafe('editor')
+  }
+
+  const updateWebBrowserTab=(tabId,updater)=>{
+    setWebBrowserTabs(prev=>prev.map(tab=>tab.id===tabId?updater(tab):tab))
+  }
+
+  const navigateWebBrowser=(tabId,value,{replace=false}={})=>{
+    const url=normalizeBrowserUrl(value)
+    const current=webBrowserTabs.find(tab=>tab.id===tabId)
+    if(current&&(current.remoteSessionId||usesBackendBrowserProxy(current.url))&&!usesBackendBrowserProxy(url)){
+      const remoteSessionId=current.remoteSessionId||current.id
+      api(`/web-browser/chromium/${encodeURIComponent(remoteSessionId)}`,{method:'DELETE'}).catch(()=>{})
+    }
+    updateWebBrowserTab(tabId,tab=>{
+      if(!url){
+        return {...tab,url:'',history:[],historyIndex:-1,revision:tab.revision+1,title:tab.fixed?'Chrome':'Browser'}
+      }
+      if(replace&&tab.historyIndex>=0){
+        const history=[...tab.history]
+        history[tab.historyIndex]=url
+        return {...tab,url,history,revision:tab.revision+1,title:tab.fixed?'Chrome':browserTitleForUrl(url)}
+      }
+      const base=tab.historyIndex>=0?tab.history.slice(0,tab.historyIndex+1):[]
+      const history=[...base,url]
+      return {...tab,url,history,historyIndex:history.length-1,revision:tab.revision+1,title:tab.fixed?'Chrome':browserTitleForUrl(url)}
+    })
+    activateWebBrowser(tabId)
+  }
+
+  const openWebBrowserTab=(value='',{preferFixed=false,detected=false,remoteSessionId=''}={})=>{
+    const url=normalizeBrowserUrl(value)
+    if(preferFixed){
+      navigateWebBrowser(DEFAULT_WEB_BROWSER_ID,url)
+      return DEFAULT_WEB_BROWSER_ID
+    }
+    const id=`web-browser-${Date.now()}-${Math.random().toString(36).slice(2,7)}`
+    const tab={
+      id,
+      title:url?browserTitleForUrl(url):'Browser',
+      url,
+      history:url?[url]:[],
+      historyIndex:url?0:-1,
+      revision:0,
+      fixed:false,
+      detected:!!detected,
+      remoteSessionId:remoteSessionId||undefined
+    }
+    setWebBrowserTabs(prev=>[...prev,tab])
+    setWorkspaceTab('BROWSER')
+    setActiveWebBrowserId(id)
+    setFocusOwnerSafe('editor')
+    return id
+  }
+
+  const syncRemoteWebBrowserState=(tabId,state)=>{
+    const rawUrl=String(state?.url||'').trim()
+    const url=/^https?:\/\//i.test(rawUrl)?normalizeBrowserUrl(rawUrl):''
+    updateWebBrowserTab(tabId,tab=>{
+      const nextTitle=tab.fixed?'Chrome':String(state?.title||'').trim()||browserTitleForUrl(url||tab.url)
+      if(!url) return nextTitle===tab.title?tab:{...tab,title:nextTitle}
+      if(tab.url===url) return nextTitle===tab.title?tab:{...tab,title:nextTitle}
+      const base=tab.historyIndex>=0?tab.history.slice(0,tab.historyIndex+1):[]
+      const history=base[base.length-1]===url?base:[...base,url]
+      return {...tab,url,title:nextTitle,history,historyIndex:history.length-1}
+    })
+  }
+
+  const openRemoteWebBrowserPopup=(parentTabId,popup)=>{
+    const remoteSessionId=String(popup?.session_id||'').trim()
+    if(!remoteSessionId) return
+    setWebBrowserTabs(prev=>{
+      const existing=prev.find(tab=>tab.remoteSessionId===remoteSessionId)
+      if(existing){
+        setActiveWebBrowserId(existing.id)
+        return prev
+      }
+      const rawUrl=String(popup?.url||'').trim()
+      const url=/^https?:\/\//i.test(rawUrl)?normalizeBrowserUrl(rawUrl):''
+      const id=`web-browser-${Date.now()}-${Math.random().toString(36).slice(2,7)}`
+      const title=String(popup?.title||'').trim()||browserTitleForUrl(url)||'Popup'
+      setActiveWebBrowserId(id)
+      return [...prev,{
+        id,
+        title,
+        url,
+        history:url?[url]:[],
+        historyIndex:url?0:-1,
+        revision:0,
+        fixed:false,
+        detected:false,
+        remoteSessionId
+      }]
+    })
+    setWorkspaceTab('BROWSER')
+    setFocusOwnerSafe('editor')
+  }
+
+  const closeWebBrowserTab=(tabId)=>{
+    if(tabId===DEFAULT_WEB_BROWSER_ID) return
+    const closing=webBrowserTabs.find(tab=>tab.id===tabId)
+    const remoteSessionId=closing?.remoteSessionId||tabId
+    api(`/web-browser/chromium/${encodeURIComponent(remoteSessionId)}`,{method:'DELETE'}).catch(()=>{})
+    setWebBrowserTabs(prev=>{
+      const index=prev.findIndex(tab=>tab.id===tabId)
+      const next=prev.filter(tab=>tab.id!==tabId)
+      if(activeWebBrowserId===tabId){
+        const fallback=next[Math.min(Math.max(index-1,0),Math.max(next.length-1,0))]||next.find(tab=>tab.fixed)||null
+        setActiveWebBrowserId(fallback?.id||DEFAULT_WEB_BROWSER_ID)
+      }
+      return next
+    })
+  }
+
+  const stepWebBrowserHistory=(tabId,direction)=>{
+    updateWebBrowserTab(tabId,tab=>{
+      const nextIndex=Math.max(0,Math.min(tab.history.length-1,tab.historyIndex+direction))
+      if(nextIndex===tab.historyIndex||!tab.history[nextIndex]) return tab
+      return {...tab,url:tab.history[nextIndex],historyIndex:nextIndex,revision:tab.revision+1}
+    })
+  }
+
+  const reloadWebBrowser=(tabId)=>updateWebBrowserTab(tabId,tab=>({...tab,revision:tab.revision+1}))
+  const homeWebBrowser=(tabId)=>{
+    const current=webBrowserTabs.find(tab=>tab.id===tabId)
+    if(current&&(current.remoteSessionId||usesBackendBrowserProxy(current.url))){
+      const remoteSessionId=current.remoteSessionId||current.id
+      api(`/web-browser/chromium/${encodeURIComponent(remoteSessionId)}`,{method:'DELETE'}).catch(()=>{})
+    }
+    updateWebBrowserTab(tabId,tab=>({...tab,url:'',history:[],historyIndex:-1,revision:tab.revision+1,title:tab.fixed?'Chrome':'Browser',remoteSessionId:undefined}))
+  }
+  const openWebBrowserExternal=(value)=>{
+    const url=normalizeBrowserUrl(value)
+    if(url) window.open(url,'_blank','noopener,noreferrer')
+  }
+
+  const detectTerminalWebServices=(sessionId,text)=>{
+    if(!webUrlDetectionEnabled||!text) return
+    for(const url of extractLocalDevelopmentUrls(text)){
+      if(detectedWebUrlsRef.current.has(url)) continue
+      setDetectedWebService(current=>{
+        if(current) return current
+        detectedWebUrlsRef.current.add(url)
+        return {url,sessionId,detectedAt:Date.now()}
+      })
+      break
+    }
+  }
 
   const scrollEditorTabs=(direction=1)=>{
     const strip=editorTabsScrollRef.current
@@ -1839,11 +2107,15 @@ function IDE() {
   const [confirmedInterviewRequirements,setConfirmedInterviewRequirements]=useState({})
   const [requirementDraftRestored,setRequirementDraftRestored]=useState(false)
   const [requirementDraftSavedAt,setRequirementDraftSavedAt]=useState('')
+  const [requirementDraftCandidate,setRequirementDraftCandidate]=useState(null)
+  const [requirementDraftDecisionPending,setRequirementDraftDecisionPending]=useState(false)
+  const requirementDraftDecisionPendingRef=useRef(false)
   const builderMessagesEndRef=useRef(null)
   const [workflow,setWorkflow]=useState(null)
   const [workflowDefinition,setWorkflowDefinition]=useState(null)
   const [workflowView,setWorkflowView]=useState('STUDIO')
   const [targetWorkflowPreview,setTargetWorkflowPreview]=useState(null)
+  const [previousTargetWorkflowPreview,setPreviousTargetWorkflowPreview]=useState(null)
   const [targetWorkflowLoading,setTargetWorkflowLoading]=useState(false)
   const [workflowProgress,setWorkflowProgress]=useState({
     active:false,
@@ -1858,13 +2130,20 @@ function IDE() {
     stage:'대기',
     detail:'',
     startedAt:null,
-    elapsedSeconds:0
+    elapsedSeconds:0,
+    events:[]
   })
   const [developmentFinalStatus,setDevelopmentFinalStatus]=useState(null)
   const [targetWorkflowError,setTargetWorkflowError]=useState('')
   const [targetWorkflowQuality,setTargetWorkflowQuality]=useState(null)
+  const [databaseDesignFinalizeBusy,setDatabaseDesignFinalizeBusy]=useState(false)
+  const [liveDatabasePreview,setLiveDatabasePreview]=useState(null)
+  const [liveDatabasePreviewLoading,setLiveDatabasePreviewLoading]=useState(false)
+  const [liveDatabasePreviewError,setLiveDatabasePreviewError]=useState('')
+  const [liveDatabasePreviewTab,setLiveDatabasePreviewTab]=useState('MODULES')
   const [agentBuildStage,setAgentBuildStage]=useState('REQUIREMENTS')
   const [agentBuildBusy,setAgentBuildBusy]=useState(false)
+  const [projectCreateFlowBusy,setProjectCreateFlowBusy]=useState(false)
   const [agentBuildMessage,setAgentBuildMessage]=useState('')
   const [codingStyleReport,setCodingStyleReport]=useState(null)
   const [llmUsageSummary,setLlmUsageSummary]=useState(null)
@@ -1905,6 +2184,17 @@ function IDE() {
 
 
   const [chat,setChat]=useState([{role:'assistant',content:'만들고 싶은 AI Agent + MCP 프로그램을 말씀해 주세요. 필요한 질문은 한 번에 하나씩 하겠습니다.'}])
+  const [interviewAttachments,setInterviewAttachments]=useState([])
+  const [interviewAttachmentMemory,setInterviewAttachmentMemory]=useState('')
+  const [interviewAttachmentSummary,setInterviewAttachmentSummary]=useState('')
+  const [interviewAttachmentSummaryFiles,setInterviewAttachmentSummaryFiles]=useState([])
+  const [interviewAttachmentSummaryBusy,setInterviewAttachmentSummaryBusy]=useState(false)
+  const [interviewAttachmentSummaryError,setInterviewAttachmentSummaryError]=useState('')
+  const interviewAttachmentSummaryRunRef=useRef('')
+  const [requirementManualOverrides,setRequirementManualOverrides]=useState({})
+  const [requirementRedefineId,setRequirementRedefineId]=useState('')
+  const [requirementRedefineText,setRequirementRedefineText]=useState('')
+  const [interviewAttachmentAnalysis,setInterviewAttachmentAnalysis]=useState({busy:false,ready:true,overallProgress:100,failedFiles:0,successfulFiles:0,files:[]})
   const [input,setInput]=useState('')
   const [busy,setBusy]=useState(false)
   const [workspaceTab,setWorkspaceTab]=useState('DESIGN')
@@ -1941,6 +2231,8 @@ function IDE() {
     }catch{return 300}
   })
   const [codeEditPrompt,setCodeEditPrompt]=useState('')
+  const [codeEditAttachments,setCodeEditAttachments]=useState([])
+  const [codeEditAttachmentAnalysis,setCodeEditAttachmentAnalysis]=useState({busy:false,ready:true,overallProgress:100,failedFiles:0,successfulFiles:0,files:[]})
   const [codeEditScope,setCodeEditScope]=useState('FILE')
   const [codeEditChat,setCodeEditChat]=useState([
     {
@@ -1987,6 +2279,7 @@ function IDE() {
   const [globalStopBusy,setGlobalStopBusy]=useState(false)
   const [sqlQueryResult,setSqlQueryResult]=useState(null)
   const [sqlResultTab,setSqlResultTab]=useState('DATA')
+  const [sqlResultSetIndex,setSqlResultSetIndex]=useState(0)
   const [sqlMessages,setSqlMessages]=useState([])
   const [sqlDbObjects,setSqlDbObjects]=useState(null)
   const [sqlDbObjectsBusy,setSqlDbObjectsBusy]=useState(false)
@@ -2018,6 +2311,7 @@ function IDE() {
   const [redisScriptBusy,setRedisScriptBusy]=useState('')
   const [sqlObjectActionBusy,setSqlObjectActionBusy]=useState('')
   const [sqlObjectContextMenu,setSqlObjectContextMenu]=useState(null)
+  const [sqlSchemaContextMenu,setSqlSchemaContextMenu]=useState(null)
   const [sqlDatabaseContextMenu,setSqlDatabaseContextMenu]=useState(null)
   const [sqlAdminPrompt,setSqlAdminPrompt]=useState(null)
   const [sqliteProjectStatus,setSqliteProjectStatus]=useState(null)
@@ -2269,19 +2563,59 @@ function IDE() {
     targetWorkflowQuality,
     agentBuildStage,
     newAgentName,
-    newAgentProjectRoot
+    newAgentProjectRoot,
+    interviewAttachmentSummary,
+    interviewAttachmentMemory,
+    requirementManualOverrides
   ])
 
   useEffect(()=>{
-    // 프로젝트 경로가 확정/변경되면 해당 경로의 이전 요구사항 Draft를 찾습니다.
-    if(!String(newAgentProjectRoot||'').trim()) return
+    // v5.338: 신규 Agent에서 경로를 선택했다고 과거 인터뷰를 자동 복원하지 않습니다.
+    // 동일 경로의 Draft가 있으면 사용자가 직접 '이전 요구사항 이어서 불러오기'를
+    // 선택할 수 있도록 후보만 표시합니다. 경로 선택은 프로젝트 위치 결정이며,
+    // 과거 대화 복원에 대한 사용자 동의로 간주하지 않습니다.
+    const projectPath=String(newAgentProjectRoot||'').trim()
+    if(!projectPath){
+      setRequirementDraftCandidate(null)
+      setRequirementDraftDecisionPending(false)
+      setRequirementDraftRestored(false)
+      return
+    }
 
     const timer=setTimeout(()=>{
-      restoreRequirementDraft()
-    },80)
+      try{
+        const key=requirementDraftKeyFor(projectPath,newAgentName)
+        const raw=localStorage.getItem(key)
+        if(!raw){
+          setRequirementDraftCandidate(null)
+          setRequirementDraftDecisionPending(false)
+          setRequirementDraftRestored(false)
+          setRequirementDraftSavedAt('')
+          return
+        }
+        const snapshot=JSON.parse(raw)
+        setRequirementDraftCandidate({
+          key,
+          saved_at:String(snapshot?.saved_at||''),
+          agent_name:String(snapshot?.agent_name||''),
+          project_root:String(snapshot?.project_root||projectPath)
+        })
+        setRequirementDraftDecisionPending(true)
+        setRequirementDraftRestored(false)
+        setRequirementDraftSavedAt(String(snapshot?.saved_at||''))
+      }catch(e){
+        console.warn('이전 요구사항 Draft 확인 실패',e)
+        setRequirementDraftCandidate(null)
+        setRequirementDraftDecisionPending(false)
+      }
+    },120)
 
     return()=>clearTimeout(timer)
   },[newAgentProjectRoot])
+
+  useEffect(()=>{
+    requirementDraftDecisionPendingRef.current=requirementDraftDecisionPending
+  },[requirementDraftDecisionPending])
 
   useEffect(()=>{loadDefaultPaths()},[])
   useEffect(()=>{refreshProjectList()},[])
@@ -2292,6 +2626,94 @@ function IDE() {
       block:'end'
     })
   },[chat,busy])
+
+  useEffect(()=>{
+    if(!interviewAttachments.length) return
+    if(interviewAttachmentAnalysis.busy||!interviewAttachmentAnalysis.ready) return
+    if(interviewAttachmentAnalysis.successfulFiles===0&&interviewAttachmentAnalysis.failedFiles>0) return
+
+    const attachmentIds=interviewAttachments
+      .map(item=>String(item?.attachment_id||'').trim())
+      .filter(Boolean)
+    if(!attachmentIds.length) return
+
+    const signature=attachmentIds.join('|')
+    if(interviewAttachmentSummaryRunRef.current===signature) return
+    interviewAttachmentSummaryRunRef.current=signature
+
+    const selectedFiles=interviewAttachments.map(item=>({
+      name:String(item?.name||''),
+      path:String(item?.path||'')
+    }))
+    let cancelled=false
+    setInterviewAttachmentSummaryBusy(true)
+    setInterviewAttachmentSummaryError('')
+
+    ;(async()=>{
+      try{
+        const result=await api('/chat/interview/attachments/summary',{
+          method:'POST',
+          body:JSON.stringify({
+            attachment_ids:attachmentIds,
+            attachment_memory:interviewAttachmentMemory,
+            provider,
+            project_root:newAgentProjectRoot||root||''
+          })
+        })
+        if(cancelled) return
+
+        const summary=sanitizeInterviewDisplayText(result?.summary||'')
+        if(!result?.ok||!summary){
+          throw new Error(
+            (Array.isArray(result?.attachment_warnings)&&result.attachment_warnings.length
+              ? result.attachment_warnings.join(' / ')
+              : '첨부 파일에서 요구사항 요약을 만들지 못했습니다.')
+          )
+        }
+
+        setInterviewAttachmentSummary(summary)
+        setInterviewAttachmentSummaryFiles(prev=>{
+          const merged=[...prev,...selectedFiles]
+          const seen=new Set()
+          return merged.filter(item=>{
+            const key=String(item.path||item.name||'').toLowerCase()
+            if(!key||seen.has(key)) return false
+            seen.add(key)
+            return true
+          })
+        })
+        setInterviewAttachmentMemory(
+          sanitizeInterviewDisplayText(result?.attachment_memory||summary)
+        )
+
+        setInterviewAttachments([])
+        setInterviewAttachmentAnalysis({
+          busy:false,ready:true,overallProgress:100,failedFiles:0,successfulFiles:0,files:[]
+        })
+
+        void api('/ai/attachments/release',{
+          method:'POST',
+          body:JSON.stringify({attachment_ids:attachmentIds})
+        }).catch(()=>{})
+      }catch(e){
+        if(cancelled) return
+        interviewAttachmentSummaryRunRef.current=''
+        setInterviewAttachmentSummaryError(
+          '첨부 파일 요구사항 정리 실패: '+String(e?.message||e)
+        )
+      }finally{
+        if(!cancelled) setInterviewAttachmentSummaryBusy(false)
+      }
+    })()
+
+    return()=>{ cancelled=true }
+  },[
+    interviewAttachments,
+    interviewAttachmentAnalysis.busy,
+    interviewAttachmentAnalysis.ready,
+    interviewAttachmentAnalysis.failedFiles,
+    interviewAttachmentAnalysis.successfulFiles
+  ])
 
   const filteredProjects = projectList
     .filter(p=>{
@@ -2321,6 +2743,20 @@ function IDE() {
   const currentProjectName = currentProject?.name || newAgentName || (root ? root.split(/[\\/]/).filter(Boolean).pop() : '') || '프로젝트 선택'
   const currentProjectPath = currentProject?.project_root || currentProject?.root_path || root || newAgentProjectRoot || ''
   const activeWorkspaceRoot = currentProjectPath
+  const resolveWorkspaceRoot=()=>String(
+    activeWorkspaceRoot
+    ||root
+    ||newAgentProjectRoot
+    ||workspaceRootRef.current
+    ||''
+  ).trim()
+
+  useEffect(()=>{
+    const nextRoot=String(activeWorkspaceRoot||'').trim()
+    if(nextRoot){
+      workspaceRootRef.current=nextRoot
+    }
+  },[activeWorkspaceRoot])
   const workspaceSummary = loadedProjectAnalysis?.summary || currentProject?.description || '프로젝트 분석 정보가 아직 없습니다.'
   const isSqlFile=!!selected?.toLowerCase?.().endsWith('.sql')
 
@@ -2339,7 +2775,7 @@ function IDE() {
             ? {...common,name:'MSSQL 연결',db_type:'mssql',host:'127.0.0.1',port:1433,driver:'ODBC Driver 18 for SQL Server'}
             : kind==='oracle'
               ? {...common,name:'Oracle 연결',db_type:'oracle',host:'127.0.0.1',port:1521,service_name:'FREEPDB1'}
-              : {...common,name:'PostgreSQL 연결',db_type:'postgresql',host:'127.0.0.1',port:5432,username:'postgres'}
+              : {...common,name:'PostgreSQL 연결',db_type:'postgresql',host:'127.0.0.1',port:5432,schema_name:'public',username:'postgres'}
     return {...defaults,...previous,db_type:kind,port:(previous.db_type===kind&&previous.port!==undefined)?previous.port:defaults.port}
   }
 
@@ -2945,10 +3381,93 @@ function IDE() {
     event.preventDefault()
     event.stopPropagation()
     const menuWidth=270
-    const menuHeight=430
+    const menuHeight=500
     const x=Math.max(8,Math.min(event.clientX,window.innerWidth-menuWidth-8))
     const y=Math.max(8,Math.min(event.clientY,window.innerHeight-menuHeight-8))
+    setSqlSchemaContextMenu(null)
     setSqlObjectContextMenu({x,y,schemaName,category,item})
+  }
+
+  const openSqlSchemaContextMenu=(event,schemaName)=>{
+    if(!sqlConnectionStatus?.connected||!schemaName) return
+    event.preventDefault()
+    event.stopPropagation()
+    setSqlObjectContextMenu(null)
+    setSqlDatabaseContextMenu(null)
+    const menuWidth=330
+    const menuHeight=150
+    const x=Math.max(8,Math.min(event.clientX,window.innerWidth-menuWidth-8))
+    const y=Math.max(8,Math.min(event.clientY,window.innerHeight-menuHeight-8))
+    setSqlSchemaContextMenu({x,y,schemaName})
+  }
+
+  const createSqlSchemaDiagram=async(schemaName)=>{
+    if(!activeWorkspaceRoot||!sqlConnectionStatus?.connected||!schemaName) return
+    const busyKey=`${schemaName}:schema-diagram`
+    if(sqlObjectActionBusy) return
+    setSqlSchemaContextMenu(null)
+    setSqlObjectActionBusy(busyKey)
+    try{
+      const response=await api('/sql/schema-diagram',{
+        method:'POST',
+        body:JSON.stringify({root:activeWorkspaceRoot,schema:schemaName})
+      })
+      if(response?.relative_path){
+        await openFile(response.relative_path)
+      }
+      setSqlResultTab('MESSAGES')
+      setSqlMessages(prev=>[{
+        type:'success',
+        text:response?.message||`${schemaName} 스키마 전체 다이어그램을 생성했습니다.`,
+        time:new Date().toLocaleTimeString()
+      },...prev].slice(0,100))
+    }catch(e){
+      setSqlResultTab('MESSAGES')
+      setSqlMessages(prev=>[{
+        type:'error',
+        text:`스키마 전체 다이어그램 생성 실패: ${e}`,
+        time:new Date().toLocaleTimeString()
+      },...prev].slice(0,100))
+    }finally{
+      setSqlObjectActionBusy('')
+    }
+  }
+
+  const createSqlTableDiagram=async(schemaName,item)=>{
+    if(!activeWorkspaceRoot||!sqlConnectionStatus?.connected||!item?.name) return
+    const busyKey=`${schemaName}:table-diagram:${item.name}`
+    if(sqlObjectActionBusy) return
+    setSqlObjectContextMenu(null)
+    setSqlObjectActionBusy(busyKey)
+    try{
+      const response=await api('/sql/table-diagram',{
+        method:'POST',
+        body:JSON.stringify({
+          root:activeWorkspaceRoot,
+          schema:schemaName,
+          category:'tables',
+          name:item.name
+        })
+      })
+      if(response?.relative_path){
+        await openFile(response.relative_path)
+      }
+      setSqlResultTab('MESSAGES')
+      setSqlMessages(prev=>[{
+        type:'success',
+        text:response?.message||`${schemaName}.${item.name} 다이어그램을 생성했습니다.`,
+        time:new Date().toLocaleTimeString()
+      },...prev].slice(0,100))
+    }catch(e){
+      setSqlResultTab('MESSAGES')
+      setSqlMessages(prev=>[{
+        type:'error',
+        text:`테이블 다이어그램 생성 실패: ${e}`,
+        time:new Date().toLocaleTimeString()
+      },...prev].slice(0,100))
+    }finally{
+      setSqlObjectActionBusy('')
+    }
   }
 
   const createSqlTableScript=async(schemaName,item)=>{
@@ -3071,6 +3590,7 @@ function IDE() {
     event.preventDefault()
     event.stopPropagation()
     setSqlObjectContextMenu(null)
+    setSqlSchemaContextMenu(null)
     const menuWidth=310
     const menuHeight=520
     const x=Math.max(8,Math.min(event.clientX,window.innerWidth-menuWidth-8))
@@ -3134,6 +3654,22 @@ function IDE() {
     setSqlAdminPrompt(null)
     await createPostgresqlAdminScript(prompt.action,value)
   }
+
+  useEffect(()=>{
+    if(!sqlSchemaContextMenu) return
+    const close=()=>setSqlSchemaContextMenu(null)
+    const onKey=(event)=>{ if(event.key==='Escape') close() }
+    window.addEventListener('mousedown',close)
+    window.addEventListener('scroll',close,true)
+    window.addEventListener('resize',close)
+    window.addEventListener('keydown',onKey,true)
+    return ()=>{
+      window.removeEventListener('mousedown',close)
+      window.removeEventListener('scroll',close,true)
+      window.removeEventListener('resize',close)
+      window.removeEventListener('keydown',onKey,true)
+    }
+  },[sqlSchemaContextMenu])
 
   useEffect(()=>{
     if(!sqlObjectContextMenu) return
@@ -3405,7 +3941,9 @@ function IDE() {
         body:JSON.stringify({root:activeWorkspaceRoot,sql:statement,max_rows:1000})
       })
       setSqlQueryResult(result)
-      setSqlResultTab(result?.columns?.length?'DATA':'MESSAGES')
+      const resultSetCount=Array.isArray(result?.result_sets)?result.result_sets.length:0
+      setSqlResultSetIndex(resultSetCount?resultSetCount-1:0)
+      setSqlResultTab(resultSetCount||result?.columns?.length?'DATA':'MESSAGES')
       setSqlMessages(prev=>[{
         type:'success',
         text:`${label} 실행 완료 · ${result?.message||''} · ${result?.elapsed_ms||0}ms`,
@@ -3466,26 +4004,39 @@ function IDE() {
 
   const applyAiMode=async(mode)=>{
     if(aiModeBusy) return
+    const openaiEnabled=aiRuntimeStatus?.providers?.openai?.enabled!==false
+    if(!openaiEnabled&&mode==='openai') return
     if(mode==='ollama'&&!aiRuntimeStatus?.providers?.ollama?.connected) return
     if(mode==='openai'&&!aiRuntimeStatus?.providers?.openai?.configured) return
+    if(mode==='codex'&&(!aiRuntimeStatus?.providers?.codex?.enabled||!aiRuntimeStatus?.providers?.codex?.installed)) return
 
     const values=mode==='openai'
       ? {
+          AI_PROVIDER_STRATEGY:'manual',
           LOCAL_LLM_PROVIDER:'openai',
           CODING_LLM_PROVIDER:'openai',
           REQUIREMENTS_LLM_PROVIDER:'openai'
         }
       : mode==='ollama'
         ? {
+            AI_PROVIDER_STRATEGY:'manual',
             LOCAL_LLM_PROVIDER:'ollama',
             CODING_LLM_PROVIDER:'ollama',
             REQUIREMENTS_LLM_PROVIDER:'ollama'
           }
-        : {
-            LOCAL_LLM_PROVIDER:'ollama',
-            CODING_LLM_PROVIDER:'openai',
-            REQUIREMENTS_LLM_PROVIDER:'openai'
-          }
+        : mode==='codex'
+          ? {
+              AI_PROVIDER_STRATEGY:'manual',
+              LOCAL_LLM_PROVIDER:'ollama',
+              CODING_LLM_PROVIDER:'codex',
+              REQUIREMENTS_LLM_PROVIDER:'codex'
+            }
+          : {
+              AI_PROVIDER_STRATEGY:'ollama_first',
+              LOCAL_LLM_PROVIDER:'auto',
+              CODING_LLM_PROVIDER:'auto',
+              REQUIREMENTS_LLM_PROVIDER:'auto'
+            }
 
     setAiModeBusy(true)
     setAiModeError('')
@@ -3503,10 +4054,10 @@ function IDE() {
     }
   }
 
-  const aiModeName={auto:'AUTO',openai:'OpenAI',ollama:'Ollama'}[aiRuntimeStatus?.mode]||'확인 중'
+  const aiModeName={auto:'AUTO',openai:'OpenAI',ollama:'Ollama',codex:'Codex'}[aiRuntimeStatus?.mode]||'확인 중'
   const aiPrimaryProvider=(aiRuntimeStatus?.primary_provider||'').toLowerCase()
   const aiPrimaryModel=aiRuntimeStatus?.primary_model||''
-  const aiPrimaryProviderLabel=aiPrimaryProvider==='openai'?'OpenAI':aiPrimaryProvider==='ollama'?'Ollama':''
+  const aiPrimaryProviderLabel=aiPrimaryProvider==='openai'?'OpenAI':aiPrimaryProvider==='ollama'?'Ollama':aiPrimaryProvider==='codex'?'Codex':''
   const aiModeHeaderLabel=aiRuntimeStatus
     ? `AI 모드 · ${aiModeName} · ${aiPrimaryProviderLabel}${aiPrimaryModel?` · ${aiPrimaryModel}`:''}`
     : 'AI 모드 · 상태 확인 중'
@@ -3757,6 +4308,7 @@ function IDE() {
 
 
   const processTerminalRawOutput=(sessionId,incoming,{reset=false}={})=>{
+    detectTerminalWebServices(sessionId,incoming)
     const term=xtermInstancesRef.current[sessionId]
 
     if(reset){
@@ -5170,7 +5722,7 @@ function IDE() {
 
 
   async function loadFiles(rootOverride=null){
-    const targetRoot=rootOverride||root
+    const targetRoot=String(rootOverride||resolveWorkspaceRoot()||'').trim()
 
     if(!targetRoot){
       setFiles([])
@@ -5195,6 +5747,7 @@ function IDE() {
         .map(normalizeProjectRelativePath)
         .filter(Boolean)
 
+      workspaceRootRef.current=targetRoot
       setFiles(nextFiles)
       setProjectDirs(nextDirs)
 
@@ -5226,11 +5779,15 @@ function IDE() {
 
   const reloadExternalEditorFile=async(editorPath,{activate=false}={})=>{
     const normalized=normalizeProjectRelativePath(editorPath)
+    const workspaceRoot=resolveWorkspaceRoot()
+    if(!workspaceRoot){
+      throw new Error('프로젝트 root를 확인할 수 없습니다. 프로젝트를 다시 선택한 뒤 파일을 열어주세요.')
+    }
 
     if(isBinaryPreviewFile(editorPath)){
       let latest={exists:true,mtime_ns:0,size:0}
       try{
-        latest=await api(`/files/meta?root=${encodeURIComponent(activeWorkspaceRoot)}&relative_path=${encodeURIComponent(editorPath)}`)
+        latest=await api(`/files/meta?root=${encodeURIComponent(workspaceRoot)}&relative_path=${encodeURIComponent(editorPath)}`)
       }catch(_){ }
       const latestMeta={
         mtime_ns:latest.mtime_ns||Date.now(),
@@ -5263,7 +5820,7 @@ function IDE() {
 
     const latest=await api('/files/read',{
       method:'POST',
-      body:JSON.stringify({root:activeWorkspaceRoot,relative_path:editorPath})
+      body:JSON.stringify({root:workspaceRoot,relative_path:editorPath})
     })
     const latestContent=latest.content??''
     setEditorFileContents(prev=>({...prev,[editorPath]:latestContent}))
@@ -5408,185 +5965,291 @@ function IDE() {
     setExternalFileNotifications(prev=>prev.filter(row=>row.id!==item.id))
   }
 
-  // v5.203: detect files created/modified/deleted outside AgentStudio.
-  // Polling keeps the implementation dependency-free and works for local Windows projects.
+  // v5.333: detect external file changes with native OS notifications.
+  //
+  // Previous versions called /files/snapshot every 1.5 seconds. That walked the
+  // project tree even while the user was idle and Uvicorn also wrote an access
+  // log line for every poll. On HDD systems this was enough to keep the disk
+  // awake continuously. The watcher below is event-driven: while nothing
+  // changes there is no project scan, no open-file hashing, and no polling log.
   useEffect(()=>{
-    projectFileSnapshotRef.current=null
     fileWatchBusyRef.current=false
 
     if(!root||screen!=='WORKSPACE') return
 
     let cancelled=false
+    let socket=null
+    let reconnectTimer=null
+    let reconnectDelay=1000
+    let reconcileTimer=null
+    let connectedOnce=false
+    const queuedChanges=new Map()
 
-    const pollProjectFiles=async()=>{
+    const queueChangeRows=(rows=[])=>{
+      const priority={modified:1,added:2,deleted:3}
+      for(const row of Array.isArray(rows)?rows:[]){
+        const path=normalizeProjectRelativePath(row?.path)
+        const kind=String(row?.kind||'modified').toLowerCase()
+        if(!path||!priority[kind]) continue
+        const before=queuedChanges.get(path)
+        if(!before||priority[kind]>=priority[before]) queuedChanges.set(path,kind)
+      }
+
+      if(reconcileTimer) clearTimeout(reconcileTimer)
+      reconcileTimer=setTimeout(()=>{
+        reconcileTimer=null
+        void drainQueuedChanges()
+      },180)
+    }
+
+    const reconcileOpenFiles=async(changedRows,{checkAllOpen=false}={})=>{
+      const openMap=new Map(
+        (openEditorFilesRef.current||[]).map(path=>[normalizeProjectRelativePath(path),path])
+      )
+      if(!openMap.size) return
+
+      const explicitDeleted=new Set()
+      const candidateKeys=new Set()
+
+      if(checkAllOpen){
+        for(const key of openMap.keys()) candidateKeys.add(key)
+      }
+
+      for(const row of changedRows||[]){
+        const key=normalizeProjectRelativePath(row?.path)
+        if(!key||!openMap.has(key)) continue
+        candidateKeys.add(key)
+        if(row?.kind==='deleted') explicitDeleted.add(key)
+      }
+
+      if(!candidateKeys.size) return
+
+      let hashStateFiles={}
+      try{
+        const workspaceRoot=resolveWorkspaceRoot()||root
+        const hashState=await api('/files/hash-state',{
+          method:'POST',
+          body:JSON.stringify({
+            root:workspaceRoot,
+            relative_paths:[...candidateKeys]
+          })
+        })
+        hashStateFiles=hashState?.files||{}
+      }catch(e){
+        console.warn('열린 파일 SHA-256 상태 조회 실패',e)
+        return
+      }
+
+      const deletedKeys=new Set(explicitDeleted)
+      const modifiedKeys=new Set()
+
+      for(const key of candidateKeys){
+        const latest=hashStateFiles[key]
+        const baseline=editorFileDiskMetaRef.current?.[key]
+
+        if(!latest?.exists){
+          deletedKeys.add(key)
+          continue
+        }
+
+        // A delete+create rename/save sequence can report a transient delete.
+        // The authoritative hash state wins when the file already exists again.
+        deletedKeys.delete(key)
+
+        const latestSha=String(latest.sha256||'')
+        const baselineSha=String(baseline?.sha256||'')
+
+        if(baselineSha&&latestSha){
+          if(latestSha!==baselineSha){
+            modifiedKeys.add(key)
+          }else if(
+            baseline?.mtime_ns!==latest.mtime_ns
+            || baseline?.size!==latest.size
+          ){
+            const refreshed={
+              mtime_ns:latest.mtime_ns||0,
+              size:latest.size||0,
+              sha256:latestSha
+            }
+            editorFileDiskMetaRef.current={
+              ...editorFileDiskMetaRef.current,
+              [key]:refreshed
+            }
+            setEditorFileDiskMeta(prev=>({...prev,[key]:refreshed}))
+          }
+          continue
+        }
+
+        if(latestSha){
+          // Older/binary tabs may not have a SHA baseline yet. Initialize it
+          // once; subsequent native events are hash-authoritative.
+          const initialized={
+            mtime_ns:latest.mtime_ns||baseline?.mtime_ns||0,
+            size:latest.size||baseline?.size||0,
+            sha256:latestSha
+          }
+          editorFileDiskMetaRef.current={
+            ...editorFileDiskMetaRef.current,
+            [key]:initialized
+          }
+          setEditorFileDiskMeta(prev=>({...prev,[key]:initialized}))
+          continue
+        }
+
+        if(
+          baseline
+          &&(
+            baseline.mtime_ns!==latest.mtime_ns
+            || baseline.size!==latest.size
+          )
+        ){
+          modifiedKeys.add(key)
+        }
+      }
+
+      for(const key of deletedKeys){
+        const editorPath=openMap.get(key)
+        if(!editorPath) continue
+        setEditorExternalState(prev=>({...prev,[key]:'deleted'}))
+        if(
+          selectedEditorFileRef.current
+          && normalizeProjectRelativePath(selectedEditorFileRef.current)===key
+        ){
+          setFileSaveStatus('외부 삭제 감지')
+        }
+        addExternalFileNotification(editorPath,'deleted')
+      }
+
+      for(const key of modifiedKeys){
+        const editorPath=openMap.get(key)
+        if(!editorPath) continue
+        const isCurrent=(
+          selectedEditorFileRef.current
+          && normalizeProjectRelativePath(selectedEditorFileRef.current)===key
+        )
+        const isDirty=!!editorFileDirtyRef.current?.[editorPath]
+
+        if(isDirty){
+          setEditorExternalState(prev=>({...prev,[key]:'modified_conflict'}))
+          if(isCurrent){
+            setFileSaveStatus('외부 변경 충돌')
+            openExternalChangePrompt(editorPath)
+          }
+          addExternalFileNotification(editorPath,'modified_conflict')
+          continue
+        }
+
+        try{
+          await reloadExternalEditorFile(editorPath,{activate:isCurrent})
+          if(cancelled) return
+          if(isCurrent) setFileSaveStatus('외부 변경 자동 반영')
+          addExternalFileNotification(editorPath,'modified_reloaded')
+        }catch(e){
+          console.error('외부 변경 파일 다시 읽기 실패',editorPath,e)
+        }
+      }
+    }
+
+    const drainQueuedChanges=async()=>{
+      if(cancelled) return
+      if(fileWatchBusyRef.current){
+        if(!reconcileTimer){
+          reconcileTimer=setTimeout(()=>{
+            reconcileTimer=null
+            void drainQueuedChanges()
+          },120)
+        }
+        return
+      }
+
+      const rows=[...queuedChanges.entries()].map(([path,kind])=>({path,kind}))
+      queuedChanges.clear()
+      if(!rows.length) return
+
+      fileWatchBusyRef.current=true
+      try{
+        if(rows.some(row=>row.kind==='added'||row.kind==='deleted')){
+          try{ await loadFiles(root) }catch(_){ }
+        }
+        await reconcileOpenFiles(rows)
+      }finally{
+        fileWatchBusyRef.current=false
+        if(queuedChanges.size&&!reconcileTimer){
+          reconcileTimer=setTimeout(()=>{
+            reconcileTimer=null
+            void drainQueuedChanges()
+          },120)
+        }
+      }
+    }
+
+    const reconcileAfterReconnect=async()=>{
       if(cancelled||fileWatchBusyRef.current) return
       fileWatchBusyRef.current=true
-
       try{
-        const next=await api(`/files/snapshot?root=${encodeURIComponent(root)}`)
-        if(cancelled) return
-
-        const previous=projectFileSnapshotRef.current
-        projectFileSnapshotRef.current=next
-
-        if(!previous?.files){
-          // The first watcher snapshot is authoritative as well. Reconcile
-          // the visible tree immediately so stale in-memory/ghost entries
-          // cannot survive a project reopen.
-          try{ await loadFiles(root) }catch(_){ }
-          return
-        }
-
-        const previousFiles=previous.files||{}
-        const nextFiles=next.files||{}
-        const previousKeys=new Set(Object.keys(previousFiles))
-        const nextKeys=new Set(Object.keys(nextFiles))
-
-        const added=[...nextKeys].filter(path=>!previousKeys.has(path))
-        const deleted=[...previousKeys].filter(path=>!nextKeys.has(path))
-        const metadataModified=[...nextKeys].filter(path=>{
-          if(!previousKeys.has(path)) return false
-          const before=previousFiles[path]||{}
-          const after=nextFiles[path]||{}
-          return before.mtime_ns!==after.mtime_ns||before.size!==after.size
-        })
-
-        if(added.length||deleted.length){
-          try{ await loadFiles(root) }catch(_){ }
-        }
-
-        const openMap=new Map(
-          (openEditorFilesRef.current||[]).map(path=>[normalizeProjectRelativePath(path),path])
-        )
-
-        // v5.256: the authoritative external-change signal for opened files is
-        // SHA-256, not mtime/size. mtime/size remain useful only for the cheap
-        // project-tree snapshot and as a fallback if hash polling fails.
-        let hashStateFiles={}
-        let hashPollingOk=false
-        if(openMap.size){
-          try{
-            const hashState=await api('/files/hash-state',{
-              method:'POST',
-              body:JSON.stringify({
-                root:activeWorkspaceRoot||root,
-                relative_paths:[...openMap.keys()]
-              })
-            })
-            hashStateFiles=hashState?.files||{}
-            hashPollingOk=true
-          }catch(e){
-            console.warn('열린 파일 SHA-256 상태 조회 실패, 메타데이터 감지로 대체합니다.',e)
-          }
-        }
-
-        const modifiedOpenKeys=new Set()
-        const metadataModifiedSet=new Set(metadataModified)
-
-        for(const [key] of openMap){
-          const latest=hashStateFiles[key]
-          const baseline=editorFileDiskMetaRef.current?.[key]
-
-          if(hashPollingOk&&latest){
-            if(!latest.exists) continue
-
-            const latestSha=String(latest.sha256||'')
-            const baselineSha=String(baseline?.sha256||'')
-
-            if(baselineSha&&latestSha){
-              if(latestSha!==baselineSha){
-                modifiedOpenKeys.add(key)
-              }else if(
-                baseline?.mtime_ns!==latest.mtime_ns
-                || baseline?.size!==latest.size
-              ){
-                // Metadata changed but bytes are identical. Advance only the
-                // disk baseline and do not emit a false external-change alert.
-                const refreshed={
-                  mtime_ns:latest.mtime_ns||0,
-                  size:latest.size||0,
-                  sha256:latestSha
-                }
-                editorFileDiskMetaRef.current={
-                  ...editorFileDiskMetaRef.current,
-                  [key]:refreshed
-                }
-                setEditorFileDiskMeta(prev=>({...prev,[key]:refreshed}))
-              }
-              continue
-            }
-
-            if(latestSha){
-              // Older sessions/PDFs may not yet have a hash baseline. Record it
-              // once; all subsequent comparisons are hash-authoritative.
-              const initialized={
-                mtime_ns:latest.mtime_ns||baseline?.mtime_ns||0,
-                size:latest.size||baseline?.size||0,
-                sha256:latestSha
-              }
-              editorFileDiskMetaRef.current={
-                ...editorFileDiskMetaRef.current,
-                [key]:initialized
-              }
-              setEditorFileDiskMeta(prev=>({...prev,[key]:initialized}))
-              continue
-            }
-          }
-
-          // Compatibility fallback only when the hash service is unavailable.
-          if(metadataModifiedSet.has(key)) modifiedOpenKeys.add(key)
-        }
-
-        for(const key of deleted){
-          const editorPath=openMap.get(key)
-          if(!editorPath) continue
-          setEditorExternalState(prev=>({...prev,[key]:'deleted'}))
-          if(selectedEditorFileRef.current===editorPath){
-            setFileSaveStatus('외부 삭제 감지')
-          }
-          addExternalFileNotification(editorPath,'deleted')
-        }
-
-        for(const key of modifiedOpenKeys){
-          const editorPath=openMap.get(key)
-          if(!editorPath) continue
-          const isCurrent=selectedEditorFileRef.current===editorPath
-          const isDirty=!!editorFileDirtyRef.current?.[editorPath]
-
-          if(isDirty){
-            setEditorExternalState(prev=>({...prev,[key]:'modified_conflict'}))
-            if(isCurrent){
-              setFileSaveStatus('외부 변경 충돌')
-              openExternalChangePrompt(editorPath)
-            }
-            addExternalFileNotification(editorPath,'modified_conflict')
-            continue
-          }
-
-          try{
-            await reloadExternalEditorFile(editorPath,{activate:isCurrent})
-            if(cancelled) return
-            if(isCurrent) setFileSaveStatus('외부 변경 자동 반영')
-            // Current file is no longer special-cased: every externally changed
-            // opened file creates a visible alarm entry.
-            addExternalFileNotification(editorPath,'modified_reloaded')
-          }catch(e){
-            console.error('외부 변경 파일 다시 읽기 실패',editorPath,e)
-          }
-        }
-      }catch(e){
-        console.error('프로젝트 파일 변경 감지 실패',e)
+        // A reconnect is rare. One tree refresh + opened-file hash check makes
+        // changes that happened during the disconnected window visible without
+        // returning to continuous polling.
+        try{ await loadFiles(root) }catch(_){ }
+        await reconcileOpenFiles([],{checkAllOpen:true})
       }finally{
         fileWatchBusyRef.current=false
       }
     }
 
-    pollProjectFiles()
-    const timer=setInterval(pollProjectFiles,1500)
+    const connectWatcher=()=>{
+      if(cancelled) return
+      const apiBase=String(runtimeInfo().apiBase||'')
+      const wsBase=apiBase.replace(/^http:/,'ws:').replace(/^https:/,'wss:')
+      const wsUrl=`${wsBase}/files/watch?root=${encodeURIComponent(root)}`
+      const ws=new WebSocket(wsUrl)
+      socket=ws
+
+      ws.onmessage=(event)=>{
+        if(cancelled||socket!==ws) return
+        try{
+          const payload=JSON.parse(event.data)
+          if(payload?.type==='ready'){
+            reconnectDelay=1000
+            if(connectedOnce) void reconcileAfterReconnect()
+            connectedOnce=true
+            return
+          }
+          if(payload?.type==='changes'){
+            queueChangeRows(payload.changes||[])
+            return
+          }
+          if(payload?.type==='error'){
+            console.warn('프로젝트 파일 감시 서버 오류',payload?.message||payload)
+          }
+        }catch(e){
+          console.warn('프로젝트 파일 감시 이벤트 해석 실패',e)
+        }
+      }
+
+      ws.onerror=()=>{
+        try{ ws.close() }catch(_){ }
+      }
+
+      ws.onclose=()=>{
+        if(cancelled||socket!==ws) return
+        socket=null
+        reconnectTimer=setTimeout(connectWatcher,reconnectDelay)
+        reconnectDelay=Math.min(reconnectDelay*2,10000)
+      }
+    }
+
+    connectWatcher()
 
     return()=>{
       cancelled=true
-      clearInterval(timer)
+      queuedChanges.clear()
+      if(reconcileTimer) clearTimeout(reconcileTimer)
+      if(reconnectTimer) clearTimeout(reconnectTimer)
+      if(socket){
+        try{ socket.close() }catch(_){ }
+      }
+      socket=null
       fileWatchBusyRef.current=false
     }
   },[root,screen])
@@ -5776,13 +6439,31 @@ function IDE() {
     // 프로젝트 경로 input은 항상 빈 value로 시작하고 사용자가 직접 입력하거나 선택합니다.
     setNewAgentProjectRoot('')
     setRoot('')
+    workspaceRootRef.current=''
 
-    // 경로를 새로 선택한 뒤 동일 경로의 Draft가 존재하면 newAgentProjectRoot useEffect에서 복원합니다.
-    // 버튼 클릭 직후에는 이전 경로의 Draft를 복원하지 않고 새 인터뷰를 시작합니다.
+    // 경로를 새로 선택해도 동일 경로의 과거 Draft를 자동 복원하지 않습니다.
+    // Draft가 있으면 우측에서 사용자가 직접 이어서 불러올 수 있습니다.
     setAgentBuildStage('REQUIREMENTS')
+    setWorkflow(null)
     setTargetWorkflowPreview(null)
+    setPreviousTargetWorkflowPreview(null)
     setTargetWorkflowQuality(null)
     setBuilderStarted(false)
+    setInterviewAttachments([])
+    setInterviewAttachmentMemory('')
+    setInterviewAttachmentSummary('')
+    setInterviewAttachmentSummaryFiles([])
+    setInterviewAttachmentSummaryBusy(false)
+    setInterviewAttachmentSummaryError('')
+    interviewAttachmentSummaryRunRef.current=''
+    setRequirementManualOverrides({})
+    setRequirementRedefineId('')
+    setRequirementRedefineText('')
+    setRequirementDraftCandidate(null)
+    setRequirementDraftDecisionPending(false)
+    setRequirementDraftRestored(false)
+    setRequirementDraftSavedAt('')
+    setInterviewAttachmentAnalysis({busy:false,ready:true,overallProgress:100,failedFiles:0,successfulFiles:0,files:[]})
     setChat([{
       role:'assistant',
       content:'어떤 AI Agent + MCP 프로그램을 만들고 싶으신가요? 먼저 프로그램의 목적을 한 문장으로 말씀해 주세요.'
@@ -5805,7 +6486,7 @@ function IDE() {
   },[root])
 
   const writeEditorFile=async(relativePath,content,{force=false,promptOnConflict=true}={})=>{
-    const workspaceRoot=activeWorkspaceRoot
+    const workspaceRoot=resolveWorkspaceRoot()
     if(!workspaceRoot || !relativePath){
       throw new Error('프로젝트와 파일을 먼저 선택하세요.')
     }
@@ -5886,6 +6567,11 @@ function IDE() {
   }
 
   const saveFile=async()=>{
+    if(selected&&(fileLoadingPath===selected||(!isBinaryPreviewFile(selected)&&!Object.prototype.hasOwnProperty.call(editorFileContents,selected)))){
+      setFileSaveStatus('저장 대기 · 파일 로딩 중')
+      setTerminal(prev=>(prev||'')+'\n[저장 대기] 파일 내용을 디스크에서 불러오는 중에는 저장하지 않습니다. 로드 완료 후 다시 저장하세요.\n')
+      return
+    }
     if(editorLoadErrors[selected]){
       setFileSaveStatus('저장 차단 · 파일 로드 실패')
       setTerminal(prev=>(prev||'')+'\n[저장 차단] 파일 로드가 실패한 탭은 디스크에 저장하지 않습니다. 먼저 다시 불러오세요.\n')
@@ -6347,9 +7033,122 @@ function IDE() {
     }
   }
 
+  const getSaveAsPickerOptions=(relativePath)=>{
+    const fileName=String(relativePath||'file.txt').replace(/\\/g,'/').split('/').pop()||'file.txt'
+    const lower=fileName.toLowerCase()
+    const extension=(lower.match(/\.[^.]+$/)||['.txt'])[0]
+    const mimeByExtension={
+      '.ipynb':'application/x-ipynb+json',
+      '.json':'application/json',
+      '.sql':'application/sql',
+      '.py':'text/x-python',
+      '.js':'text/javascript',
+      '.jsx':'text/javascript',
+      '.ts':'text/typescript',
+      '.tsx':'text/typescript',
+      '.md':'text/markdown',
+      '.txt':'text/plain',
+      '.csv':'text/csv',
+      '.html':'text/html',
+      '.css':'text/css',
+      '.ps1':'text/plain',
+      '.cmd':'text/plain',
+      '.bat':'text/plain',
+      '.yaml':'application/yaml',
+      '.yml':'application/yaml',
+      '.toml':'application/toml',
+      '.xml':'application/xml',
+      '.pdf':'application/pdf',
+      '.ppt':'application/vnd.ms-powerpoint',
+      '.pptx':'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    }
+    const pickerExtension=lower.endsWith('.agentdiag.json')?'.json':extension
+    const mime=mimeByExtension[pickerExtension]||'application/octet-stream'
+    return {
+      suggestedName:fileName,
+      types:[{
+        description:`${pickerExtension.replace(/^\./,'').toUpperCase()} 파일`,
+        accept:{[mime]:[pickerExtension]}
+      }]
+    }
+  }
+
+  const readEditorFileBlobForSaveAs=async(relativePath)=>{
+    if(!relativePath) throw new Error('저장할 파일이 없습니다.')
+
+    if(!isBinaryPreviewFile(relativePath)){
+      const content=
+        relativePath===selected
+          ? (editorFileContents[relativePath] ?? code ?? '')
+          : (editorFileContents[relativePath] ?? '')
+      return new Blob([content],{type:'text/plain;charset=utf-8'})
+    }
+
+    if(!root) throw new Error('프로젝트가 선택되지 않았습니다.')
+    const info=runtimeInfo()
+    const params=new URLSearchParams({
+      root:String(root),
+      relative_path:String(relativePath)
+    })
+    const response=await fetch(`${info.apiBase}/files/raw?${params.toString()}`)
+    if(!response.ok){
+      const body=await response.text().catch(()=>'')
+      throw new Error(`원본 파일 읽기 실패 (${response.status})${body?`: ${body}`:''}`)
+    }
+    return response.blob()
+  }
+
+  const saveEditorFileAs=async(relativePath)=>{
+    setEditorTabMenu(null)
+    if(!relativePath) return
+    if(fileLoadingPath===relativePath||(!isBinaryPreviewFile(relativePath)&&!Object.prototype.hasOwnProperty.call(editorFileContents,relativePath))){
+      setFileSaveStatus('다른 이름 저장 대기 · 파일 로딩 중')
+      setTerminal(prev=>(prev||'')+'\n[다른 이름으로 저장 대기] 파일 내용을 불러오는 중에는 저장하지 않습니다.\n')
+      return
+    }
+    if(editorLoadErrors[relativePath]){
+      setFileSaveStatus('다른 이름 저장 차단 · 파일 로드 실패')
+      setTerminal(prev=>(prev||'')+'\n[다른 이름으로 저장 차단] 파일 로드가 실패한 탭입니다. 먼저 다시 불러오세요.\n')
+      return
+    }
+
+    if(typeof window.showSaveFilePicker!=='function'){
+      window.alert('현재 브라우저에서는 파일 저장 위치 선택 기능을 지원하지 않습니다. Chrome/Edge 최신 버전에서 실행해 주세요.')
+      return
+    }
+
+    try{
+      // Native file picker must be opened while the right-click action still
+      // has a transient user activation. Choose the destination first, then
+      // read/fetch the current tab bytes. This is especially important for
+      // PDF/PPT/PPTX because their source bytes come from the Backend.
+      const handle=await window.showSaveFilePicker(getSaveAsPickerOptions(relativePath))
+      const blob=await readEditorFileBlobForSaveAs(relativePath)
+      const writable=await handle.createWritable()
+      await writable.write(blob)
+      await writable.close()
+      setFileSaveStatus('다른 이름으로 저장 완료')
+      setTerminal(prev=>(prev||'')+`\n[다른 이름으로 저장 완료] ${handle.name||relativePath}\n`)
+    }catch(e){
+      if(e?.name==='AbortError') return
+      setFileSaveStatus('다른 이름으로 저장 실패')
+      setTerminal(prev=>(prev||'')+`\n[다른 이름으로 저장 실패] ${String(e?.message||e)}\n`)
+      window.alert(`다른 이름으로 저장에 실패했습니다.\n${String(e?.message||e)}`)
+    }
+  }
+
 
   const activateEditorFile=(relativePath)=>{
     if(!relativePath) return
+
+    const hasCachedContent=Object.prototype.hasOwnProperty.call(editorFileContents,relativePath)
+    if(!isBinaryPreviewFile(relativePath)&&!hasCachedContent){
+      // An open tab can outlive its in-memory content during project/file state
+      // transitions. Never activate an empty/default buffer for that file;
+      // reload the authoritative disk content first.
+      openFile(relativePath)
+      return
+    }
 
     setSelected(relativePath)
     setFileTreeSelected(relativePath)
@@ -6542,7 +7341,8 @@ function IDE() {
     const requestedPath=relativePath
     if(!requestedPath) return
 
-    if(openEditorFiles.includes(requestedPath)){
+    const hasCachedContent=Object.prototype.hasOwnProperty.call(editorFileContents,requestedPath)
+    if(openEditorFiles.includes(requestedPath)&&(isBinaryPreviewFile(requestedPath)||hasCachedContent)){
       setSelected(requestedPath)
       setFileTreeSelected(requestedPath)
       setCode(editorFileContents[requestedPath]??'')
@@ -6551,16 +7351,22 @@ function IDE() {
     }
 
     const token=++fileLoadTokenRef.current
+    const workspaceRoot=resolveWorkspaceRoot()
 
     setSelected(requestedPath)
     setFileTreeSelected(requestedPath)
     setFileLoading(true)
+    setFileLoadingPath(requestedPath)
 
     try{
+      if(!workspaceRoot){
+        throw new Error('프로젝트 root를 확인할 수 없습니다. 프로젝트를 다시 선택한 뒤 파일을 열어주세요.')
+      }
+
       if(isBinaryPreviewFile(requestedPath)){
         let meta=null
         try{
-          meta=await api(`/files/meta?root=${encodeURIComponent(activeWorkspaceRoot)}&relative_path=${encodeURIComponent(requestedPath)}`)
+          meta=await api(`/files/meta?root=${encodeURIComponent(workspaceRoot)}&relative_path=${encodeURIComponent(requestedPath)}`)
         }catch(_){ }
 
         if(token!==fileLoadTokenRef.current) return
@@ -6597,7 +7403,7 @@ function IDE() {
       const r=await api('/files/read',{
         method:'POST',
         body:JSON.stringify({
-          root:activeWorkspaceRoot,
+          root:workspaceRoot,
           relative_path:requestedPath
         })
       })
@@ -6679,6 +7485,7 @@ function IDE() {
     }finally{
       if(token===fileLoadTokenRef.current){
         setFileLoading(false)
+        setFileLoadingPath('')
       }
     }
   }
@@ -6711,13 +7518,13 @@ function IDE() {
     {id:'limits',label:'처리 제한',keywords:['10mb','120초','timeout','타임아웃','chunk','청크']}
   ]
 
-  const requirementDraftKey=()=>{
-    const path=String(newAgentProjectRoot||root||'')
+  const requirementDraftKeyFor=(projectPath='',agentName='')=>{
+    const path=String(projectPath||'')
       .trim()
       .replace(/[\\/]+$/,'')
       .toLowerCase()
 
-    const name=String(newAgentName||'')
+    const name=String(agentName||'')
       .trim()
       .toLowerCase()
 
@@ -6725,9 +7532,20 @@ function IDE() {
     return `theanova.agentstudio.requirements.v1::${identity}`
   }
 
+  const requirementDraftKey=()=>
+    requirementDraftKeyFor(newAgentProjectRoot||root||'',newAgentName||'')
+
   const requirementConversationText=()=>{
-    return (chat||[])
-      .map(item=>String(item?.content||''))
+    const manualLines=Object.entries(requirementManualOverrides||{})
+      .map(([id,value])=>{
+        const def=requirementKeywordDefinitions.find(item=>item.id===id)
+        return `${def?.label||id}: ${String(value||'')}`
+      })
+    return [
+      ...(chat||[]).map(item=>String(item?.content||'')),
+      interviewAttachmentSummary||'',
+      ...manualLines
+    ]
       .join('\n')
       .toLowerCase()
   }
@@ -6750,6 +7568,8 @@ function IDE() {
     ]
 
     const getValue=(id)=>{
+      const manualValue=String(requirementManualOverrides?.[id]||'').trim()
+      if(manualValue) return manualValue
       switch(id){
         case 'purpose':{
           const raw=String(
@@ -6761,7 +7581,18 @@ function IDE() {
 
           if(!raw) return ''
 
-          // 우측 요약은 너무 길지 않게 목적의 핵심만 표시합니다.
+          // 사용자가 긴 한 문장 안에 기술 스택과 목적을 함께 적어도
+          // 목적 카드에는 기술 스택이 아니라 Agent의 핵심 목적을 표시합니다.
+          const normalizedPurpose=raw.replace(/\s+/g,' ').trim()
+          const agentPurposeMatch=normalizedPurpose.match(
+            /(?:^|[.。!?]\s*)(?:나는\s*)?(.{2,80}?(?:Agent|에이전트))(?:를|을)?\s*(?:만들|개발|생성)/i
+          )
+          if(agentPurposeMatch?.[1]){
+            return agentPurposeMatch[1]
+              .replace(/^(?:PostgreSQL|Redis|pgvector|OpenAI|Ollama)(?:\s*[,·+]\s*(?:PostgreSQL|Redis|pgvector|OpenAI|Ollama))*\s*(?:를|을)?\s*사용하는\s*/i,'')
+              .trim()
+          }
+
           if(
             includesAny(['파일','요약'])
             &&includesAny(['agent','에이전트'])
@@ -6769,9 +7600,9 @@ function IDE() {
             return '프로젝트 파일 요약 Agent'
           }
 
-          return raw.length>48
-            ? `${raw.slice(0,48)}…`
-            : raw
+          return normalizedPurpose.length>48
+            ? `${normalizedPurpose.slice(0,48)}…`
+            : normalizedPurpose
         }
 
         case 'files':{
@@ -6903,11 +7734,11 @@ function IDE() {
               : '미사용'
           }
 
-          if(text.includes('postgresql')){
-            return 'PostgreSQL'
-          }
-
-          return ''
+          const values=[]
+          if(text.includes('postgresql')) values.push('PostgreSQL')
+          if(text.includes('redis')) values.push('Redis')
+          if(text.includes('pgvector')||text.includes('vector search')||text.includes('벡터 검색')) values.push('pgvector')
+          return unique(values).join(' · ')
         }
 
         case 'permission':{
@@ -7047,6 +7878,10 @@ function IDE() {
 
       const value=getValue(def.id)
 
+      if(String(requirementManualOverrides?.[def.id]||'').trim()){
+        collected=true
+      }
+
       // 명확한 실제 값이 추출되면 해당 슬롯은 수집 완료로 간주합니다.
       if(value){
         collected=true
@@ -7061,6 +7896,71 @@ function IDE() {
   }
 
 
+  const getBuilderConversationSummary=()=>{
+    const statuses=getRequirementKeywordStatus()
+    const byId=Object.fromEntries(statuses.map(item=>[item.id,item]))
+    const conversation=[
+      ...(chat||[]).filter(item=>item?.role==='user').map(item=>String(item?.content||'')),
+      interviewAttachmentSummary||'',
+      ...Object.values(requirementManualOverrides||{}).map(value=>String(value||'')),
+    ].join('\n').toLowerCase()
+    const uniqueValues=(values=[])=>[...new Set(values.filter(Boolean))]
+    const features=[]
+    const addFeature=(label,...keywords)=>{
+      if(keywords.some(keyword=>conversation.includes(String(keyword).toLowerCase()))){
+        features.push(label)
+      }
+    }
+    addFeature('자연어 검색','자연어','semantic search','의미 기반')
+    addFeature('Hybrid Search','hybrid','pgvector','벡터 검색','vector 검색')
+    addFeature('상품 추천','추천')
+    addFeature('재고 확인','재고')
+    addFeature('주문 처리','주문')
+    addFeature('RAG','rag','faq','knowledge base','지식베이스')
+    addFeature('파일 분석','파일 분석','첨부 파일','문서 분석')
+    addFeature('코드 편집','코드 편집','코드 수정')
+    addFeature('리포트','리포트','보고서')
+    addFeature('대화/상담','대화','상담','챗봇')
+
+    const integrations=[]
+    const addIntegration=(label,...keywords)=>{
+      if(keywords.some(keyword=>conversation.includes(String(keyword).toLowerCase()))){
+        integrations.push(label)
+      }
+    }
+    addIntegration('PostgreSQL','postgresql')
+    addIntegration('Redis','redis')
+    addIntegration('pgvector','pgvector','벡터 검색','vector search')
+    addIntegration('MCP','mcp')
+    addIntegration('OpenAI','openai','gpt-')
+    addIntegration('Ollama','ollama')
+
+    const mcpToolValues=uniqueValues([
+      byId.mcp?.value,
+      integrations.includes('MCP')?'MCP':'',
+    ]).join(' · ')
+    const databaseValues=uniqueValues([
+      byId.database?.value,
+      ...integrations.filter(value=>['PostgreSQL','Redis','pgvector'].includes(value)),
+    ]).join(' · ')
+    const runtimeValues=uniqueValues([
+      byId.runtime?.value,
+      byId.backend?.value,
+      byId.llm?.value,
+    ]).join(' · ')
+    const collected=statuses.filter(item=>item.collected).length
+
+    return {
+      purpose:byId.purpose?.value||'대화에서 목적을 확인하는 중',
+      features:uniqueValues(features).slice(0,6).join(' · ')||'핵심 기능을 확인하는 중',
+      mcpTools:mcpToolValues||'외부 MCP / Tool 필요 여부를 확인하는 중',
+      database:databaseValues||'DB / Cache / Vector 구성을 확인하는 중',
+      runtime:runtimeValues||'실행 환경을 확인하는 중',
+      confirmation:`요구사항 ${collected}/${statuses.length} · ${targetWorkflowPreview?'Workflow 설계됨':'인터뷰 진행 중'}`,
+      collectedItems:statuses.filter(item=>item.collected&&item.value),
+    }
+  }
+
   const buildRequirementDraftSnapshot=()=>{
     return {
       version:1,
@@ -7072,18 +7972,28 @@ function IDE() {
       confirmed_requirements:confirmedInterviewRequirements||{},
       workflow_preview:targetWorkflowPreview||null,
       workflow_quality:targetWorkflowQuality||null,
-      agent_build_stage:agentBuildStage||'REQUIREMENTS'
+      agent_build_stage:agentBuildStage||'REQUIREMENTS',
+      attachment_memory:interviewAttachmentMemory||'',
+      attachment_summary:interviewAttachmentSummary||'',
+      attachment_summary_files:interviewAttachmentSummaryFiles||[],
+      manual_requirement_overrides:requirementManualOverrides||{}
     }
   }
 
   const saveRequirementDraft=()=>{
     try{
+      // If an older Draft exists for a newly selected path, do not silently
+      // overwrite it before the user decides whether to restore or ignore it.
+      if(requirementDraftDecisionPendingRef.current) return false
+
       const snapshot=buildRequirementDraftSnapshot()
       const hasUsefulData=
         snapshot.chat.some(item=>item?.role==='user')
         || Boolean(snapshot.workflow_request)
         || Object.keys(snapshot.confirmed_requirements||{}).length>0
         || Boolean(snapshot.workflow_preview)
+        || Boolean(snapshot.attachment_summary)
+        || Object.keys(snapshot.manual_requirement_overrides||{}).length>0
 
       if(!hasUsefulData) return false
 
@@ -7092,7 +8002,7 @@ function IDE() {
         JSON.stringify(snapshot)
       )
       setRequirementDraftSavedAt(snapshot.saved_at)
-      return true
+      return result
     }catch(e){
       console.warn('요구사항 Draft 저장 실패',e)
       return false
@@ -7109,11 +8019,54 @@ function IDE() {
       const snapshot=JSON.parse(raw)
 
       if(Array.isArray(snapshot?.chat) && snapshot.chat.length){
-        setChat(snapshot.chat)
+        const restoredChat=snapshot.chat.map(item=>({
+          ...item,
+          content:item?.role==='assistant'
+            ? protectInterviewAssistantAnswer(item?.content||'')
+            : sanitizeInterviewDisplayText(item?.content||'')
+        })).filter(item=>String(item?.content||'').trim())
+        setChat(restoredChat)
         setBuilderStarted(
-          snapshot.chat.some(item=>item?.role==='user')
+          restoredChat.some(item=>item?.role==='user')
         )
       }
+
+      const restoredAttachmentMemory=sanitizeInterviewDisplayText(snapshot?.attachment_memory||'')
+      if(restoredAttachmentMemory){
+        setInterviewAttachmentMemory(restoredAttachmentMemory)
+      }
+      const restoredAttachmentSummary=sanitizeInterviewDisplayText(snapshot?.attachment_summary||'')
+      setInterviewAttachmentSummary(restoredAttachmentSummary)
+      setInterviewAttachmentSummaryFiles(
+        Array.isArray(snapshot?.attachment_summary_files)
+          ? snapshot.attachment_summary_files
+              .map(item=>({name:String(item?.name||''),path:String(item?.path||'')}))
+              .filter(item=>item.name||item.path)
+          : []
+      )
+      setRequirementManualOverrides(
+        snapshot?.manual_requirement_overrides&&typeof snapshot.manual_requirement_overrides==='object'
+          ? snapshot.manual_requirement_overrides
+          : {}
+      )
+
+      // Rewrite legacy drafts immediately so credentials and repeated attachment
+      // labels are not only hidden in the UI but also removed from localStorage.
+      try{
+        snapshot.chat=Array.isArray(snapshot?.chat)
+          ? snapshot.chat.map(item=>({
+              ...item,
+              content:item?.role==='assistant'
+                ? protectInterviewAssistantAnswer(item?.content||'')
+                : sanitizeInterviewDisplayText(item?.content||'')
+            })).filter(item=>String(item?.content||'').trim())
+          : []
+        snapshot.attachment_memory=restoredAttachmentMemory
+        snapshot.attachment_summary=restoredAttachmentSummary
+        snapshot.attachment_summary_files=Array.isArray(snapshot?.attachment_summary_files)?snapshot.attachment_summary_files:[]
+        snapshot.manual_requirement_overrides=(snapshot?.manual_requirement_overrides&&typeof snapshot.manual_requirement_overrides==='object')?snapshot.manual_requirement_overrides:{}
+        localStorage.setItem(key,JSON.stringify(snapshot))
+      }catch{}
 
       if(snapshot?.workflow_request){
         setWorkflowReq(snapshot.workflow_request)
@@ -7143,10 +8096,41 @@ function IDE() {
 
       setRequirementDraftSavedAt(snapshot?.saved_at||'')
       setRequirementDraftRestored(true)
+      setRequirementDraftCandidate(null)
+      setRequirementDraftDecisionPending(false)
       return true
     }catch(e){
       console.warn('요구사항 Draft 복원 실패',e)
       return false
+    }
+  }
+
+  const keepCurrentInterviewInsteadOfDraft=()=>{
+    // The user explicitly chose the current/new interview. From this point the
+    // normal autosave may replace the older Draft for this path.
+    requirementDraftDecisionPendingRef.current=false
+    setRequirementDraftCandidate(null)
+    setRequirementDraftDecisionPending(false)
+    setRequirementDraftRestored(false)
+
+    try{
+      const snapshot=buildRequirementDraftSnapshot()
+      const hasUsefulData=
+        snapshot.chat.some(item=>item?.role==='user')
+        ||Boolean(snapshot.workflow_request)
+        ||Object.keys(snapshot.confirmed_requirements||{}).length>0
+        ||Boolean(snapshot.workflow_preview)
+        ||Boolean(snapshot.attachment_summary)
+        ||Object.keys(snapshot.manual_requirement_overrides||{}).length>0
+      if(hasUsefulData){
+        localStorage.setItem(requirementDraftKey(),JSON.stringify(snapshot))
+        setRequirementDraftSavedAt(snapshot.saved_at)
+      }else{
+        setRequirementDraftSavedAt('')
+      }
+    }catch(e){
+      console.warn('현재 인터뷰 Draft 저장 실패',e)
+      setRequirementDraftSavedAt('')
     }
   }
 
@@ -7156,6 +8140,119 @@ function IDE() {
     }catch{}
     setRequirementDraftSavedAt('')
     setRequirementDraftRestored(false)
+    setRequirementDraftCandidate(null)
+    setRequirementDraftDecisionPending(false)
+    setInterviewAttachmentMemory('')
+    setInterviewAttachmentSummary('')
+    setInterviewAttachmentSummaryFiles([])
+    setRequirementManualOverrides({})
+  }
+
+  const invalidateRequirementWorkflowAfterEdit=(message='요구사항이 변경되었습니다. Workflow를 다시 설계해 주세요.')=>{
+    setWorkflowReq('')
+    if(targetWorkflowPreview){
+      setPreviousTargetWorkflowPreview(targetWorkflowPreview)
+    }
+    setTargetWorkflowPreview(null)
+    setTargetWorkflowQuality(null)
+    setAgentBuildStage('REQUIREMENTS')
+    setAgentBuildMessage(message)
+  }
+
+  const removeRequirementConversationTurn=(messageIndex)=>{
+    const index=Number(messageIndex)
+    if(!Number.isInteger(index)||index<0) return
+    const removedOverrideId=String(chat?.[index]?.requirement_override||'')
+    const nextChat=(chat||[]).filter((_item,currentIndex)=>{
+      if(currentIndex===index) return false
+      if(currentIndex===index+1 && chat?.[index+1]?.role==='assistant') return false
+      return true
+    })
+    if(removedOverrideId){
+      setRequirementManualOverrides(prev=>{
+        const next={...(prev||{})}
+        delete next[removedOverrideId]
+        return next
+      })
+    }
+    setChat(nextChat)
+    setConfirmedInterviewRequirements({})
+    invalidateRequirementWorkflowAfterEdit('지난 사용자 답변을 삭제했습니다. 변경된 내용으로 요구사항을 다시 확인합니다.')
+    setTimeout(()=>buildConfirmedRequirementsFromChat(nextChat),0)
+  }
+
+  const clearRestoredRequirementContent=()=>{
+    const accepted=window.confirm(
+      '이 프로젝트 경로에 저장된 지난 대화와 수집 요구사항을 모두 삭제하고 처음부터 다시 정의할까요?\n\n프로젝트 파일 자체는 삭제되지 않습니다.'
+    )
+    if(!accepted) return
+
+    try{ localStorage.removeItem(requirementDraftKey()) }catch{}
+    setChat([{
+      role:'assistant',
+      content:'기존 요구사항을 초기화했습니다. 어떤 AI Agent + MCP 프로그램을 만들고 싶으신가요? 먼저 프로그램의 목적을 한 문장으로 다시 정의해 주세요.'
+    }])
+    setBuilderStarted(false)
+    setInput('')
+    setConfirmedInterviewRequirements({})
+    setRequirementManualOverrides({})
+    setRequirementRedefineId('')
+    setRequirementRedefineText('')
+    const attachmentIdsToRelease=(interviewAttachments||[]).map(item=>item?.attachment_id).filter(Boolean)
+    if(attachmentIdsToRelease.length){
+      void api('/ai/attachments/release',{
+        method:'POST',
+        body:JSON.stringify({attachment_ids:attachmentIdsToRelease})
+      }).catch(()=>{})
+    }
+    setInterviewAttachments([])
+    setInterviewAttachmentMemory('')
+    setInterviewAttachmentSummary('')
+    setInterviewAttachmentSummaryFiles([])
+    setInterviewAttachmentSummaryError('')
+    interviewAttachmentSummaryRunRef.current=''
+    setRequirementDraftRestored(false)
+    setRequirementDraftSavedAt('')
+    setRequirementDraftCandidate(null)
+    setRequirementDraftDecisionPending(false)
+    requirementDraftDecisionPendingRef.current=false
+    setPreviousTargetWorkflowPreview(null)
+    invalidateRequirementWorkflowAfterEdit('지난 요구사항을 삭제했습니다. 새 요구사항을 다시 정의해 주세요.')
+  }
+
+  const beginRequirementRedefinition=(id,value='')=>{
+    setRequirementRedefineId(String(id||''))
+    setRequirementRedefineText(
+      String(requirementManualOverrides?.[id]||value||'')
+    )
+  }
+
+  const cancelRequirementRedefinition=()=>{
+    setRequirementRedefineId('')
+    setRequirementRedefineText('')
+  }
+
+  const saveRequirementRedefinition=()=>{
+    const id=String(requirementRedefineId||'').trim()
+    const value=String(requirementRedefineText||'').trim()
+    if(!id||!value) return
+    const def=requirementKeywordDefinitions.find(item=>item.id===id)
+    const nextOverrides={...(requirementManualOverrides||{}),[id]:value}
+    setRequirementManualOverrides(nextOverrides)
+    setChat(prev=>[
+      ...prev.filter(item=>item?.requirement_override!==id),
+      {
+        role:'user',
+        content:`요구사항 재정의 - ${def?.label||id}: ${value}. 이 내용을 이전 대화보다 최신 기준으로 적용해 주세요.`,
+        requirement_override:id
+      }
+    ])
+    setConfirmedInterviewRequirements(prev=>({
+      ...(prev||{}),
+      manual_overrides:nextOverrides
+    }))
+    invalidateRequirementWorkflowAfterEdit(`${def?.label||id} 요구사항을 재정의했습니다. 변경된 기준으로 Workflow를 다시 설계할 수 있습니다.`)
+    cancelRequirementRedefinition()
   }
 
   const buildRequirementRequestFromCollectedInfo=()=>{
@@ -7165,49 +8262,111 @@ function IDE() {
       .filter(Boolean)
 
     const confirmed=confirmedInterviewRequirements||{}
-
-    if(userMessages.length){
-      return userMessages.join('\n\n')
-    }
-
-    if(workflowReq?.trim()){
-      return workflowReq.trim()
-    }
-
     const rows=[]
 
-    if(confirmed.original_request){
-      rows.push(confirmed.original_request)
+    if(userMessages.length){
+      rows.push(userMessages.join('\n\n'))
+    }else if(workflowReq?.trim()){
+      rows.push(workflowReq.trim())
+    }else{
+      if(confirmed.original_request){
+        rows.push(confirmed.original_request)
+      }
+      if(confirmed.ui){
+        rows.push(`UI: ${confirmed.ui}`)
+      }
+      if(confirmed.backend){
+        rows.push(`Backend: ${confirmed.backend}`)
+      }
+      if(confirmed.llm){
+        rows.push(
+          `LLM: ${confirmed.llm.default_provider||''} ${confirmed.llm.default_model||''}; Ollama 전환 가능`
+        )
+      }
+      if(confirmed.file_access?.allowed_extensions?.length){
+        rows.push(
+          `파일 형식: ${confirmed.file_access.allowed_extensions.join(', ')}`
+        )
+      }
+      if(confirmed.mcp){
+        rows.push(
+          `MCP: ${confirmed.mcp.default_transport||'stdio'}`
+        )
+      }
+      if(confirmed.database){
+        rows.push(
+          `DB: ${confirmed.database.enabled?'사용':'현재 미사용'}`
+        )
+      }
     }
-    if(confirmed.ui){
-      rows.push(`UI: ${confirmed.ui}`)
-    }
-    if(confirmed.backend){
-      rows.push(`Backend: ${confirmed.backend}`)
-    }
-    if(confirmed.llm){
+
+    if(interviewAttachmentSummary?.trim()){
       rows.push(
-        `LLM: ${confirmed.llm.default_provider||''} ${confirmed.llm.default_model||''}; Ollama 전환 가능`
-      )
-    }
-    if(confirmed.file_access?.allowed_extensions?.length){
-      rows.push(
-        `파일 형식: ${confirmed.file_access.allowed_extensions.join(', ')}`
-      )
-    }
-    if(confirmed.mcp){
-      rows.push(
-        `MCP: ${confirmed.mcp.default_transport||'stdio'}`
-      )
-    }
-    if(confirmed.database){
-      rows.push(
-        `DB: ${confirmed.database.enabled?'사용':'현재 미사용'}`
+        '[첨부 파일에서 파악한 요구사항]\n'+interviewAttachmentSummary.trim()
       )
     }
 
-    return rows.join('\n')
+    const manualRows=Object.entries(requirementManualOverrides||{})
+      .map(([id,value])=>{
+        const text=String(value||'').trim()
+        if(!text) return ''
+        const def=requirementKeywordDefinitions.find(item=>item.id===id)
+        return `- ${def?.label||id}: ${text}`
+      })
+      .filter(Boolean)
+    if(manualRows.length){
+      rows.push(
+        '[사용자가 직접 재정의한 최신 요구사항 - 이전 대화보다 우선]\n'+manualRows.join('\n')
+      )
+    }
+
+    return rows.filter(Boolean).join('\n\n')
   }
+
+  useEffect(()=>{
+    const requestText=buildRequirementRequestFromCollectedInfo().trim()
+    const hasUserRequirement=Boolean(
+      requestText
+      &&((chat||[]).some(item=>item?.role==='user')||workflowReq?.trim()||interviewAttachmentSummary?.trim())
+    )
+
+    if(!hasUserRequirement){
+      setLiveDatabasePreview(null)
+      setLiveDatabasePreviewError('')
+      setLiveDatabasePreviewLoading(false)
+      return undefined
+    }
+
+    let cancelled=false
+    const timer=setTimeout(async()=>{
+      setLiveDatabasePreviewLoading(true)
+      setLiveDatabasePreviewError('')
+      try{
+        const result=await api('/database-design/preview',{
+          method:'POST',
+          body:JSON.stringify({
+            request:requestText,
+            confirmed_requirements:buildConfirmedRequirementsFromChat()
+          })
+        })
+        if(cancelled) return
+        setLiveDatabasePreview({
+          ...(result?.database_plan||{}),
+          ddl_preview:String(result?.ddl_preview||'')
+        })
+      }catch(error){
+        if(cancelled) return
+        setLiveDatabasePreviewError(String(error))
+      }finally{
+        if(!cancelled) setLiveDatabasePreviewLoading(false)
+      }
+    },550)
+
+    return ()=>{
+      cancelled=true
+      clearTimeout(timer)
+    }
+  },[chat,workflowReq,confirmedInterviewRequirements,requirementManualOverrides,interviewAttachmentSummary])
 
   const canDesignFromCollectedInfo=()=>{
     const statuses=getRequirementKeywordStatus()
@@ -7221,20 +8380,27 @@ function IDE() {
   }
 
 
-  const buildConfirmedRequirementsFromChat=()=>{
-    const userMessages=(chat||[])
+  const buildConfirmedRequirementsFromChat=(sourceChat=chat)=>{
+    const userMessages=(sourceChat||[])
       .filter(item=>item?.role==='user')
       .map(item=>String(item?.content||'').trim())
       .filter(Boolean)
 
-    const assistantMessages=(chat||[])
+    const assistantMessages=(sourceChat||[])
       .filter(item=>item?.role==='assistant')
       .map(item=>String(item?.content||'').trim())
       .filter(Boolean)
 
+    const manualRequirementLines=Object.entries(requirementManualOverrides||{})
+      .map(([id,value])=>{
+        const def=requirementKeywordDefinitions.find(item=>item.id===id)
+        return `${def?.label||id}: ${String(value||'')}`
+      })
     const allText=[
       ...userMessages,
-      ...assistantMessages
+      ...assistantMessages,
+      interviewAttachmentSummary||'',
+      ...manualRequirementLines
     ].join('\n').toLowerCase()
 
     const has=(...values)=>values.some(value=>
@@ -7248,7 +8414,7 @@ function IDE() {
     ].filter(Boolean)
 
     const requirements={
-      original_request:userMessages[0]||workflowReq||'',
+      original_request:String(requirementManualOverrides?.purpose||'').trim()||userMessages[0]||workflowReq||interviewAttachmentSummary||'',
       user_answers:userMessages.slice(1),
       latest_analysis:
         [...assistantMessages]
@@ -7355,7 +8521,9 @@ function IDE() {
           )
         ),
         rbac:false
-      }
+      },
+      attachment_summary:interviewAttachmentSummary||'',
+      manual_overrides:{...(requirementManualOverrides||{})}
     }
 
     setConfirmedInterviewRequirements(requirements)
@@ -7384,6 +8552,60 @@ function IDE() {
     ].includes(value)
   }
 
+  const finalizeDatabaseDesign=async()=>{
+    const plan=targetWorkflowPreview?.database_plan||{}
+    if(!plan?.enabled){
+      setTargetWorkflowPreview(prev=>prev?{...prev,database_plan:{...plan,confirmed:true,finalized:true}}:prev)
+      return true
+    }
+    if(databaseDesignFinalizeBusy) return false
+    setDatabaseDesignFinalizeBusy(true)
+    setAgentBuildMessage('DB Module/Entity/PK/FK를 검증하고 PostgreSQL DDL을 생성하고 있습니다...')
+    try{
+      const result=await api('/database-design/finalize',{
+        method:'POST',
+        body:JSON.stringify({database_plan:plan})
+      })
+      if(!result?.ok){
+        const errors=(result?.validation?.errors||[]).join('\n')
+        throw new Error(errors||result?.message||'DB 설계 검증 실패')
+      }
+      const finalized=result.database_plan||plan
+      const migrationFiles=(finalized?.migration_files||[])
+        .map(item=>({
+          path:String(item?.path||''),
+          purpose:String(item?.purpose||'확정된 PostgreSQL DB Migration'),
+          required:false,
+          component:'Database Migration'
+        }))
+        .filter(item=>item.path)
+      setTargetWorkflowPreview(prev=>{
+        if(!prev) return prev
+        const filePlan={...(prev.file_plan||{})}
+        const current=Array.isArray(filePlan.new_files)?[...filePlan.new_files]:[]
+        const known=new Set(current.map(item=>String(item?.path||item||'').replace(/\\/g,'/').toLowerCase()))
+        for(const item of migrationFiles){
+          const key=item.path.replace(/\\/g,'/').toLowerCase()
+          if(!known.has(key)){
+            current.push(item)
+            known.add(key)
+          }
+        }
+        filePlan.new_files=current
+        return {...prev,database_plan:finalized,file_plan:filePlan}
+      })
+      setAgentBuildMessage(`DB 설계 확정 완료 · Module ${(finalized.modules||[]).length}개 · Table ${(finalized.tables||[]).length}개 · Migration 준비 완료`)
+      setTimeout(()=>saveRequirementDraft(),0)
+      return true
+    }catch(e){
+      setAgentBuildMessage(`DB 설계 확정 실패: ${String(e)}`)
+      return false
+    }finally{
+      setDatabaseDesignFinalizeBusy(false)
+    }
+  }
+
+
   const createAgentProjectFromInterview=async()=>{
     const name=newAgentName.trim()
     const projectRoot=newAgentProjectRoot.trim()
@@ -7409,7 +8631,8 @@ function IDE() {
           output_path:newAgentOutputPath,
           venv_path:newAgentVenvPath,
           models_path:newAgentModelsPath,
-          force_recreate:forceRecreate
+          force_recreate:forceRecreate,
+          database_plan:targetWorkflowPreview?.database_plan||{}
         })
       })
     }
@@ -7455,10 +8678,12 @@ function IDE() {
       setSelectedProjectId(result.project_id||null)
       setRoot(resolvedRoot)
       setAgentBuildStage('PROJECT_CREATED')
+      const databaseFileCount=Array.isArray(result?.database_files)?result.database_files.length:0
       setAgentBuildMessage(
-        result?.recreated
+        (result?.recreated
           ? `프로젝트 재생성 준비 완료${result.project_id?` · Project #${result.project_id}`:''}`
-          : `프로젝트 생성 완료${result.project_id?` · Project #${result.project_id}`:''}`
+          : `프로젝트 생성 완료${result.project_id?` · Project #${result.project_id}`:''}`)
+        +(databaseFileCount?` · DB Migration ${databaseFileCount}개 생성`:'')
       )
 
       try{ await refreshProjectList() }catch(_){}
@@ -7473,6 +8698,52 @@ function IDE() {
       setActiveWorkflowJobId('')
     }
   }
+
+  const createAgentProjectSmart=async()=>{
+    if(projectCreateFlowBusy||agentBuildBusy||targetWorkflowLoading) return false
+
+    if(!newAgentName.trim()){
+      setAgentBuildMessage('프로젝트 생성 전 에이전트 이름을 입력하세요.')
+      return false
+    }
+    if(!newAgentProjectRoot.trim()){
+      setAgentBuildMessage('프로젝트 생성 전 프로젝트 경로를 입력하거나 경로 찾기로 선택하세요.')
+      return false
+    }
+
+    setProjectCreateFlowBusy(true)
+    try{
+      let workflowResult=null
+      if(agentBuildStage==='REQUIREMENTS'){
+        setAgentBuildMessage('프로젝트 생성에 필요한 Workflow와 DB Module 설계를 먼저 자동 분석하고 있습니다...')
+        workflowResult=await previewTargetWorkflow()
+        if(!workflowResult){
+          setAgentBuildMessage('Workflow 설계가 완료되지 않아 프로젝트 생성을 중단했습니다. 위 오류를 확인한 뒤 다시 시도하세요.')
+          return false
+        }
+      }
+
+      const databasePlan=workflowResult?.database_plan||targetWorkflowPreview?.database_plan||{}
+      if(databasePlan?.enabled&&!databasePlan?.finalized){
+        setAgentBuildMessage('DB 설계 확인이 필요합니다. Workflow 화면의 DB 자동 설계에서 Module/테이블을 확인한 뒤 "DB 설계 확정"을 눌러주세요.')
+        setScreen('WORKSPACE')
+        setWorkspaceTab('WORKFLOW')
+        setWorkflowView('TARGET')
+        return false
+      }
+
+      if(agentBuildStage==='BUILDING'){
+        setAgentBuildMessage('현재 Agent 개발이 진행 중이므로 새 프로젝트 생성을 시작할 수 없습니다.')
+        return false
+      }
+
+      setAgentBuildMessage('Workflow/DB 설계 준비 완료 · 프로젝트 폴더와 DB 정보를 생성합니다...')
+      return await createAgentProjectFromInterview()
+    }finally{
+      setProjectCreateFlowBusy(false)
+    }
+  }
+
 
   const runProjectCodingStyleValidation=async(projectRoot)=>{
     const rootPath=(projectRoot||root||newAgentProjectRoot||'').trim()
@@ -7595,6 +8866,14 @@ function IDE() {
       return
     }
 
+    const databasePlan=targetWorkflowPreview?.database_plan||{}
+    if(databasePlan?.enabled&&!databasePlan?.finalized){
+      setAgentBuildMessage('DB 설계가 확정되지 않아 개발을 시작하지 않습니다. Workflow 화면에서 DB 설계를 확인/확정해 주세요.')
+      setWorkspaceTab('WORKFLOW')
+      setWorkflowView('TARGET')
+      return
+    }
+
     const projectRoot=(root||newAgentProjectRoot||'').trim()
 
     if(!projectRoot){
@@ -7644,7 +8923,8 @@ function IDE() {
       stage:'개발 준비',
       detail:'프로젝트 경로, 요구사항, Workflow, 설정 정보를 Agent Factory에 전달할 준비를 하고 있습니다.',
       startedAt,
-      elapsedSeconds:0
+      elapsedSeconds:0,
+      events:[]
     })
 
     let progressTimer=null
@@ -7695,13 +8975,16 @@ function IDE() {
           detail='Agent Factory의 최종 산출물·테스트·분석 결과가 반환되기를 기다리고 있습니다.'
         }
 
-        setDevelopmentProgress(prev=>({
-          ...prev,
-          percent,
-          stage,
-          detail,
-          elapsedSeconds
-        }))
+        setDevelopmentProgress(prev=>{
+          const hasRealEvents=Array.isArray(prev?.events)&&prev.events.length>0
+          return {
+            ...prev,
+            percent:hasRealEvents?Math.max(prev?.percent||0,percent):percent,
+            stage:hasRealEvents?prev.stage:stage,
+            detail:hasRealEvents?prev.detail:detail,
+            elapsedSeconds
+          }
+        })
       },900)
 
       const workflowJob=await api('/workflow/start-job',{
@@ -7720,7 +9003,11 @@ function IDE() {
               role:item?.role||'',
               content:item?.content||''
             })),
-            interview_context:buildRequirementRequestFromCollectedInfo()
+            interview_context:buildRequirementRequestFromCollectedInfo(),
+            previous_build_state:(
+              ['FULL_REUSE','PARTIAL_REVISE'].includes(String(targetWorkflowPreview?.design_runtime?.incremental_revision?.mode||''))
+              && String(workflow?.state?.project_root||'')===String(projectRoot||'')
+            )?(workflow?.state||{}):{}
           }
         })
       })
@@ -7764,8 +9051,11 @@ function IDE() {
           setDevelopmentProgress(prev=>({
             ...prev,
             percent:Math.max(prev?.percent||0,backendProgress),
-            stage:'Agent Factory Background Job 실행 중',
-            detail:jobState?.message||prev?.detail||'Agent Factory가 실행 중입니다.'
+            stage:jobState?.last_node
+              ? `Agent Factory · ${jobState.last_node}`
+              : 'Agent Factory Background Job 실행 중',
+            detail:jobState?.message||prev?.detail||'Agent Factory가 실행 중입니다.',
+            events:Array.isArray(jobState?.events)?jobState.events.slice(-10):(prev?.events||[])
           }))
         }
       }
@@ -8073,7 +9363,7 @@ function IDE() {
 
     if(!request){
       setTargetWorkflowError('에이전트 개발 요청 내용을 입력하세요.')
-      return
+      return false
     }
 
     setTargetWorkflowLoading(true)
@@ -8097,8 +9387,8 @@ function IDE() {
         detail:'요구사항과 프로젝트 정보를 AI 설계 엔진에 전달했습니다.'
       }))
 
-      // Backend의 design_agent_factory는 현재 한 번의 LLM 호출로 전체 설계 Bundle을 만듭니다.
-      // 내부 세부 단계를 거짓으로 표시하지 않고, 실제 응답 대기 상태를 점진적으로 보여줍니다.
+      // v5.341: Workflow/LangGraph는 고성능 설계 호출로 만들고, DB가 필요한 경우 Entity/관계를 전용 고성능 단계에서 추가 보강합니다.
+      // 내부 LLM의 임의 퍼센트를 만들지 않고 실제 응답 대기 상태만 점진적으로 표시합니다.
       progressTimer=setInterval(()=>{
         percent=Math.min(82,percent+Math.max(1,Math.round((82-percent)*0.08)))
 
@@ -8108,7 +9398,7 @@ function IDE() {
           stage:'AI 설계 응답 대기',
           detail:
             percent<45
-              ? '대상 Agent의 기능·MCP·Architecture·Workflow를 설계하고 있습니다.'
+              ? '대상 Agent의 기능·MCP·Architecture·DB Module·Workflow를 설계하고 있습니다.'
               : percent<68
                 ? 'AI 설계 결과를 기다리고 있습니다. 복잡한 요구사항은 시간이 더 걸릴 수 있습니다.'
                 : '설계 응답을 기다리는 중입니다. 완료되면 요구사항 반영 검사를 진행합니다.'
@@ -8125,7 +9415,10 @@ function IDE() {
             role:item?.role||'',
             content:item?.content||''
           })),
-          confirmed_requirements:buildConfirmedRequirementsFromChat()
+          confirmed_requirements:buildConfirmedRequirementsFromChat(),
+          attachment_ids:interviewAttachments.map(item=>item.attachment_id),
+          attachment_memory:interviewAttachmentMemory,
+          previous_design:targetWorkflowPreview||previousTargetWorkflowPreview||{}
         })
       })
 
@@ -8145,6 +9438,18 @@ function IDE() {
         throw new Error(result.message||'Workflow 분석 실패')
       }
 
+      const nextAttachmentMemory=String(result?.attachment_memory||interviewAttachmentMemory||'')
+      if(nextAttachmentMemory) setInterviewAttachmentMemory(nextAttachmentMemory)
+      if(interviewAttachments.length){
+        const consumedIds=interviewAttachments.map(item=>item.attachment_id)
+        setInterviewAttachments([])
+        setInterviewAttachmentAnalysis({busy:false,ready:true,overallProgress:100,failedFiles:0,successfulFiles:0,files:[]})
+        void api('/ai/attachments/release',{
+          method:'POST',
+          body:JSON.stringify({attachment_ids:consumedIds})
+        }).catch(()=>{})
+      }
+
       // 브라우저가 90% 상태를 실제로 한 번 그릴 수 있도록 다음 frame까지 기다립니다.
       await new Promise(resolve=>
         requestAnimationFrame(()=>
@@ -8154,9 +9459,20 @@ function IDE() {
 
       setWorkflowReq(request)
       setTargetWorkflowPreview(result)
+      setPreviousTargetWorkflowPreview(result)
       setTargetWorkflowQuality(result?.workflow_quality||null)
       setAgentBuildStage('WORKFLOW_READY')
-      setAgentBuildMessage('대상 Agent Workflow 설계가 완료되었습니다.')
+      const revision=result?.design_runtime?.incremental_revision||{}
+      const revisionMode=String(revision?.mode||'')
+      setAgentBuildMessage(
+        revisionMode==='FULL_REUSE'
+          ? '변경된 요구사항이 없어 기존 Workflow/Architecture/DB 설계를 그대로 재사용했습니다. (설계 LLM 호출 0회)'
+          : revisionMode==='PARTIAL_REVISE'
+            ? `변경된 부분만 증분 설계했습니다. 영향 영역: ${(revision?.affected_sections||[]).join(', ')||'-'}`
+            : revisionMode==='FULL_REDESIGN'||revisionMode==='FULL_REDESIGN_FALLBACK'
+              ? '큰 구조 변경을 감지해 전체 Workflow/Architecture/DB 설계를 다시 생성했습니다.'
+              : '대상 Agent Workflow 설계가 완료되었습니다.'
+      )
       setWorkflowView('TARGET')
       setWorkspaceTab('WORKFLOW')
 
@@ -8177,6 +9493,7 @@ function IDE() {
           active:false
         }))
       },1800)
+      return result
     }catch(e){
       if(progressTimer){
         clearInterval(progressTimer)
@@ -8191,6 +9508,7 @@ function IDE() {
         stage:'Workflow 설계 실패',
         detail:String(e)
       }))
+      return false
     }finally{
       setTargetWorkflowLoading(false)
     }
@@ -8220,8 +9538,12 @@ function IDE() {
   }
 
   const sendChat=async()=>{
-    const message=input.trim()
-    if(!message || busy) return
+    const typedMessage=input.trim()
+    const message=typedMessage || (interviewAttachments.length
+      ? '첨부한 참고 파일을 분석해서 Agent 요구사항을 파악해줘.'
+      : '')
+    if(!message || busy || interviewAttachmentSummaryBusy) return
+    if(interviewAttachments.length&&!interviewAttachmentAnalysis.ready) return
     const requirementsDone=chat.some(item=>
       item?.role==='assistant'
       && String(item?.content||'').includes('요구사항 분석 완료')
@@ -8256,7 +9578,9 @@ function IDE() {
     setWorkflowReq(prev=>prev?.trim()?prev:message)
 
     const historyBeforeSend=[...chat]
-    const userMessage={role:'user',content:message}
+    // Attachment names are UI/session metadata. Do not inject the same file list
+    // into every user message; Backend receives opaque ids separately.
+    const userMessage={role:'user',content:sanitizeInterviewDisplayText(message)}
 
     setChat(prev=>[...prev,userMessage])
     setInput('')
@@ -8269,18 +9593,35 @@ function IDE() {
           message,
           history:historyBeforeSend,
           provider,
-          project_root:newAgentProjectRoot||root||''
+          project_root:newAgentProjectRoot||root||'',
+          attachment_ids:interviewAttachments.map(item=>item.attachment_id),
+          attachment_memory:interviewAttachmentMemory
         })
       })
 
-      const answer=
+      const answer=protectInterviewAssistantAnswer(
         result?.answer
         || result?.message
         || '응답을 받지 못했습니다.'
+      )
+      const attachmentWarning=Array.isArray(result?.attachment_warnings)&&result.attachment_warnings.length
+        ? `\n\n[참고 파일 알림] ${result.attachment_warnings.join(' / ')}`
+        : ''
+      const nextAttachmentMemory=String(result?.attachment_memory||interviewAttachmentMemory||'')
+      if(nextAttachmentMemory) setInterviewAttachmentMemory(nextAttachmentMemory)
+      if(interviewAttachments.length){
+        const consumedIds=interviewAttachments.map(item=>item.attachment_id)
+        setInterviewAttachments([])
+        setInterviewAttachmentAnalysis({busy:false,ready:true,overallProgress:100,failedFiles:0,successfulFiles:0,files:[]})
+        void api('/ai/attachments/release',{
+          method:'POST',
+          body:JSON.stringify({attachment_ids:consumedIds})
+        }).catch(()=>{})
+      }
 
       setChat(prev=>[
         ...prev,
-        {role:'assistant',content:answer}
+        {role:'assistant',content:answer+attachmentWarning}
       ])
 
       // 응답이 누적될 때마다 수집 요구사항 Draft를 갱신합니다.
@@ -8302,7 +9643,7 @@ function IDE() {
   }
 
   const sendBuilderAnswer=async()=>{
-    if(!input.trim()) return
+    if(!input.trim()&&!interviewAttachments.length) return
     setBuilderStarted(true)
     await sendChat()
   }
@@ -8547,22 +9888,36 @@ function IDE() {
     </div>
   </div>
 
-  const renderBuilderScreen=()=> <div className="builder-shell">
+  const renderBuilderScreen=()=>{
+    const leftSummary=getBuilderConversationSummary()
+    const builderSteps=[
+      ['01','목적',leftSummary.purpose],
+      ['02','기능',leftSummary.features],
+      ['03','MCP / Tool',leftSummary.mcpTools],
+      ['04','DB 설계',leftSummary.database],
+      ['05','실행 환경',leftSummary.runtime],
+      ['06','확인',leftSummary.confirmation]
+    ]
+    return <div className="builder-shell">
     <aside className="builder-steps">
       <button className="back-link" onClick={()=>setScreen('HOME')}>← 홈으로</button>
       <div className="builder-title">신규 Agent 설계</div>
-      {[
-        ['01','목적','어떤 Agent를 만들지'],
-        ['02','기능','핵심 기능과 사용자 흐름'],
-        ['03','MCP / Tool','필요한 외부 도구'],
-        ['04','실행 환경','경로와 모델'],
-        ['05','확인','프로젝트 생성']
-      ].map((s,i)=><div className={`builder-step ${i===0||builderStarted?'on':''}`} key={s[0]}>
-        <b>{s[0]}</b><div><strong>{s[1]}</strong><small>{s[2]}</small></div>
+      {builderSteps.map((s,i)=><div className={`builder-step ${i===0||builderStarted?'on':''}`} key={s[0]}>
+        <b>{s[0]}</b><div><strong>{s[1]}</strong><small title={s[2]}>{s[2]}</small></div>
       </div>)}
+      <div className="builder-live-summary">
+        <strong>대화 요구사항 요약</strong>
+        {leftSummary.collectedItems.length
+          ? <div className="builder-live-summary-list">
+              {leftSummary.collectedItems.slice(0,8).map(item=><div key={item.id}>
+                <span>{item.label}</span><b>{item.value}</b>
+              </div>)}
+            </div>
+          : <small>대화를 시작하면 확정된 내용이 여기에 자동 정리됩니다.</small>}
+      </div>
       <div className="builder-tip">
-        <strong>질문 방식</strong>
-        <span>AgentStudio는 여러 질문을 한꺼번에 하지 않습니다. 답변을 확인한 뒤 다음 질문 하나를 이어갑니다.</span>
+        <strong>질문 방식 · Quality Gate</strong>
+        <span>이미 답한 내용과 AgentStudio가 자동 설계할 기술 세부사항은 다시 묻지 않고, 사용자 결정이 필요한 질문 하나만 이어갑니다.</span>
       </div>
     </aside>
 
@@ -8598,18 +9953,18 @@ function IDE() {
       <div className="builder-messages">
         {chat.map((m,i)=><div key={i} className={`builder-msg ${m.role}`}>
           <span>{m.role==='assistant'?'AI':'나'}</span>
-          <div>{m.content}</div>
+          <div>{m.role==='assistant'?protectInterviewAssistantAnswer(m.content):sanitizeInterviewDisplayText(m.content)}</div>
         </div>)}
         {busy&&<div className="builder-msg assistant"><span>AI</span><div>답변을 분석하고 다음 질문을 준비하고 있습니다...</div></div>}
         <div ref={builderMessagesEndRef} className="builder-messages-end" aria-hidden="true"></div>
       </div>
       <AgentBuildActionBar
         stage={agentBuildStage}
-        busy={agentBuildBusy}
+        busy={agentBuildBusy||projectCreateFlowBusy||targetWorkflowLoading}
         message={agentBuildMessage}
         workflowEnabled={canDesignFromCollectedInfo()}
         onWorkflow={()=>previewTargetWorkflow()}
-        onCreateProject={createAgentProjectFromInterview}
+        onCreateProject={createAgentProjectSmart}
         onStartDevelopment={startAgentDevelopment}
         onStop={cancelAgentDevelopment}
       />
@@ -8656,11 +10011,13 @@ function IDE() {
 
         <div className="requirement-draft-info">
           <span>
-            {requirementDraftRestored
-              ? '이전 수집 정보 복원됨'
-              : requirementDraftSavedAt
-                ? '수집 정보 저장됨'
-                : '수집 정보 저장 대기'}
+            {requirementDraftDecisionPending
+              ? '같은 경로의 이전 요구사항 Draft 발견'
+              : requirementDraftRestored
+                ? '이전 수집 정보 복원됨'
+                : requirementDraftSavedAt
+                  ? '수집 정보 저장됨'
+                  : '수집 정보 저장 대기'}
           </span>
           {requirementDraftSavedAt&&
             <small>
@@ -8668,6 +10025,28 @@ function IDE() {
             </small>
           }
         </div>
+
+        {requirementDraftCandidate&&requirementDraftDecisionPending&&
+          <div className="requirement-draft-choice">
+            <p>프로젝트 경로만 선택한 상태에서는 과거 대화를 자동으로 불러오지 않습니다.</p>
+            <div>
+              <button
+                type="button"
+                className="requirement-draft-restore-button"
+                onClick={()=>restoreRequirementDraft(requirementDraftCandidate.key)}
+              >
+                이전 요구사항 이어서 불러오기
+              </button>
+              <button
+                type="button"
+                className="requirement-draft-ignore-button"
+                onClick={keepCurrentInterviewInsteadOfDraft}
+              >
+                현재 인터뷰 유지
+              </button>
+            </div>
+          </div>
+        }
 
         {canDesignFromCollectedInfo()&&
           <button
@@ -8809,6 +10188,7 @@ function IDE() {
       {newAgentCreateResult&&<div className={newAgentCreateResult.ok?'ux-result good':'ux-result bad'}>{newAgentCreateResult.message}</div>}
     </aside>
   </div>
+  }
 
 
   const activeTerminal =
@@ -9514,6 +10894,7 @@ function IDE() {
   const askCodeEditorLLM=async()=>{
     const prompt=codeEditPrompt.trim()
     if(!prompt) return
+    if(codeEditAttachments.length&&!codeEditAttachmentAnalysis.ready) return
 
     const projectMode=codeEditScope==='PROJECT'
 
@@ -9584,6 +10965,9 @@ function IDE() {
         role:'user',
         content:
           `${projectMode?'[프로젝트]':'[파일]'} ${prompt}`
+          +(codeEditAttachments.length
+            ? `\n\n📎 참고 파일: ${codeEditAttachments.map(item=>item.name).join(', ')}`
+            : '')
       }
     ])
     scrollCodeEditChatToBottom('smooth')
@@ -9600,7 +10984,8 @@ function IDE() {
           body:JSON.stringify({
             root,
             instruction:prompt,
-            max_context_files:10
+            max_context_files:10,
+            attachment_ids:codeEditAttachments.map(item=>item.attachment_id)
           })
         })
 
@@ -9685,6 +11070,9 @@ function IDE() {
             content:
               `${result.summary||'프로젝트 코딩 작업을 완료했습니다.'} `
               +`신규 파일 ${created}개, 수정 파일 ${updated}개를 프로젝트에 저장했습니다.`
+              +(Array.isArray(result?.attachment_warnings)&&result.attachment_warnings.length
+                ? `\n[참고 파일 알림] ${result.attachment_warnings.join(' / ')}`
+                : '')
           }
         ])
 
@@ -9701,7 +11089,8 @@ function IDE() {
           content:currentCode,
           active_cell_index:isNotebookFile(targetPath)
             ? notebookEditorControllerRef.current?.getActiveCellIndex?.()
-            : null
+            : null,
+          attachment_ids:codeEditAttachments.map(item=>item.attachment_id)
         })
       })
 
@@ -9719,8 +11108,10 @@ function IDE() {
       }
 
       const explanation =
-        result.message
-        || '코드 수정 제안을 만들었습니다.'
+        (result.message || '코드 수정 제안을 만들었습니다.')
+        +(Array.isArray(result?.attachment_warnings)&&result.attachment_warnings.length
+          ? `\n[참고 파일 알림] ${result.attachment_warnings.join(' / ')}`
+          : '')
 
       // FILE 모드에서는 AI 응답을 즉시 원본 Editor에 덮어쓰지 않습니다.
       // 우측 `AI 변경 제안` 탭에서 먼저 코드를 검토한 뒤 Apply -> Diff -> 적용
@@ -9964,7 +11355,8 @@ function IDE() {
   }
 
   const createProjectFolder=async()=>{
-    if(!root) return
+    const workspaceRoot=resolveWorkspaceRoot()
+    if(!workspaceRoot) return
 
     const parent=resolveFileCreateParent()
 
@@ -9977,7 +11369,7 @@ function IDE() {
       await api('/files/folder',{
         method:'POST',
         body:JSON.stringify({
-          root,
+          root:workspaceRoot,
           relative_path:relativePath
         })
       })
@@ -9996,7 +11388,8 @@ function IDE() {
   }
 
   const createProjectFile=async()=>{
-    if(!root||fileCreateLoading||fileCreateBusyRef.current) return
+    const workspaceRoot=resolveWorkspaceRoot()
+    if(!workspaceRoot||fileCreateLoading||fileCreateBusyRef.current) return
 
     const parent=resolveFileCreateParent()
 
@@ -10018,7 +11411,7 @@ function IDE() {
       const result=await api('/files/create',{
         method:'POST',
         body:JSON.stringify({
-          root,
+          root:workspaceRoot,
           relative_path:relativePath
         })
       })
@@ -10149,6 +11542,11 @@ function IDE() {
 
   const saveTreeRename=async()=>{
     if(!fileTreeRename?.path) return
+    const workspaceRoot=resolveWorkspaceRoot()
+    if(!workspaceRoot){
+      window.alert('프로젝트 root를 확인할 수 없습니다. 프로젝트를 다시 선택해주세요.')
+      return
+    }
 
     const oldPath=fileTreeRename.path
     const nextName=fileTreeRename.value.trim()
@@ -10173,7 +11571,7 @@ function IDE() {
       const result=await api('/files/rename',{
         method:'POST',
         body:JSON.stringify({
-          root,
+          root:workspaceRoot,
           relative_path:oldPath,
           new_name:nextName
         })
@@ -10282,11 +11680,16 @@ function IDE() {
   const confirmProjectFilesDelete=async()=>{
     const pending=fileDeleteConfirm
     if(!pending||pending.deleting) return
+    const workspaceRoot=resolveWorkspaceRoot()
+    if(!workspaceRoot){
+      setFileDeleteConfirm(prev=>prev?{...prev,error:'프로젝트 root를 확인할 수 없습니다. 프로젝트를 다시 선택해주세요.'}:prev)
+      return
+    }
     setFileDeleteConfirm(prev=>prev?{...prev,deleting:true,error:''}:prev)
     try{
       const result=await api('/files/delete',{
         method:'POST',
-        body:JSON.stringify({root,relative_paths:pending.paths})
+        body:JSON.stringify({root:workspaceRoot,relative_paths:pending.paths})
       })
       const deleted=[...(result?.deleted||[]),...(result?.missing||[])]
         .map(normalizeProjectRelativePath)
@@ -10302,7 +11705,7 @@ function IDE() {
         const next={...prev}; for(const path of deleted) delete next[path]; return next
       })
       setExternalFileNotifications(prev=>prev.filter(item=>!deleted.includes(item.path)))
-      await loadFiles(root)
+      await loadFiles(workspaceRoot)
       setFileDeleteConfirm(null)
       if(result?.lock_recovered){
         const released=[]
@@ -10851,6 +12254,20 @@ function IDE() {
               <i></i>{label}
             </span>)}
           </div>
+
+          {Array.isArray(developmentProgress.events)&&developmentProgress.events.length>0&&<div className="development-live-log">
+            <div className="development-live-log-head">
+              <strong>생성 진행 로그</strong>
+              <small>LLM 추가 호출 없음 · Node 완료 이벤트만 표시</small>
+            </div>
+            <div className="development-live-log-list">
+              {developmentProgress.events.slice(-8).map((event,index)=><div className="development-live-log-row" key={`${event?.at||''}-${event?.node||''}-${index}`}>
+                <span>{String(event?.at||'').slice(11,19)||'--:--:--'}</span>
+                <b>{event?.node||event?.status||'workflow'}</b>
+                <em>{event?.message||''}</em>
+              </div>)}
+            </div>
+          </div>}
         </div>
       : null
   )
@@ -11332,6 +12749,15 @@ function IDE() {
     const architecture=state?.agent_architecture
       || targetWorkflowPreview?.agent_architecture
       || {}
+    const databasePlan=state?.database_plan
+      || targetWorkflowPreview?.database_plan
+      || {}
+    const asBuiltArchitecture=state?.as_built_architecture
+      || packageResult?.as_built_architecture
+      || {}
+    const architectureConformance=state?.architecture_conformance
+      || packageResult?.architecture_conformance
+      || {}
 
     return {
       state,
@@ -11343,6 +12769,9 @@ function IDE() {
       capabilityPlan,
       toolMcpPlan,
       architecture,
+      asBuiltArchitecture,
+      architectureConformance,
+      databasePlan,
       settingsPlan:state?.settings_plan||packageResult?.settings_plan||{},
       settingsValidation:state?.settings_validation_result||packageResult?.settings_validation||{},
       settingsGeneration:state?.settings_generation_result||{},
@@ -11358,7 +12787,18 @@ function IDE() {
     }
   }
 
-  const renderWorkspaceScreen=()=> <div
+  const renderWorkspaceScreen=()=>{
+    const leftSummary=getBuilderConversationSummary()
+    const designBuilderSteps=[
+      ['01','목적',leftSummary.purpose],
+      ['02','기능',leftSummary.features],
+      ['03','MCP / Tool',leftSummary.mcpTools],
+      ['04','DB 설계',leftSummary.database],
+      ['05','실행 환경',leftSummary.runtime],
+      ['06','확인',leftSummary.confirmation],
+    ]
+
+    return <div
     ref={workspaceLayoutRef}
     className={`ux-workspace workspace-panel-layout ${workspaceLeftCollapsed?'workspace-left-collapsed':''} ${workspaceRightCollapsed?'workspace-right-collapsed':''} ${workspaceResizeSide?'workspace-resizing':''}`}
     style={{
@@ -11381,28 +12821,33 @@ function IDE() {
         <div className="design-left-panel">
           <div className="unified-design-title">신규 Agent 설계</div>
 
-          {[
-            ['01','목적','어떤 Agent를 만들지'],
-            ['02','기능','핵심 기능과 사용자 흐름'],
-            ['03','MCP / Tool','필요한 외부 도구'],
-            ['04','실행 환경','경로와 모델'],
-            ['05','확인','프로젝트 생성']
-          ].map((s,i)=><div
+          {designBuilderSteps.map((s,i)=><div
             className={`builder-step ${i===0||builderStarted?'on':''}`}
             key={s[0]}
           >
             <b>{s[0]}</b>
             <div>
               <strong>{s[1]}</strong>
-              <small>{s[2]}</small>
+              <small title={s[2]}>{s[2]}</small>
             </div>
           </div>)}
 
+          <div className="builder-live-summary">
+            <strong>대화 요구사항 요약</strong>
+            {leftSummary.collectedItems.length
+              ? <div className="builder-live-summary-list">
+                  {leftSummary.collectedItems.slice(0,8).map(item=><div key={item.id}>
+                    <span>{item.label}</span><b>{item.value}</b>
+                  </div>)}
+                </div>
+              : <small>대화를 시작하면 확정된 내용이 여기에 자동 정리됩니다.</small>}
+          </div>
+
           <div className="builder-tip">
-            <strong>질문 방식</strong>
+            <strong>질문 방식 · Quality Gate</strong>
             <span>
-              AgentStudio는 여러 질문을 한꺼번에 하지 않습니다.
-              답변을 확인한 뒤 다음 질문 하나를 이어갑니다.
+              이미 답한 내용과 AgentStudio가 자동 설계할 기술 세부사항은 다시 묻지 않고,
+              사용자 결정이 필요한 질문 하나만 이어갑니다.
             </span>
           </div>
         </div>
@@ -11593,7 +13038,7 @@ function IDE() {
     />}
 
     <main className={`workspace-main workspace-tab-${workspaceTab.toLowerCase()} ${
-      ['RUN','REPORT','ARCHITECTURE','LLM'].includes(workspaceTab)
+      ['RUN','REPORT','ARCHITECTURE','LLM','BROWSER'].includes(workspaceTab)
         ? 'compact-workspace result-only-workspace'
         : workspaceTab==='CODE'&&!isBinaryPreviewFile(selected)
           ? 'workspace-with-bottom-tools code-tools-workspace'
@@ -11618,7 +13063,8 @@ function IDE() {
             ['RUN','실행 결과'],
             ['REPORT','분석 리포트'],
             ['ARCHITECTURE','아키텍처'],
-            ['LLM','LLM 리스트']
+            ['LLM','LLM 리스트'],
+            ['BROWSER','웹브라우저']
           ].map(([k,t])=><button key={k}
             className={workspaceTab===k?'active':''}
             onClick={()=>setWorkspaceTab(k)}>{t}</button>)}
@@ -11636,7 +13082,7 @@ function IDE() {
       </div>
 
       <div className={
-        ['RUN','REPORT','ARCHITECTURE','LLM'].includes(workspaceTab)
+        ['RUN','REPORT','ARCHITECTURE','LLM','BROWSER'].includes(workspaceTab)
           ? 'workspace-top-pane compact-result-pane'
           : 'workspace-top-pane'
       }>
@@ -11687,7 +13133,7 @@ function IDE() {
                 className={`builder-msg ${m.role}`}
               >
                 <span>{m.role==='assistant'?'AI':'나'}</span>
-                <div>{m.content}</div>
+                <div>{m.role==='assistant'?protectInterviewAssistantAnswer(m.content):sanitizeInterviewDisplayText(m.content)}</div>
               </div>)}
 
               {busy&&<div className="builder-msg assistant">
@@ -11701,6 +13147,54 @@ function IDE() {
                 aria-hidden="true"
               />
             </div>
+
+            <AiAttachmentPicker
+              attachments={interviewAttachments}
+              onChange={setInterviewAttachments}
+              projectRoot={newAgentProjectRoot||root||''}
+              initialPath={newAgentProjectRoot||root||''}
+              disabled={busy||interviewAttachmentSummaryBusy}
+              label="참고 파일 선택"
+              title="Agent 설계 인터뷰에서 분석할 요구사항/설계/코드 파일을 선택하세요."
+              maxFiles={12}
+              analysisPurpose="Agent 설계 인터뷰 참고 파일 분석 준비"
+              analysisActive={busy||interviewAttachmentSummaryBusy}
+              onAnalysisStateChange={setInterviewAttachmentAnalysis}
+            />
+            {interviewAttachmentSummaryBusy&&<div className="attachment-intent-summary loading">
+              <div className="attachment-intent-summary-head">
+                <strong>첨부 파일에서 만들고자 하는 내용을 정리하고 있습니다...</strong>
+                <span>AI 통합 분석</span>
+              </div>
+              <p>파일별 텍스트 추출은 완료되었습니다. 여러 파일의 목적·기능·데이터·기술 구성을 하나의 요구사항으로 통합하고 있습니다.</p>
+            </div>}
+            {interviewAttachmentSummaryError&&<div className="attachment-intent-summary error">
+              <div className="attachment-intent-summary-head"><strong>첨부 요구사항 정리 실패</strong></div>
+              <p>{interviewAttachmentSummaryError}</p>
+            </div>}
+            {interviewAttachmentSummary&&<div className="attachment-intent-summary">
+              <div className="attachment-intent-summary-head">
+                <strong>첨부 파일에서 파악한 만들고자 하는 내용</strong>
+                <span>요구사항 Context 반영 완료</span>
+              </div>
+              {interviewAttachmentSummaryFiles.length>0&&<div className="attachment-intent-files">
+                {interviewAttachmentSummaryFiles.map((item,index)=><span key={`${item.path||item.name}-${index}`}>{item.name||item.path}</span>)}
+              </div>}
+              <div className="attachment-intent-summary-body">{interviewAttachmentSummary}</div>
+              <div className="attachment-intent-summary-actions">
+                <button type="button" onClick={()=>{
+                  setInterviewAttachmentSummary('')
+                  setInterviewAttachmentSummaryFiles([])
+                  setInterviewAttachmentMemory('')
+                  setConfirmedInterviewRequirements({})
+                  invalidateRequirementWorkflowAfterEdit('첨부 파일 분석 Context를 지웠습니다. 남은 요구사항 기준으로 다시 정의해 주세요.')
+                }}>첨부 분석 Context 지우기</button>
+              </div>
+            </div>}
+            {interviewAttachmentMemory&&!interviewAttachments.length&&!interviewAttachmentSummary&&<div className="interview-attachment-memory">
+              <span>✓ 참고 파일 분석 내용이 현재 인터뷰 Context에 반영되었습니다. 원본 첨부는 자동 해제되어 다음 질문에 반복 첨부되지 않습니다.</span>
+              <button type="button" onClick={()=>setInterviewAttachmentMemory('')}>참고 Context 지우기</button>
+            </div>}
 
             <div className="builder-input unified">
               <textarea
@@ -11716,7 +13210,7 @@ function IDE() {
               />
               <button
                 onClick={sendBuilderAnswer}
-                disabled={busy||!input.trim()}
+                disabled={busy||interviewAttachmentSummaryBusy||(!input.trim()&&!interviewAttachments.length)||(interviewAttachments.length&&!interviewAttachmentAnalysis.ready)}
               >
                 답변 보내기
               </button>
@@ -11864,6 +13358,83 @@ function IDE() {
               {targetWorkflowQuality.warning&&<b>{targetWorkflowQuality.warning}</b>}
             </div>}
 
+            {targetWorkflowPreview?.design_runtime&&<div className="workflow-provider-routing-note">
+              <strong>고난도 설계 AI</strong>
+              <span>Workflow / LangGraph: {String(targetWorkflowPreview.design_runtime.workflow_provider||'-').toUpperCase()}</span>
+              <span>DB Entity / 관계: {String(targetWorkflowPreview.design_runtime.database_provider||'해당 없음').toUpperCase()}</span>
+              <small>자동 모드 우선순위: Codex → OpenAI → Ollama</small>
+            </div>}
+
+            {targetWorkflowPreview?.database_plan&&<div className={`database-design-card ${targetWorkflowPreview.database_plan.enabled?'enabled':'disabled'} ${targetWorkflowPreview.database_plan.finalized?'finalized':''}`}>
+              <div className="database-design-head">
+                <div>
+                  <span className="database-design-icon">▦</span>
+                  <div>
+                    <strong>DB 자동 설계</strong>
+                    <small>{targetWorkflowPreview.database_plan.enabled
+                      ? 'Core + 기능별 Module + Custom Business Entity를 조립한 PostgreSQL 설계입니다.'
+                      : '현재 요구사항에는 영속 DB가 필요하지 않아 DB Module을 생성하지 않습니다.'}</small>
+                  </div>
+                </div>
+                <span className={targetWorkflowPreview.database_plan.finalized?'database-design-status done':'database-design-status'}>
+                  {targetWorkflowPreview.database_plan.finalized?'확정':'확인 필요'}
+                </span>
+              </div>
+
+              {targetWorkflowPreview.database_plan.enabled&&<>
+                <div className="database-design-strategy">{targetWorkflowPreview.database_plan.strategy}</div>
+                <div className="database-module-list">
+                  {(targetWorkflowPreview.database_plan.modules||[]).map(module=><span key={module.id} className={module.required?'required':''} title={module.reason}>
+                    {module.label||module.id}{module.required?' · 필수':''}
+                  </span>)}
+                </div>
+
+                <div className="database-design-summary-grid">
+                  <div><small>Module</small><strong>{(targetWorkflowPreview.database_plan.modules||[]).length}</strong></div>
+                  <div><small>Table</small><strong>{(targetWorkflowPreview.database_plan.tables||[]).length}</strong></div>
+                  <div><small>Relationship</small><strong>{(targetWorkflowPreview.database_plan.relationships||[]).length}</strong></div>
+                  <div><small>Validator</small><strong>{targetWorkflowPreview.database_plan.validation?.valid===false?'FAIL':'PASS'}</strong></div>
+                </div>
+
+                <div className="database-table-plan-list">
+                  {(targetWorkflowPreview.database_plan.tables||[]).map(table=><div key={table.name} className="database-table-plan-row">
+                    <div>
+                      <strong>{table.name}</strong>
+                      <span>{table.module}</span>
+                    </div>
+                    <small>{table.purpose}</small>
+                    <em>{(table.columns||[]).length} columns</em>
+                  </div>)}
+                </div>
+
+                {(targetWorkflowPreview.database_plan.validation?.warnings||[]).length>0&&<div className="database-design-warning">
+                  {(targetWorkflowPreview.database_plan.validation.warnings||[]).map((warning,index)=><div key={index}>! {warning}</div>)}
+                </div>}
+                {(targetWorkflowPreview.database_plan.validation?.errors||[]).length>0&&<div className="database-design-error">
+                  {(targetWorkflowPreview.database_plan.validation.errors||[]).map((error,index)=><div key={index}>× {error}</div>)}
+                </div>}
+
+                <div className="database-design-policy">{targetWorkflowPreview.database_plan.jsonb_policy}</div>
+
+                <div className="database-design-actions">
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={databaseDesignFinalizeBusy||targetWorkflowPreview.database_plan.validation?.valid===false||targetWorkflowPreview.database_plan.finalized}
+                    onClick={()=>finalizeDatabaseDesign()}
+                  >
+                    {databaseDesignFinalizeBusy?'DDL 생성 중...':targetWorkflowPreview.database_plan.finalized?'✓ DB 설계 확정됨':'✓ DB 설계 확정 · DDL 생성'}
+                  </button>
+                  {targetWorkflowPreview.database_plan.finalized&&<span>backend/migrations/001_initial_schema.sql 생성 준비 완료</span>}
+                </div>
+
+                {targetWorkflowPreview.database_plan.finalized&&targetWorkflowPreview.database_plan.ddl&&<details className="database-ddl-preview">
+                  <summary>PostgreSQL DDL 미리보기</summary>
+                  <pre>{targetWorkflowPreview.database_plan.ddl}</pre>
+                </details>}
+              </>}
+            </div>}
+
             <TargetWorkflowDiagram workflow={targetWorkflowPreview?.target_agent_workflow}/>
           </div>}
         </div>}
@@ -12004,9 +13575,7 @@ function IDE() {
                 )
               })}
               {openEditorFiles.length===0&&
-                <div className="code-file-tab-empty">
-                  열린 파일이 없습니다.
-                </div>
+                <div className="code-file-tab-empty">열린 파일이 없습니다.</div>
               }
             </div>
 
@@ -12187,6 +13756,12 @@ function IDE() {
               </button>
               <button
                 type="button"
+                onClick={()=>saveEditorFileAs(editorTabMenu.path)}
+              >
+                다른 이름으로 저장...
+              </button>
+              <button
+                type="button"
                 onClick={()=>
                   copyEditorFileFullPath(
                     editorTabMenu.path
@@ -12198,7 +13773,19 @@ function IDE() {
             </div>
           }
 
-{editorLoadErrors[selected]
+{fileLoading&&fileLoadingPath===selected
+            ? <div className="editor-load-error-shell">
+                <div className="editor-load-error-card">
+                  <span className="editor-load-error-icon">…</span>
+                  <div>
+                    <strong>파일을 불러오는 중입니다.</strong>
+                    <p>디스크의 실제 파일 내용을 읽은 뒤 편집기를 표시합니다.</p>
+                    <code>{selected}</code>
+                    <small>로드가 완료되기 전에는 편집/저장을 시작하지 않아 잘못된 기본 버퍼가 원본 파일에 사용되지 않습니다.</small>
+                  </div>
+                </div>
+              </div>
+            : editorLoadErrors[selected]
             ? <div className="editor-load-error-shell">
                 <div className="editor-load-error-card">
                   <span className="editor-load-error-icon">!</span>
@@ -12242,16 +13829,21 @@ function IDE() {
                   }}
                 />
               </div>
+            : isDatabaseDiagramFile(selected)
+              ? <DatabaseDiagramViewer
+                  value={code}
+                  filePath={selected}
+                />
             : isPdfFile(selected)
               ? <PdfViewer
                   filePath={selected}
-                  projectRoot={root||activeWorkspaceRoot}
+                  projectRoot={resolveWorkspaceRoot()}
                   revision={pdfPreviewRevision[normalizeProjectRelativePath(selected)]||0}
                 />
               : isPresentationFile(selected)
               ? <PresentationViewer
                   filePath={selected}
-                  projectRoot={root||activeWorkspaceRoot}
+                  projectRoot={resolveWorkspaceRoot()}
                   revision={presentationPreviewRevision[normalizeProjectRelativePath(selected)]||0}
                 />
               : isNotebookFile(selected)
@@ -12743,12 +14335,27 @@ function IDE() {
 
         {workspaceTab==='ARCHITECTURE'&&(()=>{
           const r=getWorkflowReportState()
+          const designArchitectureReady=Boolean(
+            (r.architecture?.components||[]).length
+            ||(r.architecture?.interfaces||[]).length
+            ||(r.architecture?.persistence||[]).length
+            ||(r.architecture?.state||[]).length
+            ||(r.architecture?.security||[]).length
+          )
+          const asBuiltArchitectureReady=Boolean(
+            (r.asBuiltArchitecture?.components||[]).length
+            ||Number(r.asBuiltArchitecture?.scan?.source_file_count||0)>0
+          )
+          const conformanceReady=Boolean(
+            r.architectureConformance
+            &&(r.architectureConformance.status||r.architectureConformance.checked_at||r.architectureConformance.mismatches?.length||r.architectureConformance.ok===true)
+          )
           return <div className="analysis-report-dashboard architecture-dashboard">
             <div className="dashboard-hero report architecture-hero">
               <div>
                 <span className="dashboard-eyebrow">ARCHITECTURE VISUALIZATION</span>
                 <h2>아키텍처</h2>
-                <p>신규 에이전트 구조와 THEANOVA AgentStudio 플랫폼 구조를 한 화면에서 비교합니다.</p>
+                <p>설계 아키텍처와 실제 생성 코드를 역분석한 As-Built 구조를 비교하고 일치 여부를 검증합니다.</p>
               </div>
               <div className="report-hero-actions">
                 <button type="button" onClick={()=>setWorkspaceTab('REPORT')}>↔ 분석 리포트 보기</button>
@@ -12757,13 +14364,48 @@ function IDE() {
             </div>
 
             <div className="metric-grid report-metrics">
-              <MetricCard label="구성 요소" value={`${(r.architecture?.components||[]).length}개`} sub="신규 에이전트" icon="⬢" tone="info" />
-              <MetricCard label="인터페이스" value={`${(r.architecture?.interfaces||[]).length}개`} sub="연결 지점" icon="⇄" tone="default" />
-              <MetricCard label="영속성" value={`${(r.architecture?.persistence||[]).length}개`} sub="DB / 상태 저장" icon="💾" tone="warning" />
-              <MetricCard label="보안" value={`${(r.architecture?.security||[]).length}개`} sub="권한 / Secret / Guardrail" icon="🔐" tone="success" />
+              <MetricCard label="구성 요소" value={designArchitectureReady?`${(r.architecture?.components||[]).length}개`:'-'} sub={designArchitectureReady?'Design Architecture':'설계 전'} icon="⬢" tone="info" />
+              <MetricCard label="인터페이스" value={designArchitectureReady?`${(r.architecture?.interfaces||[]).length}개`:'-'} sub={designArchitectureReady?'연결 지점':'설계 전'} icon="⇄" tone="default" />
+              <MetricCard label="영속성" value={designArchitectureReady?`${(r.architecture?.persistence||[]).length}개`:'-'} sub={designArchitectureReady?'DB / 상태 저장':'설계 전'} icon="💾" tone="warning" />
+              <MetricCard label="Conformance" value={conformanceReady?`${Number(r.architectureConformance?.score||0).toFixed(0)}점`:'-'} sub={conformanceReady?(r.architectureConformance?.ok?'PASS':'검증 필요'):'코드 생성 후 검증'} icon="✓" tone={conformanceReady&&r.architectureConformance?.ok?'success':'warning'} />
             </div>
 
-            <GeneratedAgentArchitecturePanel report={r} />
+            {designArchitectureReady
+              ? <GeneratedAgentArchitecturePanel report={r} />
+              : <div className="architecture-lifecycle-empty">
+                  <span>◇</span>
+                  <div>
+                    <small>DESIGN ARCHITECTURE · NOT STARTED</small>
+                    <strong>아키텍처가 아직 생성되지 않았습니다.</strong>
+                    <p>요구사항 수집 후 <b>설계 검토</b>를 실행하면 목표 Architecture · Workflow · DB 설계를 함께 생성합니다. 내부 Requirement State/대화 JSON은 이 영역에 표시하지 않습니다.</p>
+                  </div>
+                  <button type="button" disabled={!canDesignFromCollectedInfo()||targetWorkflowLoading} onClick={()=>{setWorkspaceTab('WORKFLOW');setWorkflowView('TARGET');previewTargetWorkflow()}}>◇ 설계 검토</button>
+                </div>
+            }
+
+            {asBuiltArchitectureReady
+              ? <AsBuiltAgentArchitecturePanel report={r} />
+              : <div className="architecture-lifecycle-empty secondary">
+                  <span>⌁</span>
+                  <div>
+                    <small>AS-BUILT ARCHITECTURE · PENDING</small>
+                    <strong>실제 생성 코드 분석 대기 중</strong>
+                    <p>프로젝트 코드 생성 후 실제 파일·클래스·함수·Framework 증거를 정적 분석하여 As-Built Architecture를 만듭니다.</p>
+                  </div>
+                </div>
+            }
+
+            {conformanceReady
+              ? <ArchitectureConformancePanel report={r} />
+              : <div className="architecture-lifecycle-empty secondary">
+                  <span>✓</span>
+                  <div>
+                    <small>ARCHITECTURE CONFORMANCE · PENDING</small>
+                    <strong>Design ↔ As-Built 비교 대기 중</strong>
+                    <p>As-Built 분석 후 설계와 실제 구현을 비교하고 85점 기준 및 Critical 누락 여부를 검증합니다.</p>
+                  </div>
+                </div>
+            }
             <AgentStudioArchitecturePanel />
           </div>
         })()}
@@ -12775,7 +14417,41 @@ function IDE() {
           error={llmCatalogError}
           onRefresh={refreshLlmCatalog}
         />}
+
+        {workspaceTab==='BROWSER'&&<WebBrowserWorkspace
+          tabs={webBrowserTabs}
+          activeTabId={activeWebBrowserTab?.id||DEFAULT_WEB_BROWSER_ID}
+          detectionEnabled={webUrlDetectionEnabled}
+          onDetectionEnabledChange={setWebUrlDetectionEnabled}
+          onActivateTab={activateWebBrowser}
+          onCloseTab={closeWebBrowserTab}
+          onNavigate={navigateWebBrowser}
+          onBack={tabId=>stepWebBrowserHistory(tabId,-1)}
+          onForward={tabId=>stepWebBrowserHistory(tabId,1)}
+          onReload={reloadWebBrowser}
+          onHome={homeWebBrowser}
+          onOpenNewTab={url=>openWebBrowserTab(url||'',{preferFixed:false})}
+          onOpenExternal={openWebBrowserExternal}
+          onRemoteState={syncRemoteWebBrowserState}
+          onRemotePopup={openRemoteWebBrowserPopup}
+        />}
       </div>
+
+      {detectedWebService&&<div className="web-service-detection-toast" role="status" aria-live="polite">
+        <div className="web-service-detection-copy">
+          <span className="web-service-detection-icon">🌐</span>
+          <div>
+            <strong>웹 서비스 URL 감지</strong>
+            <code>{detectedWebService.url}</code>
+            <small>자동으로 열지 않습니다. 표시 방법을 선택하세요.</small>
+          </div>
+        </div>
+        <div className="web-service-detection-actions">
+          <button type="button" onClick={()=>{openWebBrowserTab(detectedWebService.url,{preferFixed:true,detected:true});setDetectedWebService(null)}}>기본 웹브라우저에서 열기</button>
+          <button type="button" className="primary" onClick={()=>{openWebBrowserTab(detectedWebService.url,{detected:true});setDetectedWebService(null)}}>추가 웹브라우저 탭</button>
+          <button type="button" onClick={()=>setDetectedWebService(null)}>무시</button>
+        </div>
+      </div>}
 
       {workspaceTab==='CODE'&&!isBinaryPreviewFile(selected)&&<div className={`workspace-bottom-control-rail ${workspaceBottomCollapsed?'collapsed':''}`}>
         {!workspaceBottomCollapsed&&<div
@@ -12803,31 +14479,15 @@ function IDE() {
           ? `workspace-bottom-grid fixed-bottom-tools persistent-code-tools visible ${isSqlFile?'sql-workspace-bottom':''}`
           : 'workspace-bottom-grid fixed-bottom-tools persistent-code-tools hidden'
       }>
-        {isSqlFile&&<section className="sql-results-pane">
-          <div className="sql-results-tabs">
-            <button type="button" className={sqlResultTab==='DATA'?'active':''} onClick={()=>setSqlResultTab('DATA')}>Data Output{sqlQueryResult?.columns?.length?` (${sqlQueryResult.row_count||0})`:''}</button>
-            <button type="button" className={sqlResultTab==='MESSAGES'?'active':''} onClick={()=>setSqlResultTab('MESSAGES')}>Messages{sqlMessages.length?` (${sqlMessages.length})`:''}</button>
-            <div className="sql-result-summary">
-              {sqlQueryBusy?'SQL 실행 중...':sqlQueryResult?.message||'SQL을 실행하면 결과가 여기에 표시됩니다.'}
-            </div>
-          </div>
-          <div className="sql-results-body">
-            {sqlResultTab==='DATA'
-              ? (sqlQueryResult?.columns?.length
-                  ? <div className="sql-data-table-wrap">
-                      <table className="sql-data-table">
-                        <thead><tr><th className="row-index">#</th>{sqlQueryResult.columns.map((column,index)=><th key={`${column}-${index}`}>{column}</th>)}</tr></thead>
-                        <tbody>{(sqlQueryResult.rows||[]).map((row,rowIndex)=><tr key={rowIndex}><td className="row-index">{rowIndex+1}</td>{row.map((cell,cellIndex)=><td key={cellIndex} title={cell===null?'NULL':String(cell)}>{cell===null?<span className="sql-null">NULL</span>:String(cell)}</td>)}</tr>)}</tbody>
-                      </table>
-                    </div>
-                  : <div className="sql-result-empty">조회 결과가 없습니다. SELECT 문을 실행하면 표 형태로 표시됩니다.</div>)
-              : <div className="sql-message-list">
-                  {sqlMessages.length
-                    ? sqlMessages.map((item,index)=><div className={`sql-message ${item.type||'info'}`} key={`${item.time}-${index}`}><span>{item.time}</span><p>{item.text}</p></div>)
-                    : <div className="sql-result-empty">실행 메시지가 없습니다.</div>}
-                </div>}
-          </div>
-        </section>}
+        {isSqlFile&&<SqlResultsPane
+          result={sqlQueryResult}
+          resultTab={sqlResultTab}
+          onResultTabChange={setSqlResultTab}
+          messages={sqlMessages}
+          queryBusy={sqlQueryBusy}
+          activeResultSetIndex={sqlResultSetIndex}
+          onActiveResultSetIndexChange={setSqlResultSetIndex}
+        />}
         <section className={`editor-pane ux-editor-pane llm-code-chat-panel ${isSqlFile?'sql-chat-pane':''}`}>
           <div className="pane-title ux-pane-title">
             <strong>LLM 대화형 코드 편집</strong>
@@ -12905,6 +14565,21 @@ function IDE() {
               </div>}
             </div>
 
+            <AiAttachmentPicker
+              attachments={codeEditAttachments}
+              onChange={setCodeEditAttachments}
+              projectRoot={root||''}
+              initialPath={root||''}
+              disabled={codeEditBusy}
+              compact
+              label="참고 파일 선택"
+              title="LLM 대화형 코드 편집에 함께 분석할 참고 파일을 선택하세요."
+              maxFiles={12}
+              analysisPurpose="LLM 대화형 코드 편집 참고 파일 분석 준비"
+              analysisActive={codeEditBusy}
+              onAnalysisStateChange={setCodeEditAttachmentAnalysis}
+            />
+
             <div className="code-llm-input">
               <select
                 className="code-edit-scope-select"
@@ -12931,6 +14606,7 @@ function IDE() {
                 }
                 disabled={
                   codeEditBusy
+                  || (codeEditAttachments.length&&!codeEditAttachmentAnalysis.ready)
                   || !root
                   || (codeEditScope==='FILE'&&!selected)
                 }
@@ -13153,7 +14829,7 @@ function IDE() {
           <SectionTitle title="Agent 제작 진행"/>
           <AgentBuildActionBar
             stage={agentBuildStage}
-            busy={agentBuildBusy}
+            busy={agentBuildBusy||projectCreateFlowBusy||targetWorkflowLoading}
             message={agentBuildMessage}
             workflowEnabled={canDesignFromCollectedInfo()}
             onWorkflow={()=>{
@@ -13161,7 +14837,7 @@ function IDE() {
               setWorkflowView('TARGET')
               previewTargetWorkflow()
             }}
-            onCreateProject={createAgentProjectFromInterview}
+            onCreateProject={createAgentProjectSmart}
             onStartDevelopment={startAgentDevelopment}
             onStop={cancelAgentDevelopment}
             compact
@@ -13169,6 +14845,101 @@ function IDE() {
           {renderDevelopmentFinalStatus()}
           {renderDevelopmentProgress()}
         </div>
+
+        <div className="info-card live-database-preview-card">
+          <div className="live-db-preview-head">
+            <div>
+              <strong>DB 실시간 설계 · 초안</strong>
+              <small>대화에서 확정되는 요구사항만으로 Module Registry를 즉시 갱신합니다.</small>
+            </div>
+            <span className={`live-db-preview-status ${liveDatabasePreview?.enabled?'active':''}`}>
+              {liveDatabasePreviewLoading?'갱신 중':liveDatabasePreview?.enabled?'초안':'대기'}
+            </span>
+          </div>
+
+          {liveDatabasePreviewError&&<div className="live-db-preview-error">{liveDatabasePreviewError}</div>}
+
+          {!liveDatabasePreview&& !liveDatabasePreviewLoading&&
+            <div className="live-db-preview-empty">DB 관련 요구사항을 말하면 Module · Entity · 관계 초안이 여기에 표시됩니다.</div>
+          }
+
+          {liveDatabasePreview&&<>
+            <div className="live-db-preview-summary">
+              <div><small>Module</small><strong>{(liveDatabasePreview.modules||[]).length}</strong></div>
+              <div><small>Entity</small><strong>{(liveDatabasePreview.tables||[]).length}</strong></div>
+              <div><small>관계</small><strong>{(liveDatabasePreview.relationships||[]).length}</strong></div>
+              <div><small>검증</small><strong>{liveDatabasePreview.validation?.valid===false?'FAIL':'PASS'}</strong></div>
+            </div>
+
+            <div className="live-db-preview-tabs">
+              {[['MODULES','Module'],['ENTITIES','Entity'],['RELATIONS','관계'],['DDL','DDL']].map(([id,label])=>
+                <button
+                  type="button"
+                  key={id}
+                  className={liveDatabasePreviewTab===id?'active':''}
+                  onClick={()=>setLiveDatabasePreviewTab(id)}
+                >{label}</button>
+              )}
+            </div>
+
+            <div className="live-db-preview-body">
+              {liveDatabasePreviewTab==='MODULES'&&<div className="live-db-module-list">
+                {(liveDatabasePreview.technologies||[]).length>0&&<div className="live-db-technology-row">
+                  <strong>사용 기술</strong>
+                  <div>{(liveDatabasePreview.technologies||[]).map(item=><span key={item}>{item}</span>)}</div>
+                </div>}
+                {(liveDatabasePreview.modules||[]).map(module=><div key={module.id}>
+                  <strong>{module.label||module.id}</strong>
+                  <small>{module.reason||''}</small>
+                </div>)}
+                {liveDatabasePreview.redis_plan?.enabled&&<div className="live-db-redis-module">
+                  <strong>Redis Cache / Session</strong>
+                  <small>{liveDatabasePreview.redis_plan.policy}</small>
+                  <div className="live-db-redis-keys">
+                    {(liveDatabasePreview.redis_plan.keys||[]).map(item=><div key={item.key}>
+                      <code>{item.key}</code><span>{item.purpose}</span><em>{item.ttl}</em>
+                    </div>)}
+                  </div>
+                </div>}
+                {!(liveDatabasePreview.modules||[]).length&&!liveDatabasePreview.redis_plan?.enabled&&<small>현재 DB Module이 선택되지 않았습니다.</small>}
+              </div>}
+
+              {liveDatabasePreviewTab==='ENTITIES'&&<div className="live-db-entity-list">
+                {(liveDatabasePreview.tables||[]).map(table=><details key={table.name}>
+                  <summary><strong>{table.name}</strong><span>{table.module||'CUSTOM'}</span><em>{(table.columns||[]).length} columns</em></summary>
+                  <small>{table.purpose||''}</small>
+                  <div className="live-db-column-list">
+                    {(table.columns||[]).map(column=><div key={`${table.name}-${column.name}`}>
+                      <code>{column.name}</code>
+                      <span>{column.type}</span>
+                      {column.primary_key&&<b>PK</b>}
+                      {column.references&&<b>FK → {column.references}</b>}
+                    </div>)}
+                  </div>
+                </details>)}
+                {!(liveDatabasePreview.tables||[]).length&&<small>아직 예상 Entity가 없습니다.</small>}
+              </div>}
+
+              {liveDatabasePreviewTab==='RELATIONS'&&<div className="live-db-relation-list">
+                {(liveDatabasePreview.relationships||[]).map((relation,index)=><div key={`${relation.from}-${relation.to}-${index}`}>
+                  <code>{relation.from}</code><span>→</span><code>{relation.to}</code><small>{relation.type||''}</small>
+                </div>)}
+                {!(liveDatabasePreview.relationships||[]).length&&<small>아직 예상 FK 관계가 없습니다.</small>}
+              </div>}
+
+              {liveDatabasePreviewTab==='DDL'&&<div className="live-db-ddl-preview">
+                <small>이 내용은 실시간 초안이며 DB 설계 확정 전에는 Migration 파일로 저장되지 않습니다.</small>
+                <pre>{liveDatabasePreview.ddl_preview||'-- DB 요구사항이 확정되면 PostgreSQL DDL Preview가 표시됩니다.'}</pre>
+              </div>}
+            </div>
+
+            <div className="live-db-preview-foot">
+              <span>실시간 초안</span>
+              <small>최종 Entity/PK/FK는 설계 검토 단계에서 Codex → OpenAI → Ollama 및 Validator를 거쳐 확정합니다.</small>
+            </div>
+          </>}
+        </div>
+
         <div className="info-card requirement-collection-wrapper">
           <div className="requirement-collection-card active-design">
             <div className="requirement-collection-head">
@@ -13208,37 +14979,105 @@ function IDE() {
 
             <div className="requirement-draft-info">
               <span>
-                {requirementDraftRestored
-                  ? '✓ 이전 요구사항 복원됨'
-                  : requirementDraftSavedAt
-                    ? '✓ 요구사항 자동 저장됨'
-                    : '○ 요구사항 수집 중'}
+                {requirementDraftDecisionPending
+                  ? '◉ 같은 경로의 이전 요구사항 Draft 발견'
+                  : requirementDraftRestored
+                    ? '✓ 이전 요구사항 복원됨'
+                    : requirementDraftSavedAt
+                      ? '✓ 요구사항 자동 저장됨'
+                      : '○ 요구사항 수집 중'}
               </span>
               {requirementDraftSavedAt&&
                 <small>{new Date(requirementDraftSavedAt).toLocaleString()}</small>
               }
             </div>
 
-            <div className="requirement-collection-actions">
-              <button
-                type="button"
-                className="requirement-direct-workflow-button"
-                disabled={!canDesignFromCollectedInfo()||targetWorkflowLoading}
-                onClick={()=>{
-                  saveRequirementDraft()
-                  setRoot(newAgentProjectRoot||root)
-                  setWorkspaceTab('WORKFLOW')
-                  setWorkflowView('TARGET')
-                  previewTargetWorkflow(
-                    buildRequirementRequestFromCollectedInfo()
-                  )
-                }}
-              >
-                {targetWorkflowPreview
-                  ? '◇ 저장된 요구사항으로 Workflow 다시 설계'
-                  : '◇ 수집된 요구사항으로 바로 Workflow 설계'}
-              </button>
-            </div>
+            {requirementDraftCandidate&&requirementDraftDecisionPending&&
+              <div className="requirement-draft-choice compact">
+                <p>같은 프로젝트 경로의 예전 인터뷰가 있습니다. 자동 복원하지 않습니다.</p>
+                <div>
+                  <button
+                    type="button"
+                    className="requirement-draft-restore-button"
+                    onClick={()=>restoreRequirementDraft(requirementDraftCandidate.key)}
+                  >
+                    이전 요구사항 이어서 불러오기
+                  </button>
+                  <button
+                    type="button"
+                    className="requirement-draft-ignore-button"
+                    onClick={keepCurrentInterviewInsteadOfDraft}
+                  >
+                    현재 인터뷰 유지
+                  </button>
+                </div>
+              </div>
+            }
+
+            <details className="requirement-edit-details">
+              <summary>이전 작업 / 요구사항 재정의</summary>
+              <div className="requirement-edit-help">
+                기존 경로에서 불러온 내용도 자유롭게 정리할 수 있습니다. 사용자 답변을 삭제하면 바로 다음 AI 응답도 함께 제거되며, 요구사항을 바꾸면 기존 Workflow는 자동으로 무효화됩니다.
+              </div>
+
+              <div className="requirement-edit-actions">
+                <button
+                  type="button"
+                  className="requirement-reset-all-button"
+                  onClick={clearRestoredRequirementContent}
+                >
+                  지난 내용 전체 삭제 후 재정의
+                </button>
+              </div>
+
+              <div className="requirement-history-editor">
+                <strong>사용자 답변</strong>
+                {(chat||[])
+                  .map((item,messageIndex)=>({item,messageIndex}))
+                  .filter(row=>row.item?.role==='user')
+                  .map(({item,messageIndex})=><div className="requirement-history-edit-row" key={`history-${messageIndex}`}>
+                    <p>{sanitizeInterviewDisplayText(item.content)}</p>
+                    <button type="button" onClick={()=>removeRequirementConversationTurn(messageIndex)}>삭제</button>
+                  </div>)}
+                {!(chat||[]).some(item=>item?.role==='user')&&<small>삭제하거나 재정의할 사용자 답변이 없습니다.</small>}
+              </div>
+
+              <div className="requirement-redefine-editor">
+                <strong>요구사항 항목 재정의</strong>
+                {getRequirementKeywordStatus().map(item=><div className="requirement-redefine-row" key={`redefine-${item.id}`}>
+                  <div>
+                    <span>{item.label}</span>
+                    <em>{item.value||'미수집'}</em>
+                  </div>
+                  <button type="button" onClick={()=>beginRequirementRedefinition(item.id,item.value)}>재정의</button>
+                  {String(requirementManualOverrides?.[item.id]||'').trim()&&<button
+                    type="button"
+                    className="requirement-override-clear-button"
+                    onClick={()=>{
+                      setRequirementManualOverrides(prev=>{
+                        const next={...(prev||{})}
+                        delete next[item.id]
+                        return next
+                      })
+                      setChat(prev=>prev.filter(message=>message?.requirement_override!==item.id))
+                      setConfirmedInterviewRequirements({})
+                      invalidateRequirementWorkflowAfterEdit(`${item.label} 수동 재정의를 해제했습니다. 필요하면 다시 정의해 주세요.`)
+                    }}
+                  >재정의 해제</button>}
+                  {requirementRedefineId===item.id&&<div className="requirement-redefine-input">
+                    <textarea
+                      value={requirementRedefineText}
+                      onChange={e=>setRequirementRedefineText(e.target.value)}
+                      placeholder={`${item.label} 요구사항을 새 기준으로 입력하세요.`}
+                    />
+                    <div>
+                      <button type="button" onClick={saveRequirementRedefinition} disabled={!requirementRedefineText.trim()}>저장</button>
+                      <button type="button" onClick={cancelRequirementRedefinition}>취소</button>
+                    </div>
+                  </div>}
+                </div>)}
+              </div>
+            </details>
 
             <details className="requirement-collected-details">
               <summary>수집된 사용자 답변 보기</summary>
@@ -13293,7 +15132,7 @@ function IDE() {
         <SectionTitle title="Agent 제작 진행"/>
         <AgentBuildActionBar
           stage={agentBuildStage}
-          busy={agentBuildBusy}
+          busy={agentBuildBusy||projectCreateFlowBusy||targetWorkflowLoading}
           message={agentBuildMessage}
           workflowEnabled={canDesignFromCollectedInfo()}
           onWorkflow={()=>{
@@ -13301,7 +15140,7 @@ function IDE() {
             setWorkflowView('TARGET')
             previewTargetWorkflow()
           }}
-          onCreateProject={createAgentProjectFromInterview}
+          onCreateProject={createAgentProjectSmart}
           onStartDevelopment={startAgentDevelopment}
           onStop={cancelAgentDevelopment}
           compact
@@ -13310,7 +15149,7 @@ function IDE() {
 
       {workspaceTab==='CODE'&&
       <div className="code-right-panel-shell">
-        <div className={`code-right-panel-tabs ${isSqlFile?'sql-tabs':''}`} role="tablist" aria-label="코드 편집 우측 패널">
+        <div className="code-right-panel-tabs code-four-tabs" role="tablist" aria-label="코드 편집 우측 패널">
           <button
             type="button"
             className={codeRightPanelTab==='FILES'?'active':''}
@@ -13332,7 +15171,19 @@ function IDE() {
             DB 연결
             <span className={sqlConnectionStatus?.connected?'sql-tab-dot connected':'sql-tab-dot'}></span>
           </button>
+          <button
+            type="button"
+            className={codeRightPanelTab==='CODEX'?'active':''}
+            onClick={()=>{setCodeRightPanelTab('CODEX');if(workspaceRightWidth<420)setWorkspaceRightWidth(420)}}
+            title="ChatGPT 계정으로 사용하는 Codex"
+          >Codex</button>
         </div>
+
+        {codeRightPanelTab==='CODEX'&&
+        <CodexPanel
+          projectRoot={resolveWorkspaceRoot()}
+          activeFile={selected||''}
+        />}
 
         {codeRightPanelTab==='FILES'&&
         <div className="info-card files-card project-tree-card code-tab-panel">
@@ -13667,14 +15518,16 @@ function IDE() {
                     })()
                   : <label className="sql-field"><span>Service Name</span><input value={sqlProfile.service_name||''} onChange={e=>setSqlProfile(prev=>({...prev,service_name:e.target.value}))} placeholder="FREEPDB1 / XEPDB1"/></label>}
 
-                {sqlProfile.db_type==='supabase'&&<label className="sql-field">
+                {['postgresql','supabase'].includes(sqlProfile.db_type)&&<label className="sql-field">
                   <span>Schema</span>
                   <input
                     value={sqlProfile.schema_name||''}
                     onChange={e=>setSqlProfile(prev=>({...prev,schema_name:e.target.value}))}
-                    placeholder="예: theanova_agentstudio / public"
+                    placeholder={sqlProfile.db_type==='supabase'?'예: theanova_agentstudio / public':'예: training_practice / public'}
                   />
-                  <small className="muted">Supabase PostgreSQL 연결 후 기본 search_path를 Schema → extensions → public 순서로 적용합니다. 비우면 public을 사용합니다.</small>
+                  <small className="muted">{sqlProfile.db_type==='supabase'
+                    ? 'Supabase PostgreSQL 연결 후 기본 search_path를 Schema → extensions → public 순서로 적용합니다. 비우면 public을 사용합니다.'
+                    : 'PostgreSQL 연결 후 기본 search_path를 Schema → public 순서로 적용합니다. Local/Docker/원격 PostgreSQL 모두 동일하며 비우면 public을 사용합니다.'}</small>
                 </label>}
 
                 <label className="sql-field"><span>사용자</span><input value={sqlProfile.username||''} onChange={e=>setSqlProfile(prev=>({...prev,username:e.target.value}))}/></label>
@@ -13711,7 +15564,7 @@ function IDE() {
             <div><span>현재 연결 상태</span><strong>{sqlConnectionStatus?.connected?'연결 유지 중':'연결 필요'}</strong></div>
             <div><span>저장된 연결</span><code>{sqlConnectionStatus?.saved_connection_count??sqlConnections.length}개 · 연결 중 {sqlConnectionStatus?.connected_connection_count??sqlConnections.filter(item=>item.connected).length}개</code></div>
             {sqlProfile.db_type==='sqlite3'&&<div><span>DB 파일</span><code>{sqlConnectionStatus?.profile?.database||sqlProfile.database||'-'}</code></div>}
-            {sqlProfile.db_type==='supabase'&&<div><span>Supabase Schema</span><code>{sqlConnectionStatus?.profile?.schema_name||sqlProfile.schema_name||'public'}</code></div>}
+            {['postgresql','supabase'].includes(sqlProfile.db_type)&&<div><span>{sqlProfile.db_type==='supabase'?'Supabase Schema':'PostgreSQL Schema'}</span><code>{sqlConnectionStatus?.profile?.schema_name||sqlProfile.schema_name||'public'}</code></div>}
             {sqlConnectionStatus?.connected_at&&<div><span>연결 시각</span><code>{sqlConnectionStatus.connected_at}</code></div>}
             {!!(sqlConnectionStatus?.saved_db_types||[]).length&&<div><span>등록된 DB 종류</span><code>{sqlConnectionStatus.saved_db_types.map(v=>String(v).toUpperCase()).join(', ')}</code></div>}
             {sqlConnectionStatus?.profile_storage_path&&<div><span>연결 정보 저장 위치</span><code title={sqlConnectionStatus.profile_storage_path}>{sqlConnectionStatus.profile_storage_path}</code></div>}
@@ -13799,6 +15652,7 @@ function IDE() {
                     toggleObject={toggleSqlDbObject}
                     openObject={openSqlDbObject}
                     openObjectContextMenu={openSqlObjectContextMenu}
+                    openSchemaContextMenu={openSqlSchemaContextMenu}
                     openDatabaseContextMenu={openSqlDatabaseContextMenu}
                   />}
 
@@ -13813,7 +15667,10 @@ function IDE() {
               redisScriptBusy={redisScriptBusy}
               createRedisPythonScript={createRedisPythonScript}
               sqlObjectContextMenu={sqlObjectContextMenu}
+              sqlSchemaContextMenu={sqlSchemaContextMenu}
               sqlObjectActionBusy={sqlObjectActionBusy}
+              createSqlTableDiagram={createSqlTableDiagram}
+              createSqlSchemaDiagram={createSqlSchemaDiagram}
               createSqlTableScript={createSqlTableScript}
               createSqlTableAlterScript={createSqlTableAlterScript}
               createSqlTableDmlScript={createSqlTableDmlScript}
@@ -13911,6 +15768,7 @@ function IDE() {
 
     </aside>
   </div>
+  }
 
   const pickExternalProjectFolder=async()=>{
     if(externalProjectPickerLoading) return
@@ -14326,7 +16184,7 @@ function IDE() {
               onClick={()=>applyAiMode('auto')}
               disabled={aiModeBusy}
             >
-              <span><strong>AUTO</strong><small>로컬 작업과 유료 LLM을 작업별로 자동 라우팅</small></span>
+              <span><strong>AUTO</strong><small>일반 작업 Ollama 우선 · 고난도 작업 Codex → OpenAI → Ollama</small></span>
               {aiRuntimeStatus?.mode==='auto'&&<b>✓</b>}
             </button>
 
@@ -14334,11 +16192,11 @@ function IDE() {
               type="button"
               className={aiRuntimeStatus?.mode==='openai'?'ai-mode-option active':'ai-mode-option'}
               onClick={()=>applyAiMode('openai')}
-              disabled={aiModeBusy||!aiRuntimeStatus?.providers?.openai?.configured}
+              disabled={aiModeBusy||aiRuntimeStatus?.providers?.openai?.enabled===false||!aiRuntimeStatus?.providers?.openai?.configured}
             >
               <span>
                 <strong>OpenAI · {aiRuntimeStatus?.providers?.openai?.model||'-'}</strong>
-                <small>{aiRuntimeStatus?.providers?.openai?.configured?'API Key 설정됨':'API Key 미설정'}</small>
+                <small>{aiRuntimeStatus?.providers?.openai?.enabled===false?'비사용 설정':aiRuntimeStatus?.providers?.openai?.configured?'API Key 설정됨':'API Key 미설정'}</small>
               </span>
               {aiRuntimeStatus?.mode==='openai'&&<b>✓</b>}
             </button>
@@ -14358,6 +16216,22 @@ function IDE() {
               {aiRuntimeStatus?.mode==='ollama'&&<b>✓</b>}
             </button>
 
+            <button
+              type="button"
+              className={aiRuntimeStatus?.mode==='codex'?'ai-mode-option active':'ai-mode-option'}
+              onClick={()=>applyAiMode('codex')}
+              disabled={aiModeBusy||!aiRuntimeStatus?.providers?.codex?.enabled||!aiRuntimeStatus?.providers?.codex?.installed}
+            >
+              <span>
+                <strong>Codex · ChatGPT</strong>
+                <small className={aiRuntimeStatus?.providers?.codex?.connected?'provider-ok':'provider-bad'}>
+                  {aiRuntimeStatus?.providers?.codex?.status||'설정 확인 필요'}
+                </small>
+              </span>
+              {aiRuntimeStatus?.mode==='codex'&&<b>✓</b>}
+            </button>
+
+            {aiRuntimeStatus?.local_only&&<div className="hint-box ai-mode-local-only">외부 Provider 비사용 · LLM/Embedding 작업은 Ollama 로컬에서 처리됩니다.</div>}
             <div className="ai-mode-routing">
               <div><span>코딩/디버깅</span><b>{aiRuntimeStatus?.routing?.coding?.provider||'-'} · {aiRuntimeStatus?.routing?.coding?.model||'-'}</b></div>
               <div><span>요구사항</span><b>{aiRuntimeStatus?.routing?.requirements?.provider||'-'} · {aiRuntimeStatus?.routing?.requirements?.model||'-'}</b></div>

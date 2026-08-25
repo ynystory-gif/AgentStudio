@@ -51,7 +51,7 @@ async def analyze_failure(
     iteration: int,
     provider: str | None = None,
 ) -> dict:
-    triage_source = "ollama"
+    triage_source = "adaptive_llm"
     triage_error = ""
     try:
         triage = await triage_log(test_output)
@@ -60,7 +60,7 @@ async def analyze_failure(
         triage_error = f"{type(exc).__name__}: {exc}"
         triage = _deterministic_triage(test_output, triage_error)
 
-    llm = model_for_task(LLMTask.GENERAL_DEBUGGING)
+    llm = model_for_task(LLMTask.EXECUTION_DEBUG_REPAIR, provider)
     result = await llm.ainvoke([
         SystemMessage(content=DEBUG_SYSTEM),
         HumanMessage(content=(

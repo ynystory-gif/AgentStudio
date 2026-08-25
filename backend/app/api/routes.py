@@ -1,7 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 from app.services.db_gateway import DatabaseGateway
-from app.services.folder_picker import pick_folder, pick_file
+from app.services.folder_picker import pick_folder, pick_file, pick_files
 from app.services.ollama_installer import install_ollama_windows
 from app.services.ollama_runtime_manager import get_ollama_runtime_status, start_ollama_server, stop_ollama_server
 import asyncio
@@ -9,6 +9,7 @@ import json
 from app.models.entities import Project, ProjectAnalysis
 from app.services.project_paths import resolve_project_paths
 from app.services.database_provisioning import provision_agentstudio_database
+from app.services.database_schema_design import build_database_plan, finalize_database_plan, materialize_database_plan
 from app.core.config import get_settings
 from app.services.pgvector_installer import install_pgvector_windows18, latest_pg18_windows_release, detect_postgresql18_root, validate_postgresql18_root
 from app.services.settings_service import get_editable_settings, update_settings, migrate_env_settings_to_db, rename_current_machine, save_database_env_settings
@@ -60,13 +61,15 @@ from app.services.sql_workspace_service import (
     sqlite_project_status as get_sqlite_project_status,
     open_database_object as open_sql_workspace_object,
     create_table_script as create_sql_workspace_table_script,
+    create_table_diagram as create_sql_workspace_table_diagram,
+    create_schema_diagram as create_sql_workspace_schema_diagram,
     create_table_alter_script as create_sql_workspace_table_alter_script,
     create_table_dml_script as create_sql_workspace_table_dml_script,
     create_postgresql_admin_script as create_sql_workspace_postgresql_admin_script,
 )
 import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from langgraph.types import Command
 from sqlalchemy import select, func
@@ -77,9 +80,29 @@ from app.services.ws_hub import hub
 from app.services.job_manager import job_manager
 from app.services.system_status import get_status
 from app.services.port_service import recommend_agentstudio_ports
-from app.services.local_control import list_files, list_directories, read_file, write_file, run_command, register_runtime_project_root, get_runtime_project_roots, create_folder, rename_path, create_file, delete_files, project_file_snapshot, get_file_meta, get_file_hash_states, ExternalFileChangedError, InvalidNotebookContentError
+from app.services.browser_proxy_service import (
+    BrowserProxyError,
+    fetch_external_page,
+    proxy_error_html,
+    reconstruct_proxy_target,
+)
+from app.services.chromium_browser_service import (
+    ChromiumBrowserError,
+    chromium_browser_manager,
+)
+from app.services.codex_app_server_service import codex_app_server_manager
+from app.services.ai_attachment_service import (
+    register_selected_files,
+    release_attachments,
+    attachment_metadata,
+    build_attachment_context,
+    build_requirements_attachment_context,
+    prepare_attachment,
+    redact_sensitive_text,
+)
+from app.services.local_control import list_files, list_directories, read_file, write_file, run_command, register_runtime_project_root, get_runtime_project_roots, create_folder, rename_path, create_file, delete_files, project_file_snapshot, get_file_meta, get_file_hash_states, validate_project_root, watch_project_changes, ExternalFileChangedError, InvalidNotebookContentError
 from app.services.tavily_service import web_search
-from app.services.requirements_agent import next_interview_message
+from app.services.requirements_agent import next_interview_message, summarize_attachment_requirements
 from app.services.llm_usage_service import usage_context, read_usage_summary, read_llm_history
 from app.services.agent_builder import build_plan
 from app.services.tool_analyzer import analyze_tool
@@ -108,7 +131,7 @@ from app.services.agent_factory_policy_planner import (
     infer_fastapi_factory_plan,
     load_agent_factory_policies,
 )
-from app.services.agent_factory_workflow_design import design_agent_factory
+from app.services.agent_factory_workflow_design import design_agent_factory, design_agent_factory_incremental
 from app.services.failure_artifact_service import (
     begin_workflow_diagnostic_run,
     normalize_workflow_result,
@@ -361,6 +384,49 @@ class ChatRequest(BaseModel):
     history: list[dict] = []
     provider: str | None = None
     project_root: str = ""
+    attachment_ids: list[str] = []
+    attachment_memory: str = ""
+
+class AttachmentRequirementsSummaryRequest(BaseModel):
+    attachment_ids: list[str] = []
+    attachment_memory: str = ""
+    provider: str | None = None
+    project_root: str = ""
+
+class CodexStartRequest(BaseModel):
+    root: str = ""
+
+
+class CodexThreadRequest(BaseModel):
+    root: str
+    model: str = ""
+    effort: str = ""
+
+
+class CodexResumeThreadRequest(BaseModel):
+    thread_id: str
+    root: str = ""
+
+
+class CodexTurnRequest(BaseModel):
+    thread_id: str
+    root: str
+    text: str
+    model: str = ""
+    effort: str = ""
+    attachment_ids: list[str] = []
+
+
+class CodexInterruptRequest(BaseModel):
+    thread_id: str
+    turn_id: str
+
+
+class CodexApprovalRequest(BaseModel):
+    request_id: str
+    decision: str
+    payload: dict = {}
+
 
 class FileRequest(BaseModel):
     path: str
@@ -436,12 +502,14 @@ class CodeEditRequest(BaseModel):
     instruction: str
     content: str = ""
     active_cell_index: int | None = None
+    attachment_ids: list[str] = []
 
 
 class ProjectCodeEditRequest(BaseModel):
     root: str
     instruction: str
     max_context_files: int = 10
+    attachment_ids: list[str] = []
 
 
 class CodingStyleAnalyzeRequest(BaseModel):
@@ -469,11 +537,23 @@ class WorkflowPreviewRequest(BaseModel):
     provider: str | None = None
     interview_messages: list[dict] = []
     confirmed_requirements: dict = {}
+    attachment_ids: list[str] = []
+    attachment_memory: str = ""
+    previous_design: dict = {}
 
 
 
 
 
+
+
+class DatabaseDesignPreviewRequest(BaseModel):
+    request: str
+    confirmed_requirements: dict = {}
+
+
+class DatabaseDesignFinalizeRequest(BaseModel):
+    database_plan: dict = {}
 
 
 class ProjectAnalyzeRequest(BaseModel):
@@ -497,6 +577,22 @@ class MemorySearchRequest(BaseModel):
 class FolderPickerRequest(BaseModel):
     title: str = "폴더를 선택하세요."
     initial_path: str = ""
+
+
+class AiAttachmentPickRequest(BaseModel):
+    title: str = "AI가 분석할 파일을 선택하세요."
+    initial_path: str = ""
+    project_root: str = ""
+    max_files: int = 12
+
+
+class AiAttachmentReleaseRequest(BaseModel):
+    attachment_ids: list[str] = []
+
+
+class AiAttachmentAnalyzeRequest(BaseModel):
+    attachment_ids: list[str] = []
+    purpose: str = "AI 참고 파일 분석 준비"
 
 class OllamaInstallRequest(BaseModel):
     common_models_root: str = ""
@@ -598,6 +694,27 @@ class SqlWorkspaceConnectionRequest(BaseModel):
     connection_id: str = ""
 
 
+class ChromiumBrowserNavigateRequest(BaseModel):
+    url: str
+    viewport_width: int = 1280
+    viewport_height: int = 720
+    force_restart: bool = False
+
+
+class ChromiumBrowserActionRequest(BaseModel):
+    action: str
+    x: float = 0
+    y: float = 0
+    delta_x: float = 0
+    delta_y: float = 0
+    button: str = "left"
+    click_count: int = 1
+    key: str = ""
+    text: str = ""
+    viewport_width: int = 1280
+    viewport_height: int = 720
+
+
 class SqlWorkspaceRenameRequest(BaseModel):
     root: str
     connection_id: str
@@ -615,6 +732,11 @@ class SqlWorkspaceObjectOpenRequest(BaseModel):
     schema: str
     category: str
     name: str
+
+
+class SqlWorkspaceSchemaDiagramRequest(BaseModel):
+    root: str
+    schema: str
 
 
 class SqlWorkspaceTableDmlScriptRequest(BaseModel):
@@ -673,6 +795,7 @@ class AgentProjectCreateRequest(BaseModel):
     venv_path: str = ""
     models_path: str = ""
     force_recreate: bool = False
+    database_plan: dict = {}
 
 
 
@@ -724,6 +847,148 @@ async def system_pick_folder(req: FolderPickerRequest):
         initial_path=req.initial_path,
     )
 
+@router.post("/ai/attachments/pick")
+async def ai_attachments_pick(req: AiAttachmentPickRequest):
+    selection = await pick_files(
+        title=req.title,
+        initial_path=req.initial_path,
+        max_files=req.max_files,
+    )
+    if not selection.get("ok") or selection.get("cancelled"):
+        return {**selection, "attachments": []}
+
+    attachments = register_selected_files(
+        selection.get("paths") or [],
+        project_root=req.project_root,
+    )
+    accepted = [row for row in attachments if row.get("ok") is not False]
+    rejected = [row for row in attachments if row.get("ok") is False]
+    return {
+        "ok": True,
+        "cancelled": False,
+        "attachments": accepted,
+        "rejected": rejected,
+        "message": f"AI 분석 파일 {len(accepted)}개를 등록했습니다." + (f" 제한으로 {len(rejected)}개 제외." if rejected else ""),
+    }
+
+
+@router.post("/ai/attachments/analyze")
+async def ai_attachments_analyze(req: AiAttachmentAnalyzeRequest):
+    requested = [str(value).strip() for value in req.attachment_ids if str(value or '').strip()]
+    if not requested:
+        raise HTTPException(status_code=400, detail="분석할 첨부 파일이 없습니다.")
+
+    metadata_by_id = {
+        str(row.get("attachment_id") or ""): row
+        for row in attachment_metadata(requested)
+    }
+
+    async def runner(job):
+        rows = []
+        for attachment_id in requested:
+            meta = metadata_by_id.get(attachment_id) or {}
+            rows.append({
+                "attachment_id": attachment_id,
+                "name": str(meta.get("name") or f"첨부 {attachment_id[:8]}"),
+                "size": int(meta.get("size") or 0),
+                "status": "QUEUED",
+                "progress": 0,
+                "stage": "대기",
+                "message": "분석 대기 중",
+            })
+
+        async def publish(index: int, *, progress: int, status: str, stage: str, message: str):
+            row = rows[index]
+            row.update({
+                "progress": max(0, min(100, int(progress))),
+                "status": status,
+                "stage": stage,
+                "message": message,
+            })
+            overall = int(round(sum(int(item.get("progress") or 0) for item in rows) / max(1, len(rows))))
+            completed = sum(1 for item in rows if item.get("status") in {"SUCCESS", "FAILED"})
+            await job_manager.update(
+                job,
+                status="RUNNING",
+                progress=overall,
+                message=f"{row['name']}: {message}",
+                result={
+                    "analysis": {
+                        "purpose": req.purpose,
+                        "files": [dict(item) for item in rows],
+                        "overall_progress": overall,
+                        "completed_files": completed,
+                        "total_files": len(rows),
+                    }
+                },
+            )
+
+        warnings = []
+        for index, attachment_id in enumerate(requested):
+            row = rows[index]
+            if attachment_id not in metadata_by_id:
+                await publish(
+                    index,
+                    progress=100,
+                    status="FAILED",
+                    stage="실패",
+                    message="첨부 ID가 만료되었거나 존재하지 않습니다.",
+                )
+                warnings.append(f"{row['name']}: 첨부 ID가 만료되었거나 존재하지 않습니다.")
+                continue
+
+            await publish(index, progress=15, status="RUNNING", stage="파일 확인", message="파일 상태를 확인하고 있습니다.")
+            await asyncio.sleep(0)
+            await publish(index, progress=45, status="RUNNING", stage="텍스트 추출", message="분석 가능한 텍스트를 추출하고 있습니다.")
+
+            try:
+                prepared = await asyncio.to_thread(prepare_attachment, attachment_id)
+                row["content_type"] = str(prepared.get("content_type") or "")
+                row["content_chars"] = int(prepared.get("content_chars") or 0)
+                row["cached"] = bool(prepared.get("cached"))
+                await publish(index, progress=85, status="RUNNING", stage="Context 준비", message="AI Context를 준비하고 있습니다.")
+                await asyncio.sleep(0)
+                await publish(index, progress=100, status="SUCCESS", stage="준비 완료", message="AI 분석 준비가 완료되었습니다.")
+            except Exception as exc:
+                message = str(exc) or type(exc).__name__
+                await publish(index, progress=100, status="FAILED", stage="실패", message=message)
+                warnings.append(f"{row['name']}: {message}")
+
+        successful = sum(1 for item in rows if item.get("status") == "SUCCESS")
+        failed = sum(1 for item in rows if item.get("status") == "FAILED")
+        return {
+            "ok": successful > 0 and failed == 0,
+            "message": (
+                f"참고 파일 {successful}개 분석 준비를 완료했습니다."
+                if not failed
+                else f"참고 파일 {successful}개 준비 완료, {failed}개 실패했습니다."
+            ),
+            "analysis": {
+                "purpose": req.purpose,
+                "files": rows,
+                "overall_progress": 100,
+                "completed_files": len(rows),
+                "total_files": len(rows),
+                "successful_files": successful,
+                "failed_files": failed,
+            },
+            "warnings": warnings,
+        }
+
+    job = job_manager.create("AI_ATTACHMENT_ANALYSIS", runner)
+    return vars(job)
+
+
+@router.post("/ai/attachments/release")
+async def ai_attachments_release(req: AiAttachmentReleaseRequest):
+    return {"ok": True, "removed": release_attachments(req.attachment_ids)}
+
+
+@router.get("/ai/attachments")
+async def ai_attachments(attachment_ids: str = Query(default="")):
+    ids = [value.strip() for value in attachment_ids.split(",") if value.strip()]
+    return {"attachments": attachment_metadata(ids)}
+
 
 @router.get("/system/ports/recommend")
 async def system_port_recommendations(
@@ -758,7 +1023,15 @@ async def get_settings_form():
 @router.post("/settings")
 async def save_settings_form(req: SettingsUpdateRequest):
     try:
-        return await update_settings(req.values)
+        result = await update_settings(req.values)
+        # v5.330: Codex master switch is operational, not cosmetic. Turning it
+        # off immediately terminates a running app-server process and clears the
+        # right-panel runtime without touching the official Codex OAuth store.
+        if "CODEX_ENABLED" in req.values:
+            raw = str(req.values.get("CODEX_ENABLED") or "").strip().lower()
+            if raw in {"0", "false", "no", "off"}:
+                await asyncio.to_thread(codex_app_server_manager.shutdown_sync)
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1375,9 +1648,12 @@ async def create_agent_project(req: AgentProjectCreateRequest):
             await session.commit()
             await session.refresh(existing)
 
+            database_files = materialize_database_plan(paths["project_root"], req.database_plan or {})
+
             return {
                 "ok": True,
                 "recreated": True,
+                "database_files": database_files,
                 "message": "기존 등록 프로젝트를 재사용하여 재생성 준비가 완료되었습니다.",
                 "project_id": existing.id,
                 "name": existing.name,
@@ -1404,9 +1680,12 @@ async def create_agent_project(req: AgentProjectCreateRequest):
         await session.commit()
         await session.refresh(project)
 
+    database_files = materialize_database_plan(paths["project_root"], req.database_plan or {})
+
     return {
         "ok": True,
         "message": "신규 Agent 프로젝트 생성 및 DB 저장 완료",
+        "database_files": database_files,
         "project_id": project.id,
         "name": project.name,
         "project_root": project.root_path,
@@ -1991,6 +2270,37 @@ async def sql_workspace_object_open(req: SqlWorkspaceObjectOpenRequest):
 
 
 
+@router.post("/sql/table-diagram")
+async def sql_workspace_table_diagram(req: SqlWorkspaceObjectOpenRequest):
+    try:
+        return await asyncio.to_thread(
+            create_sql_workspace_table_diagram,
+            req.root,
+            req.schema,
+            req.name,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={
+            "message": f"테이블 다이어그램 생성 실패: {exc}",
+            "exception": type(exc).__name__,
+        }) from exc
+
+
+@router.post("/sql/schema-diagram")
+async def sql_workspace_schema_diagram(req: SqlWorkspaceSchemaDiagramRequest):
+    try:
+        return await asyncio.to_thread(
+            create_sql_workspace_schema_diagram,
+            req.root,
+            req.schema,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={
+            "message": f"스키마 전체 다이어그램 생성 실패: {exc}",
+            "exception": type(exc).__name__,
+        }) from exc
+
+
 @router.post("/sql/table-script")
 async def sql_workspace_table_script(req: SqlWorkspaceObjectOpenRequest):
     try:
@@ -2054,9 +2364,322 @@ async def sql_workspace_postgresql_admin_script(req: SqlWorkspaceDatabaseAdminSc
         }) from exc
 
 
+@router.get("/codex/status")
+async def codex_status(root: str = Query(default="")):
+    status = codex_app_server_manager.status()
+    if not status.get("enabled"):
+        return status
+    if status.get("initialized"):
+        await asyncio.to_thread(codex_app_server_manager.refresh_account)
+        refreshed = codex_app_server_manager.status()
+        if refreshed.get("account"):
+            await asyncio.to_thread(codex_app_server_manager.refresh_rate_limits, False)
+    return codex_app_server_manager.status()
+
+
+@router.post("/codex/start")
+async def codex_start(req: CodexStartRequest):
+    return await asyncio.to_thread(codex_app_server_manager.ensure_started, req.root)
+
+
+@router.post("/codex/login/chatgpt")
+async def codex_login_chatgpt(req: CodexStartRequest):
+    status = await asyncio.to_thread(codex_app_server_manager.ensure_started, req.root)
+    if not status.get("initialized"):
+        raise HTTPException(status_code=400, detail={"message": status.get("last_error") or "Codex app-server 초기화 실패"})
+    try:
+        return await asyncio.to_thread(codex_app_server_manager.start_chatgpt_login)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"message": f"ChatGPT 로그인 시작 실패: {exc}"}) from exc
+
+
+@router.post("/codex/logout")
+async def codex_logout():
+    try:
+        return await asyncio.to_thread(codex_app_server_manager.logout)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"message": f"Codex 계정 연결 해제 실패: {exc}"}) from exc
+
+
+@router.get("/codex/rate-limits")
+async def codex_rate_limits(force: bool = Query(default=False)):
+    status = codex_app_server_manager.status()
+    if not status.get("enabled"):
+        return {"ok": False, "rate_limits": {}, "message": "Codex 사용 설정이 꺼져 있습니다."}
+    if not status.get("initialized"):
+        return {"ok": False, "rate_limits": {}, "message": status.get("last_error") or "Codex가 실행 중이 아닙니다."}
+    await asyncio.to_thread(codex_app_server_manager.refresh_account)
+    if not codex_app_server_manager.status().get("account"):
+        return {"ok": False, "rate_limits": {}, "message": "Codex ChatGPT 계정이 연결되어 있지 않습니다."}
+    data = await asyncio.to_thread(codex_app_server_manager.refresh_rate_limits, force)
+    status = codex_app_server_manager.status()
+    return {
+        "ok": bool(data),
+        "rate_limits": data,
+        "error": status.get("rate_limits_error") or "",
+        "refreshed_at": status.get("rate_limits_refreshed_at") or 0,
+    }
+
+
+@router.get("/codex/models")
+async def codex_models():
+    try:
+        return {"data": await asyncio.to_thread(codex_app_server_manager.refresh_models)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"message": f"Codex 모델 목록 조회 실패: {exc}"}) from exc
+
+
+@router.get("/codex/threads")
+async def codex_threads(root: str = Query(default=""), limit: int = Query(default=20, ge=1, le=50)):
+    try:
+        return {"data": await asyncio.to_thread(codex_app_server_manager.list_threads, root, limit)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"message": f"Codex 대화 목록 조회 실패: {exc}"}) from exc
+
+
+@router.post("/codex/thread/start")
+async def codex_thread_start(req: CodexThreadRequest):
+    try:
+        return {"thread": await asyncio.to_thread(codex_app_server_manager.start_thread, req.root, req.model, req.effort)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"message": f"Codex 새 대화 시작 실패: {exc}"}) from exc
+
+
+@router.post("/codex/thread/resume")
+async def codex_thread_resume(req: CodexResumeThreadRequest):
+    try:
+        return {"thread": await asyncio.to_thread(codex_app_server_manager.resume_thread, req.thread_id, req.root)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"message": f"Codex 대화 재개 실패: {exc}"}) from exc
+
+
+@router.post("/codex/turn/start")
+async def codex_turn_start(req: CodexTurnRequest):
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail={"message": "Codex에 전달할 메시지를 입력하세요."})
+    try:
+        attachment_context = build_attachment_context(
+            req.attachment_ids,
+            purpose="Codex 참고 파일 분석",
+            total_char_limit=90000,
+        )
+        turn = await asyncio.to_thread(
+            codex_app_server_manager.start_turn,
+            req.thread_id, req.text, req.root, req.model, req.effort,
+            attachment_context.get("text") or "",
+        )
+        return {
+            "turn": turn,
+            "attachments": attachment_context.get("files") or [],
+            "attachment_warnings": attachment_context.get("warnings") or [],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"message": f"Codex 작업 시작 실패: {exc}"}) from exc
+
+
+@router.post("/codex/turn/interrupt")
+async def codex_turn_interrupt(req: CodexInterruptRequest):
+    try:
+        await asyncio.to_thread(codex_app_server_manager.interrupt_turn, req.thread_id, req.turn_id)
+        return {"ok": True}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"message": f"Codex 작업 중지 실패: {exc}"}) from exc
+
+
+@router.post("/codex/approval")
+async def codex_approval(req: CodexApprovalRequest):
+    try:
+        await asyncio.to_thread(
+            codex_app_server_manager.resolve_server_request,
+            req.request_id, req.decision, req.payload or None,
+        )
+        return {"ok": True}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail={"message": f"Codex 승인 처리 실패: {exc}"}) from exc
+
+
+@router.websocket("/codex/events")
+async def codex_events(ws: WebSocket):
+    await ws.accept()
+    subscriber_id, event_queue = codex_app_server_manager.subscribe()
+    try:
+        await ws.send_json({"type": "codex/state", "status": codex_app_server_manager.status()})
+        while True:
+            try:
+                event = event_queue.get_nowait()
+            except Exception:
+                await asyncio.sleep(0.05)
+                continue
+            await ws.send_json(event)
+    except WebSocketDisconnect:
+        return
+    finally:
+        codex_app_server_manager.unsubscribe(subscriber_id)
+
+
+@router.post("/web-browser/chromium/{session_id}/navigate")
+async def chromium_browser_navigate(session_id: str, req: ChromiumBrowserNavigateRequest):
+    """v5.319: Render a public Internet page in a real headless Chrome/Chromium session."""
+    try:
+        return await chromium_browser_manager.navigate(
+            session_id=session_id,
+            url=req.url,
+            width=req.viewport_width,
+            height=req.viewport_height,
+            force_restart=req.force_restart,
+        )
+    except ChromiumBrowserError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"message": str(exc), "diagnostics": exc.diagnostics}) from exc
+
+
+@router.get("/web-browser/chromium/diagnostics")
+async def chromium_browser_diagnostics():
+    """v5.326: return the latest Chrome/CDP diagnostics without starting a browser."""
+    return await chromium_browser_manager.diagnostics()
+
+
+@router.get("/web-browser/chromium/{session_id}/state")
+async def chromium_browser_state(session_id: str):
+    try:
+        return await chromium_browser_manager.state(session_id, consume_popups=True)
+    except ChromiumBrowserError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"message": str(exc), "diagnostics": exc.diagnostics}) from exc
+
+
+@router.get("/web-browser/chromium/{session_id}/screenshot")
+async def chromium_browser_screenshot(session_id: str):
+    try:
+        content = await chromium_browser_manager.screenshot(session_id)
+    except ChromiumBrowserError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"message": str(exc), "diagnostics": exc.diagnostics}) from exc
+    return Response(
+        content=content,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
+
+
+@router.post("/web-browser/chromium/{session_id}/action")
+async def chromium_browser_action(session_id: str, req: ChromiumBrowserActionRequest):
+    try:
+        return await chromium_browser_manager.action(session_id, req.action, req.model_dump())
+    except ChromiumBrowserError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"message": str(exc), "diagnostics": exc.diagnostics}) from exc
+
+
+@router.websocket("/web-browser/cdp/{session_id}/stream")
+async def chromium_browser_cdp_stream(ws: WebSocket, session_id: str):
+    """v5.326: stream frames only from an already-running CDP session; never auto-start Chrome."""
+    await ws.accept()
+    revision = -1
+    try:
+        while True:
+            frame = await chromium_browser_manager.next_frame(session_id, revision)
+            next_revision = int(frame.get("revision") or 0)
+            data = str(frame.get("data") or "")
+            if data and next_revision != revision:
+                revision = next_revision
+                await ws.send_json({
+                    "type": "frame",
+                    "revision": revision,
+                    "data": data,
+                    "url": frame.get("url", ""),
+                    "loading": bool(frame.get("loading", False)),
+                })
+            else:
+                await asyncio.sleep(0.02)
+    except WebSocketDisconnect:
+        return
+    except ChromiumBrowserError as exc:
+        try:
+            await ws.send_json({"type": "error", "message": str(exc)})
+        except Exception:
+            pass
+    except Exception as exc:
+        try:
+            await ws.send_json({"type": "error", "message": f"CDP stream failed: {exc}"})
+        except Exception:
+            pass
+
+
+@router.delete("/web-browser/chromium/{session_id}")
+async def chromium_browser_close(session_id: str):
+    return await chromium_browser_manager.close(session_id)
+
+
+@router.api_route("/web-proxy/{session_id}/{scheme}/{netloc}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+@router.api_route("/web-proxy/{session_id}/{scheme}/{netloc}/{target_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+async def web_browser_proxy(
+    request: Request,
+    session_id: str,
+    scheme: str,
+    netloc: str,
+    target_path: str = "",
+):
+    """
+    v5.318: public Internet page proxy for the Workspace browser.
+
+    Local/private IP URLs intentionally never pass through this endpoint. The
+    browser keeps using the existing direct iframe path for those destinations.
+    """
+    target_url = reconstruct_proxy_target(
+        scheme,
+        netloc,
+        target_path,
+        request.url.query,
+    )
+    try:
+        result = await fetch_external_page(
+            target_url=target_url,
+            session_id=session_id,
+            method=request.method,
+            request_headers=dict(request.headers),
+            body=await request.body(),
+        )
+    except BrowserProxyError as exc:
+        return Response(
+            content=proxy_error_html(str(exc), target_url),
+            status_code=exc.status_code,
+            headers={
+                "Content-Type": "text/html; charset=utf-8",
+                "Cache-Control": "no-store",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+
+    headers = dict(result.headers)
+    if result.redirect_url:
+        headers["Location"] = result.redirect_url
+    headers["Content-Type"] = result.content_type
+    if result.content_type.lower().startswith("text/html"):
+        # External JavaScript runs in a sandboxed iframe. Restrict its network/form/resource
+        # access to the proxy path only so it cannot call AgentStudio's local API directly.
+        proxy_prefix = f"{str(request.base_url).rstrip('/')}/api/web-proxy/"
+        headers["Content-Security-Policy"] = "; ".join([
+            "default-src 'none'",
+            f"script-src 'unsafe-inline' 'unsafe-eval' blob: {proxy_prefix}",
+            f"style-src 'unsafe-inline' {proxy_prefix}",
+            f"img-src data: blob: {proxy_prefix}",
+            f"font-src data: {proxy_prefix}",
+            f"media-src data: blob: {proxy_prefix}",
+            f"frame-src {proxy_prefix}",
+            f"connect-src {proxy_prefix}",
+            f"form-action {proxy_prefix}",
+            f"worker-src blob: {proxy_prefix}",
+            "object-src 'none'",
+            "base-uri 'none'",
+        ])
+    content = b"" if request.method == "HEAD" else result.content
+    return Response(
+        content=content,
+        status_code=result.status_code,
+        headers=headers,
+    )
+
+
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.308", "build": "ProjectMachineIsolation"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.345", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -2079,23 +2702,173 @@ async def migrate_database_schema():
 async def system_status():
     return await get_status()
 
+def _merge_interview_attachment_memory(previous: str, current: str, limit: int = 18_000) -> str:
+    parts = [
+        redact_sensitive_text(str(previous or '')).strip(),
+        redact_sensitive_text(str(current or '')).strip(),
+    ]
+    merged = "\n\n".join(part for part in parts if part)
+    if not merged:
+        return ""
+    # Keep the most recent evidence if a long-running interview exceeds the
+    # bounded memory budget. Raw attachment bodies remain Backend-only.
+    return merged[-max(2_000, int(limit)):]
+
+
+@router.post("/chat/interview/attachments/summary")
+async def interview_attachment_summary(req: AttachmentRequirementsSummaryRequest):
+    attachment_context = build_requirements_attachment_context(
+        req.attachment_ids,
+        purpose="Agent 설계 인터뷰 첨부 파일 통합 요구사항 분석",
+    )
+    context_text = str(attachment_context.get("text") or "").strip()
+    if not context_text:
+        return {
+            "ok": False,
+            "summary": "",
+            "attachment_memory": redact_sensitive_text(req.attachment_memory or ""),
+            "attachments": attachment_context.get("files") or [],
+            "attachment_warnings": attachment_context.get("warnings") or ["분석할 첨부 텍스트가 없습니다."],
+        }
+
+    with usage_context(
+        project_root=req.project_root,
+        operation="requirements_attachment_summary",
+    ):
+        summary = await summarize_attachment_requirements(
+            context_text,
+            previous_summary=redact_sensitive_text(req.attachment_memory or ""),
+            provider=req.provider,
+        )
+
+    summary = redact_sensitive_text(summary).strip()
+    memory = (
+        "[첨부 파일에서 파악한 사용자 요구사항 요약]\n" + summary
+        if summary
+        else redact_sensitive_text(req.attachment_memory or "").strip()
+    )
+    return {
+        "ok": bool(summary),
+        "summary": summary,
+        "attachment_memory": memory[-7000:],
+        "attachments": attachment_context.get("files") or [],
+        "attachment_warnings": attachment_context.get("warnings") or [],
+        "attachments_consumed": bool(req.attachment_ids),
+    }
+
+
 @router.post("/chat/interview")
 async def interview(req: ChatRequest):
     with usage_context(
         project_root=req.project_root,
         operation="requirements_interview",
     ):
+        attachment_context = build_requirements_attachment_context(
+            req.attachment_ids,
+            purpose="Agent 설계 인터뷰 요구사항/참고자료 분석",
+        )
+        attachment_memory = _merge_interview_attachment_memory(
+            req.attachment_memory,
+            attachment_context.get("text") or "",
+        )
         answer = await next_interview_message(
             req.message,
             req.history,
             req.provider,
+            attachment_context=attachment_memory,
         )
 
-    return {"answer": answer}
+    return {
+        "answer": answer,
+        "attachments": attachment_context.get("files") or [],
+        "attachment_warnings": attachment_context.get("warnings") or [],
+        "attachment_memory": attachment_memory,
+        "attachments_consumed": bool(req.attachment_ids),
+    }
 
 @router.post("/agent/plan")
 async def agent_plan(req: PlanRequest):
     return {"plan": await build_plan(req.requirements, req.provider)}
+
+@router.websocket("/files/watch")
+async def project_files_watch(ws: WebSocket):
+    """Stream project changes using native filesystem notifications.
+
+    This endpoint intentionally stays silent while the project is idle. It
+    replaces the previous browser-side 1.5 second `/files/snapshot` polling
+    loop that repeatedly traversed the source tree and generated access-log
+    writes even when the user was doing nothing.
+    """
+    await ws.accept()
+    root = str(ws.query_params.get("root") or "").strip()
+    if not root:
+        await ws.send_json({"type": "error", "message": "root가 필요합니다."})
+        await ws.close(code=1008)
+        return
+
+    try:
+        try:
+            validate_project_root(root)
+        except PermissionError as exc:
+            restored = await ensure_persisted_project_root(root)
+            if not restored.get("registered"):
+                await ws.send_json({
+                    "type": "error",
+                    "message": str(exc),
+                    "code": "PROJECT_ROOT_NOT_ALLOWED",
+                })
+                await ws.close(code=1008)
+                return
+            validate_project_root(root)
+
+        await ws.send_json({"type": "ready", "root": root})
+
+        async def _send_changes():
+            async for changes in watch_project_changes(root):
+                await ws.send_json({
+                    "type": "changes",
+                    "root": root,
+                    "changes": changes,
+                })
+
+        async def _wait_for_disconnect():
+            try:
+                while True:
+                    await ws.receive()
+            except WebSocketDisconnect:
+                return
+
+        change_task = asyncio.create_task(_send_changes())
+        disconnect_task = asyncio.create_task(_wait_for_disconnect())
+        done, pending = await asyncio.wait(
+            {change_task, disconnect_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            try:
+                task.result()
+            except WebSocketDisconnect:
+                pass
+    except WebSocketDisconnect:
+        pass
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        try:
+            await ws.send_json({
+                "type": "error",
+                "message": f"프로젝트 파일 감시 오류: {exc}",
+            })
+        except Exception:
+            pass
+        try:
+            await ws.close(code=1011)
+        except Exception:
+            pass
+
 
 @router.get("/files/snapshot")
 async def project_files_snapshot(root: str = Query(...)):
@@ -2263,6 +3036,57 @@ async def folders(root: str):
 @router.get("/files")
 async def files(root: str):
     return {"root": root, "files": await list_files(root)}
+
+@router.get("/files/raw")
+async def project_file_raw(root: str = Query(...), relative_path: str = Query(...)):
+    """등록된 프로젝트 안의 원본 파일 바이트를 Save As 용도로 전송합니다.
+
+    편집 가능한 텍스트는 Frontend의 현재 buffer를 저장하고, PDF/PPT/PPTX처럼
+    읽기 전용 binary preview 탭은 이 endpoint에서 원본 bytes를 읽습니다.
+    프로젝트 root allow-list와 경로 이탈 검증은 기존 file viewer와 동일합니다.
+    """
+    project_root = Path(str(root or "")).expanduser().resolve()
+    relative = str(relative_path or "").strip()
+    if not relative:
+        raise HTTPException(status_code=400, detail="relative_path가 필요합니다.")
+
+    try:
+        await get_file_meta(str(project_root), relative)
+    except PermissionError as exc:
+        restored = await ensure_persisted_project_root(str(project_root))
+        if not restored.get("registered"):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "PROJECT_ROOT_NOT_ALLOWED",
+                    "message": str(exc),
+                    "project_root": str(project_root),
+                    "recovery": restored,
+                },
+            ) from exc
+        await get_file_meta(str(project_root), relative)
+
+    target = (project_root / Path(relative.replace("\\", "/"))).resolve()
+    try:
+        target.relative_to(project_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="프로젝트 밖의 파일은 읽을 수 없습니다.") from exc
+
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail=f"파일을 찾을 수 없습니다: {target}")
+
+    return FileResponse(
+        path=str(target),
+        filename=target.name,
+        media_type="application/octet-stream",
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
 
 @router.get("/files/pdf")
 async def project_pdf_view(root: str = Query(...), relative_path: str = Query(...)):
@@ -2805,6 +3629,13 @@ async def ai_edit_code(req: CodeEditRequest):
     try:
         llm = model_for_task(LLMTask.CODE_GENERATION)
         is_notebook = req.path.casefold().endswith(".ipynb")
+        attachment_context = build_attachment_context(
+            req.attachment_ids,
+            purpose="LLM 대화형 코드 편집 참고자료",
+            total_char_limit=70000,
+            per_file_char_limit=28000,
+        )
+        attachment_prompt = attachment_context.get("text") or "(추가 참고 파일 없음)"
 
         coding_style = coding_rules_for_request(
             request=req.instruction,
@@ -2838,6 +3669,9 @@ async def ai_edit_code(req: CodeEditRequest):
 아래 Context는 입력 예산 보호를 위해 outputs, execution result, metadata를 제거했습니다.
 [TARGET]로 표시된 Code 셀 {target_number}만 수정 대상입니다.
 {notebook_ctx.context_text}
+
+[사용자 등록 참고 파일]
+{attachment_prompt}
 
 절대 규칙:
 1. [TARGET] Code 셀 {target_number}에 들어갈 코드만 반환합니다.
@@ -2904,6 +3738,8 @@ async def ai_edit_code(req: CodeEditRequest):
                 "preserved_comment_lines": preserved_comment_lines,
                 "edit_scope": "notebook_cell",
                 "active_cell_index": notebook_ctx.active_cell_index,
+                "attachments": attachment_context.get("files") or [],
+                "attachment_warnings": attachment_context.get("warnings") or [],
                 "context_budget": {
                     "original_file_chars": notebook_ctx.original_chars,
                     "llm_context_chars": notebook_ctx.compact_chars,
@@ -2931,6 +3767,9 @@ async def ai_edit_code(req: CodeEditRequest):
 ```text
 {req.content}
 ```
+
+[사용자 등록 참고 파일]
+{attachment_prompt}
 
 절대 규칙:
 1. 사용자가 요청한 내용을 실제 코드에 반영합니다.
@@ -2991,6 +3830,8 @@ async def ai_edit_code(req: CodeEditRequest):
             "saved": False,
             "preserved_comment_lines": preserved_comment_lines,
             "edit_scope": "file",
+            "attachments": attachment_context.get("files") or [],
+            "attachment_warnings": attachment_context.get("warnings") or [],
             "context_budget": {
                 "prompt_chars": len(prompt),
                 "estimated_tokens": approximate_tokens(prompt),
@@ -3059,6 +3900,14 @@ async def ai_project_edit(req: ProjectCodeEditRequest):
         )
 
     try:
+        attachment_context = build_attachment_context(
+            req.attachment_ids,
+            purpose="프로젝트 단위 LLM 코드 편집 참고자료",
+            total_char_limit=70000,
+            per_file_char_limit=28000,
+        )
+        attachment_prompt = attachment_context.get("text") or "(추가 참고 파일 없음)"
+
         # 프로젝트 구조/관련 파일을 로컬 분석으로 먼저 좁힙니다.
         summary = await local_project_summary(
             str(project_root),
@@ -3112,7 +3961,7 @@ async def ai_project_edit(req: ProjectCodeEditRequest):
             if x.get("relative")
         ]
 
-        llm = model_for_task(LLMTask.CODE_GENERATION)
+        llm = model_for_task(LLMTask.MULTI_FILE_CODE_CHANGE)
 
         coding_style = coding_rules_for_request(
             request=instruction,
@@ -3175,6 +4024,9 @@ async def ai_project_edit(req: ProjectCodeEditRequest):
 [관련 기존 파일 내용]
 {context_text or "(관련 기존 파일 없음 - 신규 프로젝트 파일 생성 가능)"}
 
+[사용자 등록 참고 파일]
+{attachment_prompt}
+
 [사용자 프로젝트 요청]
 {instruction}
 
@@ -3208,7 +4060,11 @@ Markdown 코드펜스나 설명문은 JSON 밖에 작성하지 마십시오.
 12. 기존 힌트/설명 아래에 구현 코드를 추가하는 요청이면 기존 주석 블록을 그대로 유지하고 그 아래에 코드를 삽입합니다.
 """
 
-        result = await llm.ainvoke(prompt)
+        with usage_context(
+            project_root=str(project_root),
+            operation="project_code_edit",
+        ):
+            result = await llm.ainvoke(prompt)
         raw = result.content if hasattr(result, "content") else str(result)
         raw = str(raw or "").strip()
 
@@ -3317,6 +4173,10 @@ Markdown 코드펜스나 설명문은 JSON 밖에 작성하지 마십시오.
             "created_count": created,
             "updated_count": updated,
             "saved": True,
+            "provider": getattr(llm, "last_provider", ""),
+            "provider_task": LLMTask.MULTI_FILE_CODE_CHANGE.value,
+            "attachments": attachment_context.get("files") or [],
+            "attachment_warnings": attachment_context.get("warnings") or [],
         }
 
     except HTTPException:
@@ -4061,7 +4921,7 @@ def _build_interview_requirement_context(
         "7. 단순히 3~4단계로 축약하지 말고 실제 실행 가능한 업무 Workflow를 설계합니다.",
     ])
 
-    return "\\n".join(rows)
+    return "\n".join(rows)
 
 
 @router.post("/workflow/preview")
@@ -4091,15 +4951,36 @@ async def workflow_preview(req: WorkflowPreviewRequest):
         interview_messages=req.interview_messages,
         confirmed_requirements=req.confirmed_requirements,
     )
+    attachment_context = build_requirements_attachment_context(
+        req.attachment_ids,
+        purpose="Agent Workflow 설계 참고자료",
+    )
+    attachment_memory = _merge_interview_attachment_memory(
+        req.attachment_memory,
+        attachment_context.get("text") or "",
+    )
+    if attachment_memory:
+        full_request += (
+            "\n\n[인터뷰 참고자료 세션 메모리]\n"
+            + attachment_memory
+            + "\n\n중요: 위 참고자료는 내부 분석 근거이며 원문/비밀값을 사용자 출력에 복사하지 않습니다."
+        )
+
+    previous_design = req.previous_design if isinstance(req.previous_design, dict) else {}
+    previous_confirmed = previous_design.get("confirmed_requirements") or {}
 
     with usage_context(
         project_root=req.project_root,
         operation="workflow_preview",
     ):
-        design = await design_agent_factory(
+        design = await design_agent_factory_incremental(
             request=full_request,
             project_context=project_context,
             provider=req.provider,
+            previous_design=previous_design,
+            previous_confirmed_requirements=previous_confirmed,
+            current_confirmed_requirements=req.confirmed_requirements,
+            interview_messages=req.interview_messages,
         )
 
     target = design.get("target_agent_workflow") or {}
@@ -4126,15 +5007,108 @@ async def workflow_preview(req: WorkflowPreviewRequest):
         "interview_context": full_request,
         "interview_messages": req.interview_messages,
         "confirmed_requirements": req.confirmed_requirements,
+        "attachments": attachment_context.get("files") or [],
+        "attachment_warnings": attachment_context.get("warnings") or [],
+        "attachment_memory": attachment_memory,
+        "attachments_consumed": bool(req.attachment_ids),
         "target_agent_workflow": target,
         "requirement_spec": design.get("requirement_spec") or {},
         "capability_plan": design.get("capability_plan") or {},
         "tool_mcp_plan": design.get("tool_mcp_plan") or {},
         "agent_architecture": design.get("agent_architecture") or {},
+        "database_plan": design.get("database_plan") or {},
         "file_plan": design.get("file_plan") or {},
         "environment_plan": design.get("environment_plan") or {},
         "settings_plan": design.get("settings_plan") or {},
+        "design_runtime": design.get("design_runtime") or {},
         "workflow_quality": quality,
+    }
+
+
+@router.post("/database-design/preview")
+async def database_design_preview(req: DatabaseDesignPreviewRequest):
+    request_text = str(req.request or "").strip()
+    if not request_text:
+        return {
+            "ok": True,
+            "database_plan": {
+                "enabled": False,
+                "engine": "none",
+                "strategy": "요구사항을 입력하면 DB 초안을 실시간으로 표시합니다.",
+                "modules": [],
+                "tables": [],
+                "relationships": [],
+                "validation": {"valid": True, "errors": [], "warnings": []},
+                "confirmed": False,
+                "finalized": False,
+            },
+            "ddl_preview": "",
+        }
+
+    # 실시간 Preview는 LLM을 호출하지 않습니다. 대화가 바뀔 때만 검증된
+    # Module Registry를 결정적으로 재조립하여 빠르게 보여 줍니다.
+    design_context = {
+        "requirement_spec": {
+            "goal": str((req.confirmed_requirements or {}).get("original_request") or "")
+        },
+        "capability_plan": {},
+        "agent_architecture": {},
+    }
+    plan = build_database_plan(request_text, design_context)
+
+    lower = request_text.casefold()
+    technologies: list[str] = []
+    if plan.get("enabled"):
+        technologies.append("PostgreSQL")
+    if "pgvector" in lower or "vector" in lower or "벡터" in lower or "embedding" in lower or "임베딩" in lower:
+        technologies.append("pgvector")
+    redis_enabled = "redis" in lower
+    if redis_enabled:
+        technologies.append("Redis")
+
+    redis_keys: list[dict] = []
+    if redis_enabled:
+        redis_keys.append({"key": "session:{session_id}", "purpose": "사용자 세션", "ttl": "세션 정책"})
+        if any(token in lower for token in ("검색", "search")):
+            redis_keys.extend([
+                {"key": "search:{query_hash}", "purpose": "검색 결과 캐시", "ttl": "5분 권장"},
+                {"key": "recent_search:{customer_id}", "purpose": "최근 검색", "ttl": "업무 정책"},
+            ])
+        if any(token in lower for token in ("장바구니", "cart")):
+            redis_keys.append({"key": "cart:{customer_id}", "purpose": "임시 장바구니", "ttl": "사용자 정책"})
+        if any(token in lower for token in ("주문 draft", "order draft", "주문 임시", "주문")):
+            redis_keys.append({"key": "order_draft:{session_id}", "purpose": "주문 확인 전 Draft", "ttl": "30분 권장"})
+
+    plan["technologies"] = list(dict.fromkeys(technologies))
+    plan["redis_plan"] = {
+        "enabled": redis_enabled,
+        "keys": redis_keys,
+        "policy": "Redis는 PostgreSQL 업무 원장과 분리하여 세션/캐시/임시 상태에 사용합니다." if redis_enabled else "",
+    }
+
+    finalized_copy = finalize_database_plan(plan)
+    return {
+        "ok": True,
+        "database_plan": plan,
+        "ddl_preview": str(finalized_copy.get("ddl") or ""),
+        "preview": True,
+        "message": "요구사항 기준 실시간 DB 초안을 갱신했습니다.",
+    }
+
+
+@router.post("/database-design/finalize")
+async def database_design_finalize(req: DatabaseDesignFinalizeRequest):
+    plan = finalize_database_plan(req.database_plan or {})
+    validation = plan.get("validation") or {}
+    return {
+        "ok": bool(validation.get("valid", True)),
+        "database_plan": plan,
+        "validation": validation,
+        "message": (
+            "DB 설계 검증 및 PostgreSQL DDL 확정이 완료되었습니다."
+            if validation.get("valid", True)
+            else "DB 설계 검증에 실패했습니다. 오류를 수정한 뒤 다시 확정해 주세요."
+        ),
     }
 
 
@@ -4184,6 +5158,13 @@ async def workflow_definition():
                     "label": "Agent 아키텍처",
                     "description": "컴포넌트·상태·인터페이스를 설계",
                     "icon": "⬡",
+                },
+                {
+                    "name": "database_design",
+                    "label": "DB Module 설계",
+                    "description": "Core + 기능별 Module + Custom Entity를 조립하고 PK/FK를 검증",
+                    "icon": "▦",
+                    "accent": "target",
                 },
                 {
                     "name": "target_workflow_design",
@@ -4264,6 +5245,20 @@ async def workflow_definition():
                     "label": "산출물 / 코딩 스타일 검증",
                     "description": "계획 파일 누락·Placeholder·등록 Coding Style 위반을 검사",
                     "icon": "✓",
+                    "accent": "target",
+                },
+                {
+                    "name": "as_built_architecture",
+                    "label": "As-Built 아키텍처",
+                    "description": "생성된 실제 파일·클래스·함수·Framework 증거로 구현 구조를 역분석",
+                    "icon": "◎",
+                    "accent": "target",
+                },
+                {
+                    "name": "architecture_conformance",
+                    "label": "Architecture Conformance",
+                    "description": "Design ↔ As-Built 일치도를 검증하고 차이가 있으면 자동 보정",
+                    "icon": "≍",
                     "accent": "target",
                 },
                 {
@@ -4510,6 +5505,87 @@ def _workflow_initial_state(req: WorkflowStartRequest, thread_id: str) -> dict:
     }
 
 
+# v5.345: Actual LangGraph node-boundary progress. This replaces synthetic-only
+# progress with a small observable trace without any additional LLM request.
+_AGENT_BUILD_NODE_PROGRESS = {
+    "requirement_analysis": (6, "요구사항 설계 상태 확인"),
+    "analyze_project": (10, "프로젝트 영향 범위 분석"),
+    "capability_design": (14, "Capability 설계 반영"),
+    "tool_mcp_decision": (18, "Tool / MCP 설계 반영"),
+    "agent_architecture": (22, "Design Architecture 반영"),
+    "database_design": (26, "DB 설계 반영"),
+    "target_workflow_design": (30, "Workflow / LangGraph 설계 반영"),
+    "project_file_plan": (34, "파일 변경 계획 계산"),
+    "requirement_coverage_gate": (38, "요구사항 Coverage 검증"),
+    "settings_requirement_analysis": (41, "초기 설정 요구사항 분석"),
+    "settings_schema_design": (44, "설정 Schema 설계"),
+    "settings_ui_design": (47, "설정 UI 설계"),
+    "checkpoint": (49, "변경 전 Checkpoint 생성"),
+    "approval": (51, "코드 변경 승인 확인"),
+    "code_generation": (62, "코드 생성 / 증분 수정"),
+    "settings_generator": (68, "설정 기능 생성"),
+    "settings_validation": (72, "설정 기능 검증"),
+    "build_artifact_validation": (76, "생성 산출물 검증"),
+    "as_built_architecture": (80, "As-Built Architecture 분석"),
+    "architecture_conformance": (84, "Design ↔ As-Built 일치 검증"),
+    "environment_configuration": (87, "실행 환경 구성"),
+    "test": (91, "테스트 실행"),
+    "debug": (88, "실패 원인 분석 / 수정 준비"),
+    "package_completion": (96, "실행 관리자 / 패키지 정리"),
+    "review": (98, "최종 검토"),
+}
+
+
+async def _run_agent_graph_with_progress(state: dict, config: dict, job) -> dict:
+    if job is None:
+        return await agent_graph_runtime.graph.ainvoke(state, config=config)
+
+    saw_update = False
+    async for chunk in agent_graph_runtime.graph.astream(
+        state,
+        config=config,
+        stream_mode="updates",
+    ):
+        if not isinstance(chunk, dict):
+            continue
+        for node_name, update in chunk.items():
+            if str(node_name).startswith("__"):
+                continue
+            saw_update = True
+            progress, label = _AGENT_BUILD_NODE_PROGRESS.get(
+                str(node_name),
+                (max(job.progress, 8), f"{node_name} 처리"),
+            )
+            status = ""
+            detail = ""
+            if isinstance(update, dict):
+                status = str(update.get("status") or "")
+                detail = str(update.get("error") or update.get("review") or "")
+            message = label + (f" · {status}" if status else "")
+            await job_manager.update(
+                job,
+                status="RUNNING",
+                progress=max(job.progress, progress),
+                message=message,
+                node=str(node_name),
+                event_detail=detail,
+            )
+
+    try:
+        snapshot = await agent_graph_runtime.graph.aget_state(config)
+        values = getattr(snapshot, "values", None)
+        if isinstance(values, dict):
+            return dict(values)
+    except Exception:
+        pass
+
+    # A graph without a checkpointer should be rare here. Fall back only when the
+    # stream emitted nothing; do not execute the graph twice after real updates.
+    if not saw_update:
+        return await agent_graph_runtime.graph.ainvoke(state, config=config)
+    return dict(state)
+
+
 async def _execute_workflow_with_diagnostics(
     req: WorkflowStartRequest,
     thread_id: str,
@@ -4537,9 +5613,10 @@ async def _execute_workflow_with_diagnostics(
             thread_id=thread_id,
             operation="agent_build",
         ):
-            result = await agent_graph_runtime.graph.ainvoke(
+            result = await _run_agent_graph_with_progress(
                 state,
-                config=config,
+                config,
+                job,
             )
     except asyncio.CancelledError:
         raise

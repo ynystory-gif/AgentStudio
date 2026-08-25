@@ -11,6 +11,7 @@ from app.services.agent_factory_policy_planner import (
     infer_fastapi_factory_plan,
 )
 from app.services.model_router import LLMTask, model_for_task
+from app.services.database_schema_design import build_database_plan
 
 
 SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니다.
@@ -49,6 +50,30 @@ SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니�
     "interfaces": [],
     "persistence": [],
     "security": []
+  },
+  "database_plan": {
+    "enabled": true,
+    "schema_name": "public",
+    "module_suggestions": ["CORE", "CONVERSATION", "RAG"],
+    "custom_tables": [
+      {
+        "name": "업무 전용 snake_case 테이블명",
+        "purpose": "업무 Entity 책임",
+        "columns": [
+          {
+            "name": "컬럼명",
+            "type": "TEXT|BIGINT|INTEGER|BOOLEAN|NUMERIC(18,2)|TIMESTAMPTZ|JSONB|UUID",
+            "nullable": true,
+            "primary_key": false,
+            "unique": false,
+            "default": "",
+            "references": "other_table.id"
+          }
+        ],
+        "indexes": [["컬럼명"]]
+      }
+    ],
+    "custom_design_notes": []
   },
   "target_agent_workflow": {
     "name": "...",
@@ -181,10 +206,17 @@ SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니�
 - LLM Provider 변경 가능 요구가 있으면 Provider/Model 설정 확인 또는 선택 단계를 별도로 둡니다.
 - 결과 저장이 선택 사항이면 저장 여부 decision branch를 만들고, 저장 형식과 허용 Output 경로 검증을 표현합니다.
 - UI 표시가 요구되면 UI 결과 표시 단계를 별도로 둡니다.
+- React + TypeScript가 확정되면 Frontend src 파일은 .tsx/.ts를 사용하고 App.jsx/main.jsx/api.js를 계획하지 않습니다. App.tsx는 Route/Page/Layout 조립만 담당해야 합니다.
+- React Frontend는 App 한 파일에 UI를 몰아넣지 않습니다. 최소한 layouts/AppLayout, components/layout/TopHeader, Sidebar, Footer, pages, services, styles를 분리하고 TypeScript이면 types도 분리합니다.
+- 업무 화면이 여러 개이면 각 본문 화면을 pages 또는 features 하위 파일로 나누고, 공통 메뉴/헤더/푸터와 API Client를 Page 내부에 중복 구현하지 않습니다.
 - validation/decision 실패 경로는 failure_policy만 적지 말고 branches에서도 사용자가 이해할 수 있게 연결합니다.
 - 생성 대상 Agent에서 런타임 변경이 필요한 값이 있으면 settings_plan을 반드시 설계합니다.
 - AgentStudio 설정 화면을 복사하지 않고 대상 Agent에 필요한 설정만 생성합니다.
 - 사용하지 않는 DB가 요구사항에 없으면 DB 설정 Section을 만들지 않습니다.
+- DB가 필요한 Agent라면 database_plan에 업무 Entity를 제안하되, Agent 공통/기능별 표준 테이블은 Backend Module Registry가 보강하므로 custom_tables에는 해당 Agent에만 필요한 업무 Entity를 우선 제안합니다.
+- DB 설계는 Agent 시스템 데이터와 고객/상품/주문 등 업무 데이터를 분리하고, 기능 설정/metadata는 JSONB를 사용할 수 있지만 검색/JOIN/집계가 필요한 핵심 값은 정규 컬럼으로 설계합니다.
+- custom_tables의 이름/컬럼은 snake_case를 사용하고 FK references는 table.column 형식으로 명시합니다.
+- database_plan.finalized=true인 경우 사용자가 확인한 DB 계약이므로 이후 코드 생성은 해당 Table/Column/FK와 Migration DDL을 임의 변경하지 않습니다.
 - API Key/Password/Token은 secret=true로 표시하고 GET 응답에서 평문 노출하지 않습니다.
 - 설정 UI가 필요한 경우 file_plan.new_files에 Backend Settings API/Schema/Service와 React Settings UI/API Client를 포함합니다.
 - Agent Architecture의 모든 component는 file_plan.component_file_map에서 최소 1개 이상의 실제 파일과 연결되어야 합니다.
@@ -217,6 +249,48 @@ def _extract_json(text: str) -> dict:
     return json.loads(value)
 
 
+def _primary_user_goal(request: str) -> str:
+    """Return a short user-facing goal, never the serialized interview state."""
+    value = str(request or "").replace("\\n", "\n").strip()
+    marker = "[현재 사용자의 개발 요청]"
+    if marker in value:
+        value = value.split(marker, 1)[1]
+        next_section = re.search(r"\n\s*\[[^\]]+\]", value)
+        if next_section:
+            value = value[:next_section.start()]
+    value = re.sub(r"(?im)^\s*(USER|ASSISTANT|SYSTEM)\s*:\s*", "", value).strip()
+    value = re.sub(r"\s+", " ", value)
+    if not value:
+        return "신규 Agent 요구사항"
+    # Internal state markers must never become an architecture heading/summary.
+    if any(token in value for token in (
+        'original_request', 'user_answers', 'confirmed_requirements',
+        'latest_analysis', 'attachment_summary', '"backend"', '"llm"',
+    )):
+        first = re.split(r"[.!?。]", value, maxsplit=1)[0].strip()
+        value = first or "신규 Agent 요구사항"
+    return value[:240].rstrip()
+
+
+def _sanitize_requirement_spec(design: dict, request: str) -> None:
+    spec = design.setdefault("requirement_spec", {})
+    goal = str(spec.get("goal") or "").replace("\\n", "\n").strip()
+    raw_markers = (
+        'original_request', 'user_answers', 'confirmed_requirements',
+        'latest_analysis', 'attachment_summary', '[인터뷰 전체 대화]',
+        'ASSISTANT:', 'USER:',
+    )
+    if (
+        not goal
+        or len(goal) > 500
+        or any(marker in goal for marker in raw_markers)
+        or goal.count("{") + goal.count("[") > 8
+    ):
+        spec["goal"] = _primary_user_goal(request)
+    else:
+        spec["goal"] = re.sub(r"\s+", " ", goal)[:300].rstrip()
+
+
 def _fallback_design(request: str) -> dict:
     plan = infer_fastapi_factory_plan(
         request=request,
@@ -225,7 +299,7 @@ def _fallback_design(request: str) -> dict:
 
     return {
         "requirement_spec": {
-            "goal": request,
+            "goal": _primary_user_goal(request),
             "users": [],
             "inputs": [],
             "outputs": [],
@@ -251,6 +325,7 @@ def _fallback_design(request: str) -> dict:
             "security": [],
             "factory_policy_plan": plan,
         },
+        "database_plan": {},
         "target_agent_workflow": {
             "name": "Generated Agent Workflow",
             "steps": [],
@@ -545,7 +620,7 @@ async def design_agent_factory(
     Node를 분리하되 매 단계마다 동일한 내용을 다시 LLM에 보내는 비용은 피합니다.
     각 Node는 이 Bundle에서 자신의 책임에 해당하는 산출물만 State에 확정합니다.
     """
-    llm = model_for_task(LLMTask.REQUIREMENTS_ANALYSIS)
+    llm = model_for_task(LLMTask.WORKFLOW_DESIGN, provider)
 
     factory_direction = format_agent_factory_policy_for_prompt()
     policy_context = format_factory_policies_for_prompt()
@@ -580,11 +655,317 @@ async def design_agent_factory(
         if not isinstance(parsed, dict):
             raise ValueError("Agent Factory 설계 결과가 JSON object가 아닙니다.")
 
-        return _enforce_workflow_requirement_coverage(parsed, request)
+        _sanitize_requirement_spec(parsed, request)
+        parsed = _enforce_workflow_requirement_coverage(parsed, request)
+        parsed.setdefault("design_runtime", {})["workflow_provider"] = getattr(llm, "last_provider", "")
+        parsed["design_runtime"]["workflow_task"] = LLMTask.WORKFLOW_DESIGN.value
+        # target_agent_workflow contains the executable LangGraph-style steps and
+        # branches, so Workflow 전체 설계와 LangGraph 분기 설계 share the same
+        # high-performance provider decision instead of paying for a duplicate call.
+        parsed["design_runtime"]["langgraph_branch_provider"] = getattr(llm, "last_provider", "")
+
+        base_database_plan = build_database_plan(request, parsed)
+        parsed["database_plan"] = base_database_plan
+        if base_database_plan.get("enabled"):
+            # DB Entity/relationship design is an architecture-critical task of its
+            # own. Refine only the custom business entities with the high-performance
+            # chain, then let the deterministic Module Registry + Validator rebuild
+            # and verify the final plan. A DB-model failure never discards the safe
+            # registry-based plan.
+            db_llm = model_for_task(LLMTask.DATABASE_SCHEMA_DESIGN, provider)
+            try:
+                db_result = await db_llm.ainvoke([
+                    SystemMessage(content=(
+                        "당신은 PostgreSQL 데이터 모델링 전문가입니다. 반드시 JSON 하나만 반환하세요. "
+                        "Agent 시스템 공통 테이블은 이미 Module Registry가 생성하므로 해당 Agent에만 필요한 "
+                        "업무 Entity/관계만 제안하십시오. 검색/JOIN/집계 핵심 값은 정규 컬럼으로 두고, "
+                        "설정/metadata만 JSONB를 사용하십시오. FK는 table.column 형식으로 명시하십시오.\n"
+                        "반환 형식: {\"custom_tables\": [...], \"custom_design_notes\": [...]}"
+                    )),
+                    HumanMessage(content=(
+                        "[사용자 요구사항]\n" + request
+                        + "\n\n[확정 Requirement/Capability]\n"
+                        + json.dumps({
+                            "requirement_spec": parsed.get("requirement_spec") or {},
+                            "capability_plan": parsed.get("capability_plan") or {},
+                            "agent_architecture": parsed.get("agent_architecture") or {},
+                        }, ensure_ascii=False, indent=2)
+                        + "\n\n[자동 선택 DB Modules]\n"
+                        + json.dumps([x.get("id") for x in base_database_plan.get("modules") or []], ensure_ascii=False)
+                        + "\n\n[표준/현재 테이블명]\n"
+                        + json.dumps([x.get("name") for x in base_database_plan.get("tables") or []], ensure_ascii=False)
+                        + "\n\n중복 표준 테이블은 다시 제안하지 마십시오."
+                    )),
+                ])
+                refined = _extract_json(str(db_result.content))
+                if not isinstance(refined, dict):
+                    raise ValueError("DB Entity 설계 결과가 JSON object가 아닙니다.")
+                raw_db = dict(parsed.get("database_plan") or {})
+                raw_db["custom_tables"] = refined.get("custom_tables") or []
+                raw_db["custom_design_notes"] = refined.get("custom_design_notes") or []
+                parsed["database_plan"] = raw_db
+                parsed["database_plan"] = build_database_plan(request, parsed)
+                parsed["design_runtime"]["database_provider"] = getattr(db_llm, "last_provider", "")
+                parsed["design_runtime"]["database_task"] = LLMTask.DATABASE_SCHEMA_DESIGN.value
+            except Exception as db_exc:
+                parsed["database_plan"] = base_database_plan
+                notes = list(parsed["database_plan"].get("custom_design_notes") or [])
+                notes.append(f"고성능 DB Entity 보강 실패로 검증된 Module Registry 설계를 사용했습니다: {type(db_exc).__name__}")
+                parsed["database_plan"]["custom_design_notes"] = notes
+                parsed["design_runtime"]["database_provider"] = "deterministic_fallback"
+                parsed["design_runtime"]["database_error"] = f"{type(db_exc).__name__}: {db_exc}"
+        return parsed
 
     except Exception:
         # 설계 LLM 오류가 IDE 자체를 중단시키지 않도록 최소 안전 계획을 반환합니다.
-        return _enforce_workflow_requirement_coverage(
+        fallback = _enforce_workflow_requirement_coverage(
             _fallback_design(request),
             request,
         )
+        _sanitize_requirement_spec(fallback, request)
+        fallback["database_plan"] = build_database_plan(request, fallback)
+        return fallback
+
+# v5.345: Incremental design revision. Reuse the previous design unless the
+# requirement delta is large enough to justify a full architecture rebuild.
+_DESIGN_SECTION_KEYS = (
+    "requirement_spec", "capability_plan", "tool_mcp_plan",
+    "agent_architecture", "database_plan", "target_agent_workflow",
+    "file_plan", "settings_plan", "environment_plan",
+)
+
+
+def _clone_json(value):
+    return json.loads(json.dumps(value or {}, ensure_ascii=False))
+
+
+def _preview_design_sections(previous_design: dict | None) -> dict:
+    previous = previous_design if isinstance(previous_design, dict) else {}
+    return {key: _clone_json(previous.get(key) or {}) for key in _DESIGN_SECTION_KEYS}
+
+
+def _stable_confirmed_requirements(value: dict | None) -> dict:
+    source = value if isinstance(value, dict) else {}
+    ignored = {"user_answers", "latest_analysis", "attachment_summary"}
+    return {
+        key: _clone_json(item) if isinstance(item, (dict, list)) else item
+        for key, item in source.items()
+        if key not in ignored
+    }
+
+
+def _changed_requirement_groups(previous: dict | None, current: dict | None) -> list[str]:
+    old = _stable_confirmed_requirements(previous)
+    new = _stable_confirmed_requirements(current)
+    keys = sorted(set(old) | set(new))
+    changed = []
+    for key in keys:
+        if json.dumps(old.get(key), ensure_ascii=False, sort_keys=True, default=str) != json.dumps(new.get(key), ensure_ascii=False, sort_keys=True, default=str):
+            changed.append(key)
+    return changed
+
+
+def _new_interview_messages(previous_design: dict | None, current_messages: list[dict] | None) -> list[dict]:
+    previous = previous_design if isinstance(previous_design, dict) else {}
+    old_messages = list(previous.get("interview_messages") or [])
+    current = list(current_messages or [])
+    if not old_messages:
+        return current[-4:]
+    prefix_ok = len(current) >= len(old_messages) and all(
+        str(current[i].get("role") or "") == str(old_messages[i].get("role") or "")
+        and str(current[i].get("content") or "").strip() == str(old_messages[i].get("content") or "").strip()
+        for i in range(len(old_messages))
+    )
+    return current[len(old_messages):] if prefix_ok else current[-4:]
+
+
+def _impact_sections(changed_groups: list[str], delta_text: str) -> list[str]:
+    mapping = {
+        "original_request": set(_DESIGN_SECTION_KEYS),
+        "ui": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
+        "backend": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
+        "llm": {"requirement_spec", "capability_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
+        "file_access": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan"},
+        "mcp": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "environment_plan"},
+        "database": {"requirement_spec", "capability_plan", "agent_architecture", "database_plan", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
+        "result": {"requirement_spec", "target_agent_workflow", "file_plan", "settings_plan"},
+        "processing": {"requirement_spec", "target_agent_workflow", "settings_plan", "environment_plan"},
+        "runtime": {"requirement_spec", "file_plan", "settings_plan", "environment_plan"},
+        "auth": {"requirement_spec", "capability_plan", "agent_architecture", "database_plan", "target_agent_workflow", "file_plan", "settings_plan"},
+        "manual_overrides": set(_DESIGN_SECTION_KEYS),
+    }
+    impacted: set[str] = set()
+    for group in changed_groups:
+        impacted.update(mapping.get(group, {"requirement_spec", "target_agent_workflow", "file_plan"}))
+    lower = str(delta_text or "").casefold()
+    if any(token in lower for token in ("redis", "postgres", "pgvector", "database", "db ", "테이블", "entity", "관계")):
+        impacted.update({"database_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"})
+    if any(token in lower for token in ("mcp", "tool", "api 연동", "외부 api")):
+        impacted.update({"tool_mcp_plan", "capability_plan", "agent_architecture", "target_agent_workflow", "file_plan"})
+    if any(token in lower for token in ("react", "streamlit", "ui", "화면")):
+        impacted.update({"agent_architecture", "target_agent_workflow", "file_plan", "settings_plan"})
+    return [key for key in _DESIGN_SECTION_KEYS if key in impacted] or ["requirement_spec", "target_agent_workflow"]
+
+
+def _needs_full_redesign(changed_groups: list[str], delta_text: str) -> bool:
+    lower = str(delta_text or "").casefold()
+    explicit = any(token in lower for token in (
+        "처음부터 다시", "전체 구조 변경", "아키텍처 전체", "목적을 변경",
+        "새 에이전트", "완전히 다른", "workflow 전체 변경",
+    ))
+    structural = {"original_request", "backend", "mcp", "database", "auth", "manual_overrides"}
+    structural_count = len(structural.intersection(changed_groups))
+    return explicit or structural_count >= 3
+
+
+async def design_agent_factory_incremental(
+    request: str,
+    project_context: dict | None = None,
+    provider: str | None = None,
+    previous_design: dict | None = None,
+    previous_confirmed_requirements: dict | None = None,
+    current_confirmed_requirements: dict | None = None,
+    interview_messages: list[dict] | None = None,
+) -> dict:
+    previous_sections = _preview_design_sections(previous_design)
+    if not any(previous_sections.values()):
+        result = await design_agent_factory(request, project_context, provider)
+        result.setdefault("design_runtime", {})["incremental_revision"] = {
+            "mode": "FULL_INITIAL",
+            "llm_called": True,
+            "changed_groups": [],
+            "affected_sections": list(_DESIGN_SECTION_KEYS),
+            "reused_sections": [],
+        }
+        return result
+
+    changed_groups = _changed_requirement_groups(previous_confirmed_requirements, current_confirmed_requirements)
+    delta_messages = _new_interview_messages(previous_design, interview_messages)
+    delta_text = "\n".join(str(item.get("content") or "") for item in delta_messages if isinstance(item, dict)).strip()
+
+    if not changed_groups and not delta_text:
+        result = _clone_json(previous_sections)
+        runtime = _clone_json((previous_design or {}).get("design_runtime") or {})
+        runtime["incremental_revision"] = {
+            "mode": "FULL_REUSE",
+            "llm_called": False,
+            "changed_groups": [],
+            "affected_sections": [],
+            "reused_sections": list(_DESIGN_SECTION_KEYS),
+        }
+        result["design_runtime"] = runtime
+        return result
+
+    if _needs_full_redesign(changed_groups, delta_text):
+        result = await design_agent_factory(request, project_context, provider)
+        result.setdefault("design_runtime", {})["incremental_revision"] = {
+            "mode": "FULL_REDESIGN",
+            "llm_called": True,
+            "changed_groups": changed_groups,
+            "delta_messages": len(delta_messages),
+            "change_request": delta_text[:4000],
+            "affected_sections": list(_DESIGN_SECTION_KEYS),
+            "reused_sections": [],
+        }
+        return result
+
+    affected = _impact_sections(changed_groups, delta_text)
+    reused = [key for key in _DESIGN_SECTION_KEYS if key not in affected]
+    llm = model_for_task(LLMTask.WORKFLOW_DESIGN, provider)
+    previous_subset = {key: previous_sections.get(key) or {} for key in affected}
+    change_payload = {
+        "changed_requirement_groups": changed_groups,
+        "changed_confirmed_requirements": {
+            key: (current_confirmed_requirements or {}).get(key) for key in changed_groups
+        },
+        "new_interview_messages": delta_messages,
+    }
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(content=(
+                "당신은 THEANOVA AgentStudio의 증분 설계 수정 엔진입니다. 반드시 JSON 하나만 반환하세요. "
+                "전체 Agent를 처음부터 다시 설계하지 말고, 지정된 affected_sections만 수정하십시오. "
+                "변경되지 않은 구조/Workflow/DB/File Plan은 보존합니다. "
+                "반환 형식: {\"updated_sections\": {\"section_name\": {...}}, \"summary\": \"...\"}. "
+                "updated_sections에는 요청받은 section만 포함하십시오. 기존 요구사항과 충돌하는 변경은 최신 사용자 변경을 우선합니다."
+            )),
+            HumanMessage(content=(
+                "[이번 변경분만]\n" + json.dumps(change_payload, ensure_ascii=False, indent=2)
+                + "\n\n[수정 대상 section]\n" + json.dumps(affected, ensure_ascii=False)
+                + "\n\n[기존 수정 대상 설계]\n" + json.dumps(previous_subset, ensure_ascii=False, indent=2)
+                + "\n\n[현재 프로젝트 요약]\n" + json.dumps(project_context or {}, ensure_ascii=False, indent=2)
+            )),
+        ])
+        parsed = _extract_json(str(response.content))
+        updates = parsed.get("updated_sections") if isinstance(parsed, dict) else None
+        if not isinstance(updates, dict):
+            raise ValueError("증분 설계 결과에 updated_sections가 없습니다.")
+        result = _clone_json(previous_sections)
+        for key in affected:
+            if isinstance(updates.get(key), dict):
+                result[key] = updates[key]
+        _sanitize_requirement_spec(result, request)
+        result = _enforce_workflow_requirement_coverage(result, request)
+        runtime = _clone_json((previous_design or {}).get("design_runtime") or {})
+        if "database_plan" in affected:
+            result["database_plan"] = build_database_plan(request, result)
+            if result["database_plan"].get("enabled"):
+                db_llm = model_for_task(LLMTask.DATABASE_SCHEMA_DESIGN, provider)
+                try:
+                    db_response = await db_llm.ainvoke([
+                        SystemMessage(content=(
+                            "당신은 PostgreSQL 증분 데이터 모델링 전문가입니다. 반드시 JSON 하나만 반환하세요. "
+                            "전체 DB를 재설계하지 말고 이번 변경에 필요한 custom business Entity/관계만 수정/추가하십시오. "
+                            "표준 Module 테이블은 AgentStudio가 보강하므로 중복 제안하지 마십시오. "
+                            "반환 형식: {\"custom_tables\": [...], \"custom_design_notes\": [...]}"
+                        )),
+                        HumanMessage(content=(
+                            "[이번 DB 변경분]\n" + json.dumps(change_payload, ensure_ascii=False, indent=2)
+                            + "\n\n[현재 Requirement/Architecture]\n"
+                            + json.dumps({
+                                "requirement_spec": result.get("requirement_spec") or {},
+                                "capability_plan": result.get("capability_plan") or {},
+                                "agent_architecture": result.get("agent_architecture") or {},
+                                "current_database_plan": result.get("database_plan") or {},
+                            }, ensure_ascii=False, indent=2)
+                        )),
+                    ])
+                    db_parsed = _extract_json(str(db_response.content))
+                    raw_db = dict(result.get("database_plan") or {})
+                    if isinstance(db_parsed, dict):
+                        raw_db["custom_tables"] = db_parsed.get("custom_tables") or raw_db.get("custom_tables") or []
+                        raw_db["custom_design_notes"] = db_parsed.get("custom_design_notes") or raw_db.get("custom_design_notes") or []
+                    result["database_plan"] = raw_db
+                    result["database_plan"] = build_database_plan(request, result)
+                    runtime["database_provider"] = getattr(db_llm, "last_provider", "")
+                    runtime["database_task"] = LLMTask.DATABASE_SCHEMA_DESIGN.value
+                except Exception as db_exc:
+                    runtime["database_provider"] = "deterministic_fallback"
+                    runtime["database_error"] = f"{type(db_exc).__name__}: {db_exc}"
+        runtime["workflow_provider"] = getattr(llm, "last_provider", "")
+        runtime["incremental_revision"] = {
+            "mode": "PARTIAL_REVISE",
+            "llm_called": True,
+            "changed_groups": changed_groups,
+            "delta_messages": len(delta_messages),
+            "change_request": delta_text[:4000],
+            "changed_values": {key: (current_confirmed_requirements or {}).get(key) for key in changed_groups},
+            "affected_sections": affected,
+            "reused_sections": reused,
+            "summary": str(parsed.get("summary") or ""),
+        }
+        result["design_runtime"] = runtime
+        return result
+    except Exception as exc:
+        # Correctness wins over reuse when the focused revision cannot be parsed.
+        result = await design_agent_factory(request, project_context, provider)
+        result.setdefault("design_runtime", {})["incremental_revision"] = {
+            "mode": "FULL_REDESIGN_FALLBACK",
+            "llm_called": True,
+            "changed_groups": changed_groups,
+            "affected_sections": affected,
+            "reused_sections": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        return result
+

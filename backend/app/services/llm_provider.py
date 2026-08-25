@@ -13,6 +13,11 @@ def get_chat_model(provider: str | None = None):
     configure_langsmith()
     provider = (provider or s.llm_provider).lower()
 
+    # v5.315: explicit provider="openai" from older UI/API callers is also
+    # forced to Ollama while OpenAI is disabled. There is no paid-provider fallback.
+    if not s.openai_enabled:
+        provider = "ollama"
+
     if provider == "openai":
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(model=s.openai_model, api_key=s.openai_api_key or None, temperature=0)

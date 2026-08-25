@@ -4,6 +4,10 @@ def get_embedding_model():
     s = get_settings()
     provider = s.memory_embedding_provider.lower()
 
+    # v5.315: OpenAI disabled means embeddings also remain fully local.
+    if not s.openai_enabled:
+        provider = "ollama"
+
     if provider == "openai":
         from langchain_openai import OpenAIEmbeddings
         return OpenAIEmbeddings(

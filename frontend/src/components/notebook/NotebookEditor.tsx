@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import Editor from '@monaco-editor/react'
 import { getEditorModelPath } from '../../utils/editor'
 import { notebookKernelLanguage, parseNotebookDocument, textToNotebookSource } from '../../utils/notebook'
@@ -47,6 +47,20 @@ interface RememberedCellSelection {
   text: string
 }
 
+// NotebookEditor is conditionally mounted by App.jsx. Switching from an .ipynb
+// file to another editor type (SQL, source code, diagram, etc.) unmounts this
+// component, so component-local scroll state would be lost. Keep the outer
+// notebook scroll position at module scope, keyed by project + file path, so
+// returning to the notebook restores the exact viewport during this app run.
+const NOTEBOOK_SCROLL_POSITIONS = new Map<string, number>()
+
+function notebookScrollKey(projectRoot?: string, filePath?: string): string {
+  const path = String(filePath || '').trim().replace(/\\/g, '/')
+  if (!path) return ''
+  const root = String(projectRoot || '').trim().replace(/\\/g, '/')
+  return `${root}::${path}`
+}
+
 export interface NotebookEditorProps {
   value: string
   filePath?: string
@@ -90,6 +104,8 @@ export function NotebookEditor({
   onEditorFocus,
 }: NotebookEditorProps) {
   const parsed = React.useMemo(() => parseNotebookDocument(value), [value])
+  const shellRef = useRef<HTMLDivElement | null>(null)
+  const scrollKey = React.useMemo(() => notebookScrollKey(projectRoot, filePath), [projectRoot, filePath])
   const cellEditorsRef = useRef<Record<number, NotebookMonacoEditorLike | undefined>>({})
   const cellSelectionsRef = useRef<Record<number, RememberedCellSelection | undefined>>({})
   const [editingMarkdown, setEditingMarkdown] = useState<Record<number, boolean>>({})
@@ -112,6 +128,49 @@ export function NotebookEditor({
   useEffect(() => {
     cellSelectionsRef.current = {}
   }, [filePath])
+
+  useLayoutEffect(() => {
+    if (!scrollKey) return
+    const remembered = NOTEBOOK_SCROLL_POSITIONS.get(scrollKey)
+    if (remembered == null) return
+
+    let cancelled = false
+    let firstFrame = 0
+    let secondFrame = 0
+    let settleTimer = 0
+
+    const restore = () => {
+      if (cancelled) return
+      const shell = shellRef.current
+      if (!shell) return
+      const maxScrollTop = Math.max(0, shell.scrollHeight - shell.clientHeight)
+      shell.scrollTop = Math.min(Math.max(0, remembered), maxScrollTop)
+    }
+
+    // Restore once before paint, then again after Monaco/cell layout settles.
+    // The repeated restore matters for long notebooks whose scrollHeight grows
+    // during the first layout frames.
+    restore()
+    firstFrame = window.requestAnimationFrame(() => {
+      restore()
+      secondFrame = window.requestAnimationFrame(restore)
+    })
+    settleTimer = window.setTimeout(restore, 80)
+
+    return () => {
+      const shell = shellRef.current
+      if (shell) NOTEBOOK_SCROLL_POSITIONS.set(scrollKey, Math.max(0, shell.scrollTop))
+      cancelled = true
+      if (firstFrame) window.cancelAnimationFrame(firstFrame)
+      if (secondFrame) window.cancelAnimationFrame(secondFrame)
+      if (settleTimer) window.clearTimeout(settleTimer)
+    }
+  }, [scrollKey, parsed.ok])
+
+  const rememberOuterScroll = (scrollTop: number) => {
+    if (!scrollKey) return
+    NOTEBOOK_SCROLL_POSITIONS.set(scrollKey, Math.max(0, Number(scrollTop) || 0))
+  }
 
   const commitNotebook = (notebook: NotebookDocument) => {
     const serialized = JSON.stringify(notebook, null, 1) + '\n'
@@ -378,11 +437,18 @@ export function NotebookEditor({
   }
 
   if (!parsed.ok) {
-    return <div className="notebook-editor-shell notebook-invalid">
+    const agentStudioPlaceholder = /^\s*\/\/\s*파일을 선택하세요\.?\s*$/.test(String(value || ''))
+    return <div
+      ref={shellRef}
+      className="notebook-editor-shell notebook-invalid"
+      onScroll={event => rememberOuterScroll(event.currentTarget.scrollTop)}
+    >
       <div className="notebook-invalid-banner">
-        <strong>Notebook 보기로 열 수 없습니다.</strong>
+        <strong>{agentStudioPlaceholder ? 'Notebook 원본 내용이 손상되었을 수 있습니다.' : 'Notebook 보기로 열 수 없습니다.'}</strong>
         <span>{parsed.error}</span>
-        <small>원본 JSON을 수정하면 유효한 .ipynb 형식이 되는 즉시 Notebook 보기로 전환됩니다.</small>
+        <small>{agentStudioPlaceholder
+          ? '로드 완료 후에도 이 문구가 보이면 디스크의 .ipynb 내용 자체가 AgentStudio의 과거 기본 placeholder로 바뀐 상태일 수 있습니다. 저장하지 말고 원본/백업/.ipynb_checkpoints 파일을 확인하세요.'
+          : '원본 JSON을 수정하면 유효한 .ipynb 형식이 되는 즉시 Notebook 보기로 전환됩니다.'}</small>
       </div>
       <Editor
         className="main-monaco-editor"
@@ -401,7 +467,9 @@ export function NotebookEditor({
   const kernel = notebookKernelLanguage(notebook)
 
   return <div
+    ref={shellRef}
     className="notebook-editor-shell"
+    onScroll={event => rememberOuterScroll(event.currentTarget.scrollTop)}
     onMouseDownCapture={() => onEditorFocus?.()}
     onFocusCapture={() => onEditorFocus?.()}
   >

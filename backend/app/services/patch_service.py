@@ -365,13 +365,43 @@ def _parse_patch_result(result) -> dict:
     return json.loads(text)
 
 
+def _patch_task_for_request(
+    request: str,
+    files: dict[str, str],
+    project_scope: bool,
+    task_override: LLMTask | None = None,
+) -> LLMTask:
+    if task_override is not None:
+        return task_override
+
+    text = str(request or "").casefold()
+    debug_markers = (
+        "test failure", "test_failed", "debug", "디버그", "디버깅",
+        "오류 수정", "실행 오류", "실패 진단", "repair", "복구",
+    )
+    if any(marker in text for marker in debug_markers):
+        return LLMTask.EXECUTION_DEBUG_REPAIR
+
+    multi_file_markers = (
+        "다중 파일", "여러 파일", "프로젝트 전체", "대규모", "전체 코드",
+        "agent factory 설계 결과", "필수 code plan", "code plan 자동 보강",
+        "architecture", "아키텍처", "refactor", "리팩터", "migration", "마이그레이션",
+    )
+    if len(files or {}) >= 2 or (project_scope and any(marker in text for marker in multi_file_markers)):
+        return LLMTask.MULTI_FILE_CODE_CHANGE
+
+    return LLMTask.PATCH_GENERATION
+
+
 async def create_patch(
     request: str,
     files: dict[str, str],
     provider: str | None = None,
     project_scope: bool = True,
+    task_override: LLMTask | None = None,
 ) -> dict:
-    llm = model_for_task(LLMTask.PATCH_GENERATION)
+    task = _patch_task_for_request(request, files, project_scope, task_override)
+    llm = model_for_task(task, provider)
 
     coding_style = coding_rules_for_request(
         request=request,

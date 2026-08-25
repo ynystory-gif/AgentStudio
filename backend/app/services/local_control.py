@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from threading import RLock
 
+from watchfiles import Change, awatch
+
 from app.core.config import get_settings
 
 
@@ -377,6 +379,81 @@ async def get_file_hash_states(root: str, relative_paths: list[str]):
         return rows
 
     return {"files": await asyncio.to_thread(_scan)}
+
+
+def validate_project_root(root: str) -> str:
+    """Validate and normalize a project root without scanning its contents."""
+    return str(_allowed(root))
+
+
+def _watch_project_path_allowed(base: Path, raw_path: str) -> tuple[bool, str]:
+    """Return whether a native filesystem event belongs to the visible project tree."""
+    try:
+        relative = Path(os.path.relpath(str(raw_path), str(base))).as_posix()
+    except (TypeError, ValueError, OSError):
+        return False, ""
+
+    if not relative or relative == "." or relative.startswith("../"):
+        return False, ""
+
+    parts = Path(relative).parts
+    if any(_is_ignored_project_dir_name(part) for part in parts[:-1]):
+        return False, ""
+
+    name = str(parts[-1] if parts else "")
+    # AgentStudio notebook atomic-save temporary files are implementation details.
+    if ".agentstudio-" in name and name.endswith(".tmp"):
+        return False, ""
+
+    return True, relative
+
+
+async def watch_project_changes(root: str):
+    """Yield project filesystem changes from native OS notifications.
+
+    v5.333 replaces the old 1.5 second whole-project snapshot polling. On
+    Windows watchfiles uses native filesystem notifications, so an idle
+    AgentStudio workspace no longer traverses the project tree or reads open
+    files repeatedly just to discover whether something changed.
+    """
+    base = _allowed(root)
+
+    def _filter(change: Change, path: str) -> bool:
+        allowed, _relative = _watch_project_path_allowed(base, path)
+        return allowed
+
+    async for changes in awatch(
+        str(base),
+        recursive=True,
+        watch_filter=_filter,
+        debounce=300,
+        step=50,
+        raise_interrupt=False,
+    ):
+        merged: dict[str, str] = {}
+        priority = {"modified": 1, "added": 2, "deleted": 3}
+
+        for change, raw_path in changes:
+            allowed, relative = _watch_project_path_allowed(base, raw_path)
+            if not allowed or not relative:
+                continue
+
+            if change == Change.added:
+                kind = "added"
+            elif change == Change.deleted:
+                kind = "deleted"
+            else:
+                kind = "modified"
+
+            previous = merged.get(relative)
+            if previous is None or priority[kind] >= priority[previous]:
+                merged[relative] = kind
+
+        if merged:
+            yield [
+                {"kind": kind, "path": relative}
+                for relative, kind in sorted(merged.items())
+            ]
 
 
 async def project_file_snapshot(root: str):

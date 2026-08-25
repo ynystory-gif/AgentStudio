@@ -138,6 +138,7 @@ def _default_profile(db_type: str = "postgresql") -> dict[str, Any]:
         "db_type": "postgresql",
         "host": "127.0.0.1",
         "port": 5432,
+        "schema_name": "public",
         "username": "postgres",
     }
 
@@ -168,7 +169,9 @@ def _sanitized_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
     result["db_type"] = kind
     result["connection_id"] = str(result.get("connection_id") or "").strip()
     result["name"] = str(result.get("name") or _default_connection_name(kind)).strip() or _default_connection_name(kind)
-    result["schema_name"] = str(result.get("schema_name") or ("public" if kind == "supabase" else "")).strip()
+    result["schema_name"] = str(
+        result.get("schema_name") or ("public" if kind in {"postgresql", "supabase"} else "")
+    ).strip()
     return result
 
 
@@ -778,28 +781,41 @@ def _connect_postgresql(profile: dict[str, Any], password: str):
     if ssl_mode:
         kwargs["sslmode"] = ssl_mode
     conn = psycopg.connect(**kwargs)
-    if str(profile.get("db_type") or "").lower() == "supabase":
+    db_type = str(profile.get("db_type") or "").lower()
+    if db_type in {"postgresql", "supabase"}:
         schema_name = str(profile.get("schema_name") or "public").strip() or "public"
+        provider_label = "Supabase" if db_type == "supabase" else "PostgreSQL"
         try:
             from psycopg import sql as psycopg_sql
             with conn.cursor() as cur:
                 cur.execute("SELECT to_regnamespace(%s) IS NOT NULL", (schema_name,))
                 exists = bool(cur.fetchone()[0])
                 if not exists:
-                    raise RuntimeError(f"Supabase Schema를 찾을 수 없습니다: {schema_name}")
+                    raise RuntimeError(f"{provider_label} Schema를 찾을 수 없습니다: {schema_name}")
+
                 if schema_name == "public":
-                    cur.execute("SET search_path TO public, extensions")
-                else:
+                    if db_type == "supabase":
+                        cur.execute("SET search_path TO public, extensions")
+                    else:
+                        cur.execute("SET search_path TO public")
+                elif db_type == "supabase":
                     cur.execute(
                         psycopg_sql.SQL("SET search_path TO {}, extensions, public").format(
                             psycopg_sql.Identifier(schema_name)
                         )
                     )
+                else:
+                    cur.execute(
+                        psycopg_sql.SQL("SET search_path TO {}, public").format(
+                            psycopg_sql.Identifier(schema_name)
+                        )
+                    )
+
                 cur.execute("SELECT current_schema()")
                 active_schema = str(cur.fetchone()[0] or "")
                 if active_schema != schema_name:
                     raise RuntimeError(
-                        f"Supabase Schema 적용 확인 실패: 기대={schema_name}, 실제={active_schema or '-'}"
+                        f"{provider_label} Schema 적용 확인 실패: 기대={schema_name}, 실제={active_schema or '-'}"
                     )
             conn.commit()
         except Exception as exc:
@@ -808,7 +824,7 @@ def _connect_postgresql(profile: dict[str, Any], password: str):
             except Exception:
                 pass
             raise RuntimeError(
-                f"Supabase Schema search_path 적용 실패: {schema_name}. "
+                f"{provider_label} Schema search_path 적용 실패: {schema_name}. "
                 f"스키마 이름/USAGE 권한을 확인하세요. ({exc})"
             ) from exc
     return conn
@@ -1345,6 +1361,7 @@ def execute(root: str, sql: str, max_rows: int = 1000) -> dict[str, Any]:
         total_affected = 0
         total_selected = 0
         statement_results: list[dict[str, Any]] = []
+        result_sets: list[dict[str, Any]] = []
 
         for index, current in enumerate(statements, start=1):
             try:
@@ -1370,7 +1387,18 @@ def execute(root: str, sql: str, max_rows: int = 1000) -> dict[str, Any]:
                 item_rows = [[_json_safe(cell) for cell in row] for row in fetched]
                 item_row_count = len(item_rows)
                 total_selected += item_row_count
-                # Data Output shows the most recent result set, like common DB tools.
+                # Keep every SELECT result so the frontend can expose one tab per
+                # result set. The legacy top-level columns/rows still point to the
+                # most recent result for backward compatibility.
+                result_sets.append({
+                    "result_index": len(result_sets) + 1,
+                    "statement_index": index,
+                    "sql": " ".join(current.strip().split())[:500],
+                    "columns": item_columns,
+                    "rows": item_rows,
+                    "row_count": item_row_count,
+                    "truncated": item_truncated,
+                })
                 columns = item_columns
                 rows = item_rows
                 truncated = item_truncated
@@ -1407,10 +1435,10 @@ def execute(root: str, sql: str, max_rows: int = 1000) -> dict[str, Any]:
                 message += f" · 영향받은 행 {total_affected:,}개"
             if total_selected:
                 message += f" · 조회 행 {total_selected:,}개"
-            if columns:
-                message += " · Data Output에는 마지막 조회 결과를 표시합니다."
-            if truncated:
-                message += f" 최대 {max_rows:,}행까지만 표시합니다."
+            if result_sets:
+                message += f" · 조회 결과 {len(result_sets):,}개"
+            if any(bool(item.get("truncated")) for item in result_sets):
+                message += f" · 각 조회는 최대 {max_rows:,}행까지만 표시합니다."
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         return {
@@ -1425,6 +1453,8 @@ def execute(root: str, sql: str, max_rows: int = 1000) -> dict[str, Any]:
             "db_type": db_type,
             "statement_count": len(statements),
             "statement_results": statement_results,
+            "result_set_count": len(result_sets),
+            "result_sets": result_sets,
         }
     except Exception:
         try:
@@ -1497,6 +1527,18 @@ def _metadata_rows(conn: Any, statement: str) -> list[tuple[Any, ...]]:
     cursor = conn.cursor()
     try:
         cursor.execute(statement)
+        return list(cursor.fetchall() or [])
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+
+
+def _metadata_rows_params(conn: Any, statement: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
+    cursor = conn.cursor()
+    try:
+        cursor.execute(statement, params)
         return list(cursor.fetchall() or [])
     finally:
         try:
@@ -3300,6 +3342,313 @@ def _build_table_ddl_script(conn: Any, db_type: str, schema: str, name: str) -> 
         return _oracle_table_ddl(conn, schema, name)
     return _postgresql_table_ddl(conn, schema, name)
 
+
+def _postgresql_table_primary_keys(conn: Any, schema: str, name: str) -> set[str]:
+    rows = _metadata_rows_params(conn, """
+        SELECT att.attname
+          FROM pg_index idx
+          JOIN pg_class tbl ON tbl.oid = idx.indrelid
+          JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
+          JOIN LATERAL unnest(idx.indkey) WITH ORDINALITY AS keycol(attnum, ord) ON TRUE
+          JOIN pg_attribute att ON att.attrelid = tbl.oid AND att.attnum = keycol.attnum
+         WHERE idx.indisprimary
+           AND ns.nspname = %s
+           AND tbl.relname = %s
+         ORDER BY keycol.ord
+    """, (schema, name))
+    return {str(row[0]) for row in rows if row and row[0] is not None}
+
+
+def _postgresql_table_relationships(conn: Any, schema: str, name: str) -> list[dict[str, Any]]:
+    rows = _metadata_rows_params(conn, """
+        SELECT con.conname,
+               src_ns.nspname AS source_schema,
+               src.relname AS source_table,
+               dst_ns.nspname AS target_schema,
+               dst.relname AS target_table,
+               array_agg(src_att.attname ORDER BY src_key.ord) AS source_columns,
+               array_agg(dst_att.attname ORDER BY src_key.ord) AS target_columns
+          FROM pg_constraint con
+          JOIN pg_class src ON src.oid = con.conrelid
+          JOIN pg_namespace src_ns ON src_ns.oid = src.relnamespace
+          JOIN pg_class dst ON dst.oid = con.confrelid
+          JOIN pg_namespace dst_ns ON dst_ns.oid = dst.relnamespace
+          JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS src_key(attnum, ord) ON TRUE
+          JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS dst_key(attnum, ord) ON dst_key.ord = src_key.ord
+          JOIN pg_attribute src_att ON src_att.attrelid = src.oid AND src_att.attnum = src_key.attnum
+          JOIN pg_attribute dst_att ON dst_att.attrelid = dst.oid AND dst_att.attnum = dst_key.attnum
+         WHERE con.contype = 'f'
+           AND ((src_ns.nspname = %s AND src.relname = %s)
+             OR (dst_ns.nspname = %s AND dst.relname = %s))
+         GROUP BY con.oid, con.conname, src_ns.nspname, src.relname, dst_ns.nspname, dst.relname
+         ORDER BY src_ns.nspname, src.relname, con.conname
+    """, (schema, name, schema, name))
+    relationships: list[dict[str, Any]] = []
+    for constraint, source_schema, source_table, target_schema, target_table, source_columns, target_columns in rows:
+        relationships.append({
+            'name': str(constraint or ''),
+            'from_schema': str(source_schema or ''),
+            'from_name': str(source_table or ''),
+            'from_table': _qualified_name(str(source_schema), str(source_table)),
+            'from_columns': [str(value) for value in (source_columns or [])],
+            'to_schema': str(target_schema or ''),
+            'to_name': str(target_table or ''),
+            'to_table': _qualified_name(str(target_schema), str(target_table)),
+            'to_columns': [str(value) for value in (target_columns or [])],
+        })
+    return relationships
+
+
+
+def _postgresql_schema_relationships(conn: Any, schema: str) -> list[dict[str, Any]]:
+    """Return FK relationships whose source and target tables are both inside one schema."""
+    rows = _metadata_rows_params(conn, """
+        SELECT con.conname,
+               src_ns.nspname AS source_schema,
+               src.relname AS source_table,
+               dst_ns.nspname AS target_schema,
+               dst.relname AS target_table,
+               array_agg(src_att.attname ORDER BY src_key.ord) AS source_columns,
+               array_agg(dst_att.attname ORDER BY src_key.ord) AS target_columns
+          FROM pg_constraint con
+          JOIN pg_class src ON src.oid = con.conrelid
+          JOIN pg_namespace src_ns ON src_ns.oid = src.relnamespace
+          JOIN pg_class dst ON dst.oid = con.confrelid
+          JOIN pg_namespace dst_ns ON dst_ns.oid = dst.relnamespace
+          JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS src_key(attnum, ord) ON TRUE
+          JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS dst_key(attnum, ord) ON dst_key.ord = src_key.ord
+          JOIN pg_attribute src_att ON src_att.attrelid = src.oid AND src_att.attnum = src_key.attnum
+          JOIN pg_attribute dst_att ON dst_att.attrelid = dst.oid AND dst_att.attnum = dst_key.attnum
+         WHERE con.contype = 'f'
+           AND src_ns.nspname = %s
+           AND dst_ns.nspname = %s
+         GROUP BY con.oid, con.conname, src_ns.nspname, src.relname, dst_ns.nspname, dst.relname
+         ORDER BY src.relname, dst.relname, con.conname
+    """, (schema, schema))
+    relationships: list[dict[str, Any]] = []
+    for constraint, source_schema, source_table, target_schema, target_table, source_columns, target_columns in rows:
+        relationships.append({
+            'name': str(constraint or ''),
+            'from_schema': str(source_schema or ''),
+            'from_name': str(source_table or ''),
+            'from_table': _qualified_name(str(source_schema), str(source_table)),
+            'from_columns': [str(value) for value in (source_columns or [])],
+            'to_schema': str(target_schema or ''),
+            'to_name': str(target_table or ''),
+            'to_table': _qualified_name(str(target_schema), str(target_table)),
+            'to_columns': [str(value) for value in (target_columns or [])],
+        })
+    return relationships
+
+
+def _postgresql_schema_primary_keys(conn: Any, schema: str) -> dict[str, set[str]]:
+    """Load every primary-key column in one schema with a single catalog query."""
+    rows = _metadata_rows_params(conn, """
+        SELECT tbl.relname,
+               att.attname
+          FROM pg_index idx
+          JOIN pg_class tbl ON tbl.oid = idx.indrelid
+          JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
+          JOIN LATERAL unnest(idx.indkey) WITH ORDINALITY AS keycol(attnum, ord) ON TRUE
+          JOIN pg_attribute att ON att.attrelid = tbl.oid AND att.attnum = keycol.attnum
+         WHERE idx.indisprimary
+           AND ns.nspname = %s
+         ORDER BY tbl.relname, keycol.ord
+    """, (schema,))
+    result: dict[str, set[str]] = {}
+    for table_name, column_name in rows:
+        result.setdefault(str(table_name), set()).add(str(column_name))
+    return result
+
+def _postgresql_diagram_table_payload(
+    conn: Any,
+    object_index: dict[tuple[str, str], dict[str, Any]],
+    schema: str,
+    name: str,
+    relationships: list[dict[str, Any]],
+    primary_keys: set[str] | None = None,
+) -> dict[str, Any]:
+    item = object_index.get((schema, name))
+    if item is None:
+        raise ValueError(f'다이어그램 대상 테이블 메타데이터를 찾지 못했습니다: {schema}.{name}')
+    primary_keys = primary_keys if primary_keys is not None else _postgresql_table_primary_keys(conn, schema, name)
+    qualified = _qualified_name(schema, name)
+    foreign_keys = {
+        column
+        for relationship in relationships
+        if relationship.get('from_table') == qualified
+        for column in (relationship.get('from_columns') or [])
+    }
+    columns = []
+    for column in item.get('columns') or []:
+        if not isinstance(column, dict):
+            continue
+        column_name = str(column.get('name') or '')
+        columns.append({
+            'name': column_name,
+            'data_type': str(column.get('data_type') or ''),
+            'nullable': bool(column.get('nullable')),
+            'primary_key': column_name in primary_keys,
+            'foreign_key': column_name in foreign_keys,
+        })
+    return {
+        'id': qualified,
+        'schema': schema,
+        'name': name,
+        'columns': columns,
+    }
+
+
+def create_table_diagram(root: str, schema: str, name: str) -> dict[str, Any]:
+    """Create a temporary PostgreSQL/Supabase ERD document for one table and its direct FK neighbours."""
+    runtime = _require_active_runtime(root)
+    objects, _item, category = _find_database_object(root, schema, 'tables', name)
+    if category != 'tables':
+        raise ValueError('테이블 객체만 다이어그램을 생성할 수 있습니다.')
+    db_type = str(objects.get('db_type') or 'postgresql').lower()
+    if db_type not in {'postgresql', 'supabase'}:
+        raise ValueError('테이블 다이어그램은 PostgreSQL / Supabase PostgreSQL 연결에서 지원합니다.')
+
+    conn = runtime['connection']
+    relationships = _postgresql_table_relationships(conn, schema, name)
+    object_index: dict[tuple[str, str], dict[str, Any]] = {}
+    for schema_bucket in objects.get('schemas') or []:
+        schema_name = str(schema_bucket.get('name') or '')
+        for table in schema_bucket.get('tables') or []:
+            if isinstance(table, dict):
+                object_index[(schema_name, str(table.get('name') or ''))] = table
+
+    selected_id = _qualified_name(schema, name)
+    neighbour_keys: list[tuple[str, str]] = []
+    for relationship in relationships:
+        for schema_key, name_key in (('from_schema', 'from_name'), ('to_schema', 'to_name')):
+            neighbour_schema = str(relationship.get(schema_key) or '')
+            neighbour_name = str(relationship.get(name_key) or '')
+            key = (neighbour_schema, neighbour_name)
+            if neighbour_schema and neighbour_name and key != (schema, name) and key not in neighbour_keys:
+                neighbour_keys.append(key)
+
+    tables = [_postgresql_diagram_table_payload(conn, object_index, schema, name, relationships)]
+    for neighbour_schema, neighbour_name in neighbour_keys:
+        try:
+            tables.append(_postgresql_diagram_table_payload(
+                conn, object_index, neighbour_schema, neighbour_name, relationships
+            ))
+        except ValueError:
+            continue
+
+    profile = _sanitized_profile(runtime.get('profile'))
+    payload = {
+        'version': 1,
+        'kind': 'database_table_diagram',
+        'db_type': db_type,
+        'database': str(profile.get('database') or objects.get('database') or ''),
+        'root_table': selected_id,
+        'generated_at': datetime.now().isoformat(timespec='seconds'),
+        'tables': tables,
+        'relationships': relationships,
+    }
+
+    project_root = Path(_project_key(root)).resolve()
+    scratch_dir = project_root / '.agentstudio' / 'sql_scratch'
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
+    scratch_name = f'diagram_{_scratch_safe_name(schema)}_{_scratch_safe_name(name)}_{timestamp}.agentdiag.json'
+    scratch_path = scratch_dir / scratch_name
+    content = json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
+    scratch_path.write_text(content, encoding='utf-8', newline='\n')
+    return {
+        'ok': True,
+        'action': 'diagram',
+        'db_type': db_type,
+        'schema': schema,
+        'name': name,
+        'qualified_name': selected_id,
+        'relative_path': scratch_path.relative_to(project_root).as_posix(),
+        'table_count': len(tables),
+        'relationship_count': len(relationships),
+        'message': f'{selected_id} 테이블 다이어그램을 임시 탭으로 생성했습니다.',
+    }
+
+
+
+def create_schema_diagram(root: str, schema: str) -> dict[str, Any]:
+    """Create a temporary ERD document containing every table and FK inside one PostgreSQL schema."""
+    runtime = _require_active_runtime(root)
+    objects = list_database_objects(root)
+    db_type = str(objects.get('db_type') or 'postgresql').lower()
+    if db_type not in {'postgresql', 'supabase'}:
+        raise ValueError('스키마 전체 다이어그램은 PostgreSQL / Supabase PostgreSQL 연결에서 지원합니다.')
+
+    wanted_schema = str(schema or '').strip()
+    if not wanted_schema:
+        raise ValueError('다이어그램을 생성할 스키마를 선택하세요.')
+
+    schema_bucket = next(
+        (item for item in (objects.get('schemas') or []) if str(item.get('name') or '') == wanted_schema),
+        None,
+    )
+    if not isinstance(schema_bucket, dict):
+        raise ValueError(f'스키마를 찾을 수 없습니다: {wanted_schema}')
+
+    raw_tables = [item for item in (schema_bucket.get('tables') or []) if isinstance(item, dict)]
+    if not raw_tables:
+        raise ValueError(f'{wanted_schema} 스키마에 표시할 테이블이 없습니다.')
+
+    conn = runtime['connection']
+    relationships = _postgresql_schema_relationships(conn, wanted_schema)
+    primary_key_map = _postgresql_schema_primary_keys(conn, wanted_schema)
+    object_index: dict[tuple[str, str], dict[str, Any]] = {
+        (wanted_schema, str(item.get('name') or '')): item
+        for item in raw_tables
+        if str(item.get('name') or '')
+    }
+
+    tables: list[dict[str, Any]] = []
+    for item in sorted(raw_tables, key=lambda value: str(value.get('name') or '').lower()):
+        table_name = str(item.get('name') or '')
+        if not table_name:
+            continue
+        tables.append(_postgresql_diagram_table_payload(
+            conn,
+            object_index,
+            wanted_schema,
+            table_name,
+            relationships,
+            primary_keys=primary_key_map.get(table_name, set()),
+        ))
+
+    profile = _sanitized_profile(runtime.get('profile'))
+    payload = {
+        'version': 1,
+        'kind': 'database_schema_diagram',
+        'db_type': db_type,
+        'database': str(profile.get('database') or objects.get('database') or ''),
+        'schema_name': wanted_schema,
+        'root_table': tables[0]['id'] if tables else '',
+        'generated_at': datetime.now().isoformat(timespec='seconds'),
+        'tables': tables,
+        'relationships': relationships,
+    }
+
+    project_root = Path(_project_key(root)).resolve()
+    scratch_dir = project_root / '.agentstudio' / 'sql_scratch'
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
+    scratch_name = f'diagram_schema_{_scratch_safe_name(wanted_schema)}_{timestamp}.agentdiag.json'
+    scratch_path = scratch_dir / scratch_name
+    content = json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
+    scratch_path.write_text(content, encoding='utf-8', newline='\n')
+    return {
+        'ok': True,
+        'action': 'schema_diagram',
+        'db_type': db_type,
+        'schema': wanted_schema,
+        'relative_path': scratch_path.relative_to(project_root).as_posix(),
+        'table_count': len(tables),
+        'relationship_count': len(relationships),
+        'message': f'{wanted_schema} 스키마 전체 다이어그램을 임시 탭으로 생성했습니다. (테이블 {len(tables)}개, 관계 {len(relationships)}개)',
+    }
 
 def create_table_script(root: str, schema: str, name: str) -> dict[str, Any]:
     runtime = _require_active_runtime(root)
