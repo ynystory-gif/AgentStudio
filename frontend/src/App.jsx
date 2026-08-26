@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react'
+import React, { useEffect, useState, useRef, useMemo, useDeferredValue, memo } from 'react'
 import Editor, { DiffEditor } from '@monaco-editor/react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -20,12 +20,33 @@ import { WebBrowserWorkspace } from './components/browser/WebBrowserWorkspace'
 import { CodexPanel } from './components/codex/CodexPanel'
 import { CodexSettingsPanel } from './components/codex/CodexSettingsPanel'
 import { AiAttachmentPicker } from './components/ai/AiAttachmentPicker'
+import { AgentActivityProgress } from './components/ai/AgentActivityProgress'
 import { parseTerminalServerMessage, serializeTerminalClientMessage, terminalCellWidth, terminalNextCharacter, terminalPreviousCharacter } from './utils/terminal'
 import { getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isDatabaseDiagramFile, isNotebookFile, isPdfFile, isPresentationFile } from './utils/editor'
 import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSqlCode } from './utils/notebook'
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.356'
+const AGENTSTUDIO_FRONTEND_VERSION='5.368'
+
+const DebouncedProjectSearchInput=memo(function DebouncedProjectSearchInput({value,onCommit,placeholder='프로젝트 검색...'}){
+  const [localValue,setLocalValue]=useState(value||'')
+  useEffect(()=>{ setLocalValue(value||'') },[value])
+  useEffect(()=>{
+    const timer=window.setTimeout(()=>{
+      if((value||'')!==localValue) onCommit(localValue)
+    },180)
+    return()=>window.clearTimeout(timer)
+  },[localValue,value,onCommit])
+  return <input
+    className="project-search"
+    value={localValue}
+    onChange={event=>setLocalValue(event.target.value)}
+    placeholder={placeholder}
+    autoComplete="off"
+    spellCheck={false}
+  />
+})
+
 
 const joinWin = (root, file) => `${root}\\${file}`.replaceAll('\\\\', '\\')
 const localIsoDate = () => {
@@ -57,6 +78,301 @@ const sanitizeInterviewDisplayText=(value='')=>{
   })
   return text.trim()
 }
+const parseAttachmentSummarySections=(value='')=>{
+  const text=sanitizeInterviewDisplayText(value)
+  if(!text) return []
+  const sections=[]
+  let current={title:'AI 정리',lines:[]}
+  for(const rawLine of text.split(/\r?\n/)){
+    const line=String(rawLine||'').trim()
+    const heading=line.match(/^#{1,3}\s+(.+)$/)
+    if(heading){
+      if(current.lines.length||current.title!=='AI 정리') sections.push(current)
+      current={title:heading[1].trim(),lines:[]}
+      continue
+    }
+    if(line) current.lines.push(line.replace(/^[-*]\s+/,''))
+  }
+  if(current.lines.length||current.title!=='AI 정리') sections.push(current)
+  return sections
+}
+
+function AttachmentAnalysisSummaryCard({summary='',files=[],requirements=[],coverage={},compact=false,restored=false,onClear=null}){
+  const cardRef=useRef(null)
+  const resizeRef=useRef({active:false,pointerId:null,startY:0,startHeight:0,currentHeight:0})
+  const defaultPanelHeight=()=>{
+    const viewportHeight=typeof window!=='undefined'?window.innerHeight:900
+    return Math.round(Math.min(440,Math.max(280,viewportHeight*0.42)))
+  }
+  const readSavedPanelHeight=()=>{
+    if(compact) return null
+    try{
+      const stored=Number(window.localStorage.getItem('agentstudio.attachmentAnalysisSummaryHeight')||0)
+      if(Number.isFinite(stored)&&stored>=180) return stored
+    }catch{}
+    return defaultPanelHeight()
+  }
+  const [panelHeight,setPanelHeight]=useState(readSavedPanelHeight)
+  const clampPanelHeight=(value)=>{
+    const viewportHeight=typeof window!=='undefined'?window.innerHeight:900
+    const maximum=Math.max(260,Math.floor(viewportHeight*0.72))
+    return Math.round(Math.min(maximum,Math.max(180,Number(value)||defaultPanelHeight())))
+  }
+  const persistPanelHeight=(value)=>{
+    try{window.localStorage.setItem('agentstudio.attachmentAnalysisSummaryHeight',String(clampPanelHeight(value)))}catch{}
+  }
+  const resetPanelHeight=()=>{
+    if(compact) return
+    const next=defaultPanelHeight()
+    setPanelHeight(next)
+    persistPanelHeight(next)
+  }
+  const beginPanelResize=(event)=>{
+    if(compact) return
+    const currentHeight=cardRef.current?.getBoundingClientRect?.().height||panelHeight||defaultPanelHeight()
+    resizeRef.current={active:true,pointerId:event.pointerId,startY:event.clientY,startHeight:currentHeight,currentHeight}
+    try{event.currentTarget.setPointerCapture(event.pointerId)}catch{}
+    event.preventDefault()
+  }
+  const movePanelResize=(event)=>{
+    const state=resizeRef.current
+    if(compact||!state.active||state.pointerId!==event.pointerId) return
+    const next=clampPanelHeight(state.startHeight+(event.clientY-state.startY))
+    state.currentHeight=next
+    setPanelHeight(next)
+    event.preventDefault()
+  }
+  const endPanelResize=(event)=>{
+    const state=resizeRef.current
+    if(!state.active||state.pointerId!==event.pointerId) return
+    state.active=false
+    try{event.currentTarget.releasePointerCapture(event.pointerId)}catch{}
+    const finalHeight=clampPanelHeight(state.currentHeight||panelHeight||defaultPanelHeight())
+    setPanelHeight(finalHeight)
+    persistPanelHeight(finalHeight)
+    event.preventDefault()
+  }
+  const resizePanelFromKeyboard=(event)=>{
+    if(compact||!['ArrowUp','ArrowDown','Home'].includes(event.key)) return
+    event.preventDefault()
+    if(event.key==='Home'){
+      resetPanelHeight()
+      return
+    }
+    const step=event.shiftKey?80:32
+    const next=clampPanelHeight((panelHeight||defaultPanelHeight())+(event.key==='ArrowDown'?step:-step))
+    setPanelHeight(next)
+    persistPanelHeight(next)
+  }
+
+  const safeSummary=sanitizeInterviewDisplayText(summary)
+  const safeRequirements=(Array.isArray(requirements)?requirements:[])
+    .map(item=>({
+      id:String(item?.id||''),
+      category:String(item?.category||'FUNCTIONAL'),
+      text:sanitizeInterviewDisplayText(item?.text||''),
+      source:String(item?.source||''),
+      location:String(item?.location||''),
+      status:String(item?.status||''),
+    }))
+    .filter(item=>item.text)
+  if(!safeSummary&&!safeRequirements.length) return null
+  const sections=parseAttachmentSummarySections(safeSummary)
+  const safeFiles=(Array.isArray(files)?files:[])
+    .map(item=>({name:String(item?.name||''),path:String(item?.path||'')}))
+    .filter(item=>item.name||item.path)
+  const requirementCount=Number(coverage?.requirement_count||safeRequirements.length||0)
+  const categoryCounts=coverage?.categories&&typeof coverage.categories==='object'?coverage.categories:{}
+  return <div
+    ref={cardRef}
+    className={`attachment-ai-summary-card ${compact?'compact':'resizable'}`}
+    style={!compact&&panelHeight?{height:`${clampPanelHeight(panelHeight)}px`}:undefined}
+  >
+    <div className="attachment-ai-summary-head">
+      <div>
+        <strong>첨부 파일 AI 정리</strong>
+        <small>{restored?'이전 인터뷰에서 저장된 분석 결과':'문서 요구사항을 구조적으로 추출해 Context에 반영한 결과'}</small>
+      </div>
+      <div className="attachment-ai-summary-head-meta">
+        <span className="attachment-ai-summary-status">✓ 요구사항 {requirementCount||'-'}개</span>
+        {!compact&&<small>내부 스크롤 · 아래 조절선을 드래그해 높이 변경</small>}
+      </div>
+    </div>
+    <div className="attachment-ai-summary-scroll" tabIndex={compact?-1:0}>
+      {safeFiles.length>0&&<div className="attachment-ai-summary-files">
+        {safeFiles.slice(0,compact?4:12).map((item,index)=><span key={`${item.path||item.name}-${index}`} title={item.path||item.name}>{item.name||item.path}</span>)}
+        {compact&&safeFiles.length>4&&<span>+{safeFiles.length-4}개</span>}
+      </div>}
+      {safeSummary&&<div className="attachment-ai-summary-sections">
+        {sections.slice(0,compact?2:10).map((section,index)=><div className="attachment-ai-summary-section" key={`${section.title}-${index}`}>
+          <b>{section.title}</b>
+          {section.lines.length>0
+            ? <ul>{section.lines.slice(0,compact?2:12).map((line,lineIndex)=><li key={lineIndex}>{line}</li>)}</ul>
+            : <span>-</span>}
+        </div>)}
+      </div>}
+      {safeRequirements.length>0&&<div className="attachment-requirement-registry">
+        <div className="attachment-requirement-registry-head">
+          <div><b>추출 요구사항</b><span>Notebook Markdown·문제 문장·제약·기술 단서를 Requirement Registry로 보존합니다.</span></div>
+          {!compact&&<em>{Object.entries(categoryCounts).map(([key,value])=>`${key} ${value}`).slice(0,8).join(' · ')}</em>}
+        </div>
+        <div className="attachment-requirement-list">
+          {safeRequirements.slice(0,compact?5:60).map((item,index)=><div className="attachment-requirement-row" key={`${item.id}-${index}`} title={`${item.source}${item.location?` / ${item.location}`:''}`}>
+            <span>{item.id||`REQ-${index+1}`}</span>
+            <i>{item.category}</i>
+            <b>{item.text}</b>
+            {!compact&&<small>{item.source}{item.location?` · ${item.location}`:''}</small>}
+          </div>)}
+          {compact&&safeRequirements.length>5&&<div className="attachment-requirement-more">+ {safeRequirements.length-5}개 요구사항</div>}
+        </div>
+      </div>}
+    </div>
+    {!compact&&<div className="attachment-ai-summary-actions">
+      <button type="button" onClick={()=>{try{navigator.clipboard?.writeText([safeSummary,...safeRequirements.map(item=>`${item.id} [${item.category}] ${item.text}`)].filter(Boolean).join('\n'))}catch{}}}>정리 내용 복사</button>
+      <button type="button" onClick={resetPanelHeight}>기본 높이</button>
+      {typeof onClear==='function'&&<button type="button" className="danger" onClick={onClear}>첨부 분석 Context 지우기</button>}
+    </div>}
+    {!compact&&<div
+      className="attachment-ai-summary-resize-handle"
+      role="separator"
+      aria-orientation="horizontal"
+      aria-label="첨부 파일 AI 정리 창 높이 조절"
+      tabIndex={0}
+      title="위아래로 드래그해 높이를 조절합니다. 더블클릭하면 기본 높이로 돌아갑니다."
+      onPointerDown={beginPanelResize}
+      onPointerMove={movePanelResize}
+      onPointerUp={endPanelResize}
+      onPointerCancel={endPanelResize}
+      onDoubleClick={resetPanelHeight}
+      onKeyDown={resizePanelFromKeyboard}
+    ><span></span><em>높이 조절</em><span></span></div>}
+  </div>
+}
+
+
+const UI_LAYOUT_TEMPLATES=[
+  {id:'headless_agent',name:'UI 없음 / Headless Agent',category:'기타',description:'화면 없이 API·MCP·배치·Agent Runtime만 생성',app_type:'headless',navigation:'none',main_layout:'none',theme:'auto',components:['api','agent','tools'],header:false,sidebar:false,footer:false,user_menu:false,sidebar_collapsible:false,responsive:false,enabled:false,keywords:['ui 없음','화면 없음','headless','api only','배치']},
+  {id:'ai_commerce_split',name:'AI Commerce Split',category:'쇼핑/검색',description:'AI 상담과 상품 검색 결과를 좌우로 나누는 웹앱',app_type:'web_app',navigation:'header_sidebar',main_layout:'two_column',theme:'light',components:['search','product_grid','ai_chat','cart','order_history'],header:true,sidebar:true,footer:false,user_menu:true,sidebar_collapsible:true,keywords:['상품','쇼핑','주문','추천','검색','commerce']},
+  {id:'commerce_dashboard',name:'Commerce Dashboard',category:'쇼핑/검색',description:'KPI·상품·주문을 한 화면에 배치한 대시보드',app_type:'dashboard',navigation:'header_sidebar',main_layout:'dashboard',theme:'light',components:['kpi','search','product_grid','orders','chart'],header:true,sidebar:true,footer:false,user_menu:true,sidebar_collapsible:true,keywords:['상품','쇼핑','주문','매출','대시보드']},
+  {id:'commerce_catalog',name:'Commerce Catalog',category:'쇼핑/검색',description:'상단 검색과 필터 사이드바, 상품 카드 중심 레이아웃',app_type:'web_app',navigation:'header_sidebar',main_layout:'grid',theme:'light',components:['search','filter','product_grid','cart'],header:true,sidebar:true,footer:true,user_menu:true,sidebar_collapsible:false,keywords:['상품','검색','catalog','e-commerce']},
+  {id:'ai_chat_workspace',name:'AI Chat Workspace',category:'AI/Chat',description:'좌측 대화 목록과 중앙 AI 상담, 우측 Context 패널',app_type:'chat',navigation:'left',main_layout:'three_column',theme:'dark',components:['conversation_list','ai_chat','context_panel','attachments'],header:true,sidebar:true,footer:false,user_menu:true,sidebar_collapsible:true,keywords:['상담','채팅','chat','agent','rag']},
+  {id:'rag_knowledge',name:'RAG Knowledge Workspace',category:'AI/Chat',description:'문서·검색·답변 Context를 함께 보는 RAG 작업공간',app_type:'web_app',navigation:'header_sidebar',main_layout:'two_column',theme:'dark',components:['file_list','search','ai_chat','sources','context_panel'],header:true,sidebar:true,footer:false,user_menu:true,sidebar_collapsible:true,keywords:['rag','문서','파일','벡터','지식']},
+  {id:'mcp_console',name:'MCP Tool Console',category:'AI/Chat',description:'Agent, MCP Server, Tool 실행 상태를 관리하는 콘솔',app_type:'admin',navigation:'left',main_layout:'dashboard',theme:'dark',components:['agent_status','tool_list','mcp_servers','logs','terminal'],header:true,sidebar:true,footer:false,user_menu:true,sidebar_collapsible:true,keywords:['mcp','tool','server','도구']},
+  {id:'saas_dashboard',name:'SaaS Dashboard',category:'대시보드',description:'좌측 메뉴 + KPI + Chart + Table의 표준 웹앱',app_type:'dashboard',navigation:'header_sidebar',main_layout:'dashboard',theme:'light',components:['kpi','chart','table','activity'],header:true,sidebar:true,footer:false,user_menu:true,sidebar_collapsible:true,keywords:['대시보드','dashboard','analytics']},
+  {id:'analytics_dashboard',name:'Analytics Dashboard',category:'대시보드',description:'차트와 필터를 강조한 데이터 분석 화면',app_type:'dashboard',navigation:'header_sidebar',main_layout:'dashboard',theme:'light',components:['filter','kpi','chart','table'],header:true,sidebar:true,footer:false,user_menu:true,sidebar_collapsible:true,keywords:['분석','통계','매출','analytics','chart']},
+  {id:'admin_crud',name:'Admin CRUD',category:'관리자',description:'리스트·상세·편집 화면을 빠르게 오가는 관리자 UI',app_type:'admin',navigation:'header_sidebar',main_layout:'two_column',theme:'light',components:['menu','table','detail','form','activity'],header:true,sidebar:true,footer:false,user_menu:true,sidebar_collapsible:true,keywords:['관리자','crud','관리','admin']},
+  {id:'search_portal',name:'Search Portal',category:'웹앱',description:'큰 검색창과 필터, 결과 리스트를 중심으로 한 포털',app_type:'web_app',navigation:'top',main_layout:'one_column',theme:'light',components:['search','filter','result_list','pagination'],header:true,sidebar:false,footer:true,user_menu:true,sidebar_collapsible:false,keywords:['검색','search','portal']},
+  {id:'workspace_sidebar',name:'Workspace Sidebar',category:'웹앱',description:'접을 수 있는 좌측 메뉴와 넓은 작업영역',app_type:'web_app',navigation:'left',main_layout:'one_column',theme:'dark',components:['sidebar','workspace','toolbar','activity'],header:true,sidebar:true,footer:false,user_menu:true,sidebar_collapsible:true,keywords:['workspace','코드','파일','작업']},
+  {id:'topnav_webapp',name:'Top Navigation Web App',category:'웹앱',description:'상위 메뉴 중심의 넓고 단순한 웹앱',app_type:'web_app',navigation:'top',main_layout:'one_column',theme:'light',components:['topnav','content','cards','table'],header:true,sidebar:false,footer:true,user_menu:true,sidebar_collapsible:false,keywords:['웹앱','web app','상단 메뉴']},
+  {id:'landing_app',name:'Landing + App',category:'웹사이트',description:'소개 Landing과 실제 앱 진입을 함께 제공',app_type:'website',navigation:'top',main_layout:'landing',theme:'light',components:['hero','features','cta','app_preview','footer'],header:true,sidebar:false,footer:true,user_menu:false,sidebar_collapsible:false,keywords:['랜딩','소개','landing','website']},
+  {id:'mobile_responsive',name:'Mobile Responsive',category:'모바일',description:'모바일 우선 Card/Grid 구조의 반응형 웹앱',app_type:'mobile_web',navigation:'top',main_layout:'mobile',theme:'light',components:['mobile_nav','cards','search','bottom_actions'],header:true,sidebar:false,footer:false,user_menu:true,sidebar_collapsible:false,keywords:['모바일','mobile','responsive']},
+  {id:'monitoring_console',name:'Monitoring Console',category:'대시보드',description:'상태 카드·로그·실시간 이벤트를 집중 표시',app_type:'dashboard',navigation:'left',main_layout:'dashboard',theme:'dark',components:['status','metrics','logs','events','table'],header:true,sidebar:true,footer:false,user_menu:true,sidebar_collapsible:true,keywords:['모니터링','로그','status','monitoring']},
+]
+
+const uiLayoutTemplateById=(id)=>UI_LAYOUT_TEMPLATES.find(item=>item.id===id)||UI_LAYOUT_TEMPLATES[0]
+const uiLayoutSummary=(value)=>{
+  if(!value?.template_id) return ''
+  const template=uiLayoutTemplateById(value.template_id)
+  if(value?.enabled===false||value?.template_id==='headless_agent') return 'UI 없음 · Headless Agent'
+  const nav={header_sidebar:'상단+좌측 메뉴',left:'좌측 메뉴',top:'상단 메뉴',none:'메뉴 없음'}[value.navigation]||value.navigation||''
+  const parts=[template?.name||value.template_id,nav,value.footer?'Footer':'',value.user_menu?'사용자 메뉴':'',value.theme==='dark'?'Dark':'Light'].filter(Boolean)
+  return parts.join(' · ')
+}
+
+function UILayoutWireframe({config={},compact=false}){
+  const template=uiLayoutTemplateById(config.template_id)
+  const merged={...template,...config}
+  const components=Array.isArray(merged.components)?merged.components:[]
+  const hasSidebar=Boolean(merged.sidebar)
+  const hasHeader=Boolean(merged.header)
+  const hasFooter=Boolean(merged.footer)
+  const userMenu=Boolean(merged.user_menu)
+  const layout=merged.main_layout||'one_column'
+  const cards=Math.min(compact?4:6,Math.max(3,components.length||4))
+  return <div className={`ui-layout-wireframe ${merged.theme==='dark'?'dark':'light'} ${compact?'compact':''}`}>
+    {hasHeader&&<div className="ui-layout-wf-header"><i></i><div className="ui-layout-wf-nav"><span></span><span></span><span></span></div>{userMenu&&<b></b>}</div>}
+    <div className="ui-layout-wf-body">
+      {hasSidebar&&<div className="ui-layout-wf-sidebar"><i></i><i></i><i></i><i></i><i></i></div>}
+      <div className={`ui-layout-wf-main ${layout}`}>
+        <div className="ui-layout-wf-search"></div>
+        <div className="ui-layout-wf-kpis"><span></span><span></span><span></span></div>
+        <div className="ui-layout-wf-content">
+          {Array.from({length:cards}).map((_,index)=><span key={index}></span>)}
+        </div>
+      </div>
+      {layout==='three_column'&&<div className="ui-layout-wf-context"><span></span><span></span><span></span></div>}
+    </div>
+    {hasFooter&&<div className="ui-layout-wf-footer"><span></span><span></span><span></span></div>}
+  </div>
+}
+
+function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
+  const currentTemplate=uiLayoutTemplateById(value?.template_id)
+  const [selectedId,setSelectedId]=useState(value?.template_id||currentTemplate.id)
+  const [category,setCategory]=useState('추천')
+  const [draft,setDraft]=useState(()=>({...currentTemplate,...value,template_id:value?.template_id||currentTemplate.id}))
+  useEffect(()=>{
+    if(!open) return
+    const template=uiLayoutTemplateById(value?.template_id)
+    const next={...template,...value,template_id:value?.template_id||template.id}
+    setSelectedId(next.template_id)
+    setDraft(next)
+  },[open,value?.template_id])
+  if(!open) return null
+  const purpose=String(purposeText||'').toLowerCase()
+  const scored=UI_LAYOUT_TEMPLATES.map(template=>({
+    template,
+    score:(template.keywords||[]).reduce((sum,key)=>sum+(purpose.includes(String(key).toLowerCase())?2:0),0)
+      +(value?.app_type&&template.app_type===value.app_type?1:0)
+  })).sort((a,b)=>b.score-a.score)
+  const recommendedIds=new Set(scored.slice(0,5).map(item=>item.template.id))
+  const categories=['추천','웹앱','대시보드','쇼핑/검색','AI/Chat','관리자','웹사이트','모바일','기타']
+  const visible=UI_LAYOUT_TEMPLATES.filter(template=>category==='추천'?recommendedIds.has(template.id):template.category===category)
+  const choose=(template)=>{
+    setSelectedId(template.id)
+    setDraft({...template,template_id:template.id})
+  }
+  const patch=(next)=>setDraft(prev=>({...prev,...next}))
+  const selected=uiLayoutTemplateById(selectedId)
+  return <div className="ui-layout-gallery-backdrop" role="dialog" aria-modal="true" aria-label="UI Layout Template Gallery">
+    <div className="ui-layout-gallery-modal">
+      <div className="ui-layout-gallery-head">
+        <div><span>NEW AGENT · UI / LAYOUT</span><strong>레이아웃 템플릿 갤러리</strong><small>Agent 목적에 맞는 추천안을 고르거나, 메뉴·Footer·사용자 메뉴를 직접 조정하세요.</small></div>
+        <button type="button" onClick={onClose}>×</button>
+      </div>
+      <div className="ui-layout-gallery-toolbar">
+        {categories.map(item=><button key={item} type="button" className={category===item?'active':''} onClick={()=>setCategory(item)}>{item}</button>)}
+      </div>
+      <div className="ui-layout-gallery-body">
+        <div className="ui-layout-gallery-grid">
+          {visible.map(template=><button type="button" key={template.id} className={`ui-layout-template-card ${selectedId===template.id?'selected':''}`} onClick={()=>choose(template)}>
+            <UILayoutWireframe config={{...template,template_id:template.id}} compact={true}/>
+            <div><strong>{template.name}</strong><small>{template.description}</small></div>
+            {recommendedIds.has(template.id)&&<span className="ui-layout-recommended">추천</span>}
+          </button>)}
+        </div>
+        <aside className="ui-layout-config-panel">
+          <div className="ui-layout-config-preview"><UILayoutWireframe config={draft}/></div>
+          <div className="ui-layout-config-title"><strong>{selected.name}</strong><small>{selected.description}</small></div>
+          <div className="ui-layout-toggle-grid">
+            <label><input type="checkbox" checked={Boolean(draft.header)} onChange={e=>patch({header:e.target.checked})}/>상단 Header</label>
+            <label><input type="checkbox" checked={Boolean(draft.sidebar)} onChange={e=>patch({sidebar:e.target.checked,navigation:e.target.checked?(draft.header?'header_sidebar':'left'):(draft.header?'top':'none')})}/>좌측 메뉴</label>
+            <label><input type="checkbox" checked={Boolean(draft.sidebar_collapsible)} disabled={!draft.sidebar} onChange={e=>patch({sidebar_collapsible:e.target.checked})}/>Sidebar 접기</label>
+            <label><input type="checkbox" checked={Boolean(draft.footer)} onChange={e=>patch({footer:e.target.checked})}/>Footer</label>
+            <label><input type="checkbox" checked={Boolean(draft.user_menu)} onChange={e=>patch({user_menu:e.target.checked})}/>사용자 메뉴</label>
+            <label><input type="checkbox" checked={draft.responsive!==false} onChange={e=>patch({responsive:e.target.checked})}/>반응형</label>
+          </div>
+          <label className="ui-layout-select-field"><span>Main Layout</span><select value={draft.main_layout||'one_column'} onChange={e=>patch({main_layout:e.target.value})}><option value="one_column">1 Column</option><option value="two_column">2 Column</option><option value="three_column">3 Column</option><option value="grid">Card Grid</option><option value="dashboard">Dashboard</option><option value="landing">Landing</option><option value="mobile">Mobile First</option></select></label>
+          <label className="ui-layout-select-field"><span>Theme</span><select value={draft.theme||'light'} onChange={e=>patch({theme:e.target.value})}><option value="light">Light</option><option value="dark">Dark</option><option value="auto">Auto</option></select></label>
+          <label className="ui-layout-select-field"><span>사용자 메뉴 위치</span><select value={draft.user_menu_position||'header_right'} disabled={!draft.user_menu} onChange={e=>patch({user_menu_position:e.target.value})}><option value="header_right">상단 우측</option><option value="sidebar_bottom">Sidebar 하단</option><option value="profile_page">Profile 페이지</option></select></label>
+          <div className="ui-layout-component-tags">{(draft.components||[]).map(item=><span key={item}>{item}</span>)}</div>
+          <div className="ui-layout-config-actions"><button type="button" onClick={onClose}>취소</button><button type="button" className="primary" onClick={()=>onApply({...draft,template_id:selectedId,selected_at:new Date().toISOString()})}>이 레이아웃 사용</button></div>
+        </aside>
+      </div>
+    </div>
+  </div>
+}
+
 const protectInterviewAssistantAnswer=(value='')=>{
   const text=sanitizeInterviewDisplayText(value)
   if(!text) return text
@@ -1824,6 +2140,9 @@ function IDE() {
   }
 
   const fileLoadTokenRef=useRef(0)
+  // v5.363: every project/new-Agent context gets an epoch.  Pending async
+  // analysis from an older project must never write back into the new design.
+  const projectContextEpochRef=useRef(0)
 
 
   const [terminalConnectionState,setTerminalConnectionState]=useState({})
@@ -2121,12 +2440,16 @@ function IDE() {
   const [command,setCommand]=useState('git status')
   const [jobs,setJobs]=useState({})
   const [workflowReq,setWorkflowReq]=useState('')
+  const [uiLayoutConfig,setUiLayoutConfig]=useState(null)
+  const [uiLayoutGalleryOpen,setUiLayoutGalleryOpen]=useState(false)
   const [confirmedInterviewRequirements,setConfirmedInterviewRequirements]=useState({})
   const [requirementDraftRestored,setRequirementDraftRestored]=useState(false)
   const [requirementDraftSavedAt,setRequirementDraftSavedAt]=useState('')
   const [requirementDraftCandidate,setRequirementDraftCandidate]=useState(null)
   const [requirementDraftDecisionPending,setRequirementDraftDecisionPending]=useState(false)
   const requirementDraftDecisionPendingRef=useRef(false)
+  const [restoredBuildResume,setRestoredBuildResume]=useState(null)
+  const requirementCheckpointSignatureRef=useRef('')
   const builderMessagesEndRef=useRef(null)
   const [workflow,setWorkflow]=useState(null)
   const [workflowDefinition,setWorkflowDefinition]=useState(null)
@@ -2210,9 +2533,15 @@ function IDE() {
   const [interviewAttachmentMemory,setInterviewAttachmentMemory]=useState('')
   const [interviewAttachmentSummary,setInterviewAttachmentSummary]=useState('')
   const [interviewAttachmentSummaryFiles,setInterviewAttachmentSummaryFiles]=useState([])
+  const [interviewAttachmentRequirements,setInterviewAttachmentRequirements]=useState([])
+  const [interviewAttachmentRequirementCoverage,setInterviewAttachmentRequirementCoverage]=useState({})
   const [interviewAttachmentSummaryBusy,setInterviewAttachmentSummaryBusy]=useState(false)
   const [interviewAttachmentSummaryError,setInterviewAttachmentSummaryError]=useState('')
   const interviewAttachmentSummaryRunRef=useRef('')
+  const interviewAbortRef=useRef(null)
+  const interviewSummaryAbortRef=useRef(null)
+  const [interviewRetryPayload,setInterviewRetryPayload]=useState(null)
+  const [interviewActivityError,setInterviewActivityError]=useState('')
   const [requirementManualOverrides,setRequirementManualOverrides]=useState({})
   const [requirementRedefineId,setRequirementRedefineId]=useState('')
   const [requirementRedefineText,setRequirementRedefineText]=useState('')
@@ -2513,7 +2842,18 @@ function IDE() {
 
   useEffect(()=>{const ws=connectJobs(evt=>{
     if(evt.type==='job'){
-      setJobs(p=>({...p,[evt.job.id]:evt.job}))
+      setJobs(prev=>{
+        const id=evt.job.id
+        const before=prev[id]
+        if(before&&before.status===evt.job.status&&before.progress===evt.job.progress&&before.message===evt.job.message&&before.result===evt.job.result){
+          return prev
+        }
+        const next={...prev,[id]:evt.job}
+        const ids=Object.keys(next)
+        if(ids.length<=80) return next
+        for(const staleId of ids.slice(0,ids.length-80)) delete next[staleId]
+        return next
+      })
       if(evt.job.result?.output)setTerminal(evt.job.result.output)
 
       setPgvectorInstall(current=>{
@@ -2535,6 +2875,22 @@ function IDE() {
       })
     }
   });return()=>ws.close()},[])
+
+  // v5.368: release browser-side long-lived resources when the SPA unloads.
+  useEffect(()=>()=>{
+    for(const socket of Object.values(terminalSocketsRef.current||{})){
+      try{ socket?.close?.(1000,'app_unmount') }catch{}
+    }
+    terminalSocketsRef.current={}
+    for(const disposable of Object.values(xtermDisposablesRef.current||{})){
+      try{ disposable?.dispose?.() }catch{}
+    }
+    xtermDisposablesRef.current={}
+    for(const term of Object.values(xtermInstancesRef.current||{})){
+      try{ term?.dispose?.() }catch{}
+    }
+    xtermInstancesRef.current={}
+  },[])
 
 
 
@@ -2588,51 +2944,108 @@ function IDE() {
     newAgentProjectRoot,
     interviewAttachmentSummary,
     interviewAttachmentMemory,
-    requirementManualOverrides
+    requirementManualOverrides,
+    uiLayoutConfig,
+    restoredBuildResume
   ])
 
   useEffect(()=>{
-    // v5.338: 신규 Agent에서 경로를 선택했다고 과거 인터뷰를 자동 복원하지 않습니다.
-    // 동일 경로의 Draft가 있으면 사용자가 직접 '이전 요구사항 이어서 불러오기'를
-    // 선택할 수 있도록 후보만 표시합니다. 경로 선택은 프로젝트 위치 결정이며,
-    // 과거 대화 복원에 대한 사용자 동의로 간주하지 않습니다.
+    // v5.368: Resume candidates come from both browser localStorage and the
+    // project folder. A failed build must be recoverable after a browser restart,
+    // another PC session, or localStorage cleanup.
     const projectPath=String(newAgentProjectRoot||'').trim()
     if(!projectPath){
       setRequirementDraftCandidate(null)
       setRequirementDraftDecisionPending(false)
       setRequirementDraftRestored(false)
+      setRestoredBuildResume(null)
       return
     }
 
-    const timer=setTimeout(()=>{
+    let cancelled=false
+    const timer=setTimeout(async()=>{
       try{
         const key=requirementDraftKeyFor(projectPath,newAgentName)
-        const raw=localStorage.getItem(key)
-        if(!raw){
+        let localSnapshot=null
+        try{
+          const raw=localStorage.getItem(key)
+          localSnapshot=raw?JSON.parse(raw):null
+        }catch{}
+
+        let serverResult=null
+        try{
+          serverResult=await api(`/workflow/design-checkpoint?project_root=${encodeURIComponent(projectPath)}`)
+        }catch(e){
+          console.warn('프로젝트 Resume Checkpoint 확인 실패',e)
+        }
+        if(cancelled) return
+
+        const serverSnapshot=(serverResult?.checkpoint&&typeof serverResult.checkpoint==='object')
+          ? serverResult.checkpoint
+          : null
+        const localTime=Date.parse(String(localSnapshot?.saved_at||''))||0
+        const serverTime=Date.parse(String(serverSnapshot?.saved_at||''))||0
+        const snapshot=(serverTime>=localTime?serverSnapshot:localSnapshot)||serverSnapshot||localSnapshot
+        const runtime=(serverResult?.runtime&&typeof serverResult.runtime==='object')?serverResult.runtime:{}
+
+        if(!snapshot && !serverResult?.available){
           setRequirementDraftCandidate(null)
           setRequirementDraftDecisionPending(false)
           setRequirementDraftRestored(false)
           setRequirementDraftSavedAt('')
+          setRestoredBuildResume(null)
           return
         }
-        const snapshot=JSON.parse(raw)
+
+        const buildResume={
+          ...(snapshot?.build_resume&&typeof snapshot.build_resume==='object'?snapshot.build_resume:{}),
+          source:String(serverResult?.checkpoint_source||snapshot?.build_resume?.source||'LOCAL_DRAFT'),
+          run_id:String(
+            runtime?.current_run?.run_id
+            ||runtime?.workflow_state?.diagnostic_run_id
+            ||runtime?.workflow_state?.thread_id
+            ||snapshot?.build_resume?.run_id
+            ||''
+          ),
+          status:String(
+            runtime?.current_run?.status
+            ||runtime?.workflow_state?.diagnostic_status
+            ||runtime?.workflow_state?.status
+            ||snapshot?.build_resume?.status
+            ||''
+          ),
+          failure_stage:String(runtime?.workflow_state?.diagnostic_failure_stage||snapshot?.build_resume?.failure_stage||''),
+          failure_reason:String(runtime?.workflow_state?.diagnostic_failure_reason||runtime?.workflow_state?.error||snapshot?.build_resume?.failure_reason||''),
+          project_root:projectPath,
+          workflow_state:runtime?.workflow_state||snapshot?.build_resume?.workflow_state||{},
+          requirements_snapshot:runtime?.requirements_snapshot||{}
+        }
+
         setRequirementDraftCandidate({
           key,
+          snapshot,
+          build_resume:buildResume,
           saved_at:String(snapshot?.saved_at||''),
           agent_name:String(snapshot?.agent_name||''),
-          project_root:String(snapshot?.project_root||projectPath)
+          project_root:String(snapshot?.project_root||projectPath),
+          source:String(serverResult?.checkpoint_source||(serverTime>=localTime&&serverSnapshot?'PROJECT_CHECKPOINT':'LOCAL_DRAFT'))
         })
         setRequirementDraftDecisionPending(true)
         setRequirementDraftRestored(false)
         setRequirementDraftSavedAt(String(snapshot?.saved_at||''))
       }catch(e){
-        console.warn('이전 요구사항 Draft 확인 실패',e)
-        setRequirementDraftCandidate(null)
-        setRequirementDraftDecisionPending(false)
+        console.warn('이전 요구사항/개발 기록 확인 실패',e)
+        if(!cancelled){
+          setRequirementDraftCandidate(null)
+          setRequirementDraftDecisionPending(false)
+        }
       }
     },120)
 
-    return()=>clearTimeout(timer)
+    return()=>{
+      cancelled=true
+      clearTimeout(timer)
+    }
   },[newAgentProjectRoot])
 
   useEffect(()=>{
@@ -2649,8 +3062,8 @@ function IDE() {
     })
   },[chat,busy])
 
-  useEffect(()=>{
-    if(!interviewAttachments.length) return
+  const summarizeInterviewAttachments=async()=>{
+    if(!interviewAttachments.length || interviewAttachmentSummaryBusy || busy) return
     if(interviewAttachmentAnalysis.busy||!interviewAttachmentAnalysis.ready) return
     if(interviewAttachmentAnalysis.successfulFiles===0&&interviewAttachmentAnalysis.failedFiles>0) return
 
@@ -2660,86 +3073,88 @@ function IDE() {
     if(!attachmentIds.length) return
 
     const signature=attachmentIds.join('|')
-    if(interviewAttachmentSummaryRunRef.current===signature) return
-    interviewAttachmentSummaryRunRef.current=signature
-
     const selectedFiles=interviewAttachments.map(item=>({
       name:String(item?.name||''),
       path:String(item?.path||'')
     }))
-    let cancelled=false
+
+    interviewAttachmentSummaryRunRef.current=signature
     setInterviewAttachmentSummaryBusy(true)
     setInterviewAttachmentSummaryError('')
+    setInterviewActivityError('')
+    setInterviewRetryPayload(null)
 
-    ;(async()=>{
-      try{
-        const result=await api('/chat/interview/attachments/summary',{
-          method:'POST',
-          body:JSON.stringify({
-            attachment_ids:attachmentIds,
-            attachment_memory:interviewAttachmentMemory,
-            provider,
-            project_root:newAgentProjectRoot||root||''
-          })
+    const controller=new AbortController()
+    interviewSummaryAbortRef.current=controller
+
+    try{
+      const result=await api('/chat/interview/attachments/summary',{
+        method:'POST',
+        signal:controller.signal,
+        body:JSON.stringify({
+          attachment_ids:attachmentIds,
+          attachment_memory:interviewAttachmentMemory,
+          provider,
+          project_root:newAgentProjectRoot||root||''
         })
-        if(cancelled) return
+      })
 
-        const summary=sanitizeInterviewDisplayText(result?.summary||'')
-        if(!result?.ok||!summary){
-          throw new Error(
-            (Array.isArray(result?.attachment_warnings)&&result.attachment_warnings.length
-              ? result.attachment_warnings.join(' / ')
-              : '첨부 파일에서 요구사항 요약을 만들지 못했습니다.')
-          )
-        }
-
-        setInterviewAttachmentSummary(summary)
-        setInterviewAttachmentSummaryFiles(prev=>{
-          const merged=[...prev,...selectedFiles]
-          const seen=new Set()
-          return merged.filter(item=>{
-            const key=String(item.path||item.name||'').toLowerCase()
-            if(!key||seen.has(key)) return false
-            seen.add(key)
-            return true
-          })
-        })
-        setInterviewAttachmentMemory(
-          sanitizeInterviewDisplayText(result?.attachment_memory||summary)
+      const summary=sanitizeInterviewDisplayText(result?.summary||'')
+      if(!result?.ok||!summary){
+        throw new Error(
+          (Array.isArray(result?.attachment_warnings)&&result.attachment_warnings.length
+            ? result.attachment_warnings.join(' / ')
+            : '첨부 파일에서 요구사항 요약을 만들지 못했습니다.')
         )
-
-        setInterviewAttachments([])
-        setInterviewAttachmentAnalysis({
-          busy:false,ready:true,overallProgress:100,failedFiles:0,successfulFiles:0,files:[]
-        })
-
-        void api('/ai/attachments/release',{
-          method:'POST',
-          body:JSON.stringify({attachment_ids:attachmentIds})
-        }).catch(()=>{})
-      }catch(e){
-        if(cancelled) return
-        interviewAttachmentSummaryRunRef.current=''
-        setInterviewAttachmentSummaryError(
-          '첨부 파일 요구사항 정리 실패: '+String(e?.message||e)
-        )
-      }finally{
-        if(!cancelled) setInterviewAttachmentSummaryBusy(false)
       }
-    })()
 
-    return()=>{ cancelled=true }
-  },[
-    interviewAttachments,
-    interviewAttachmentAnalysis.busy,
-    interviewAttachmentAnalysis.ready,
-    interviewAttachmentAnalysis.failedFiles,
-    interviewAttachmentAnalysis.successfulFiles
-  ])
+      setInterviewAttachmentSummary(summary)
+      setInterviewAttachmentRequirements(Array.isArray(result?.attachment_requirements)?result.attachment_requirements:[])
+      setInterviewAttachmentRequirementCoverage(result?.attachment_requirement_coverage&&typeof result.attachment_requirement_coverage==='object'?result.attachment_requirement_coverage:{})
+      setInterviewAttachmentSummaryFiles(prev=>{
+        const merged=[...prev,...selectedFiles]
+        const seen=new Set()
+        return merged.filter(item=>{
+          const key=String(item.path||item.name||'').toLowerCase()
+          if(!key||seen.has(key)) return false
+          seen.add(key)
+          return true
+        })
+      })
+      setInterviewAttachmentMemory(
+        sanitizeInterviewDisplayText(result?.attachment_memory||summary)
+      )
 
-  const filteredProjects = projectList
+      setInterviewAttachments([])
+      setInterviewAttachmentAnalysis({
+        busy:false,ready:true,overallProgress:100,failedFiles:0,successfulFiles:0,files:[]
+      })
+      setInterviewRetryPayload(null)
+
+      void api('/ai/attachments/release',{
+        method:'POST',
+        body:JSON.stringify({attachment_ids:attachmentIds})
+      }).catch(()=>{})
+    }catch(e){
+      const aborted=controller.signal.aborted || String(e?.name||'')==='AbortError'
+      interviewAttachmentSummaryRunRef.current=''
+      const message=aborted
+        ? '첨부 파일 통합 분석을 사용자가 취소했습니다.'
+        : '첨부 파일 요구사항 정리 실패: '+String(e?.message||e)
+      setInterviewAttachmentSummaryError(message)
+      setInterviewActivityError(message)
+      setInterviewRetryPayload({type:'SUMMARY'})
+    }finally{
+      if(interviewSummaryAbortRef.current===controller) interviewSummaryAbortRef.current=null
+      setInterviewAttachmentSummaryBusy(false)
+    }
+  }
+
+
+  const deferredProjectSearch=useDeferredValue(projectSearch)
+  const filteredProjects = useMemo(()=>projectList
     .filter(p=>{
-      const q=(projectSearch||'').trim().toLowerCase()
+      const q=(deferredProjectSearch||'').trim().toLowerCase()
       if(q && !`${p.name||''} ${p.project_root||''}`.toLowerCase().includes(q)){
         return false
       }
@@ -2760,7 +3175,7 @@ function IDE() {
       }
       return (b.is_favorite?1:0)-(a.is_favorite?1:0)
         || new Date(b.last_opened_at||b.updated_at||0)-new Date(a.last_opened_at||a.updated_at||0)
-    })
+    }),[projectList,deferredProjectSearch,projectFilter])
   const currentProject = projectList.find(p=>p.id===selectedProjectId) || null
   const currentProjectName = currentProject?.name || newAgentName || (root ? root.split(/[\\/]/).filter(Boolean).pop() : '') || '프로젝트 선택'
   const currentProjectPath = currentProject?.project_root || currentProject?.root_path || root || newAgentProjectRoot || ''
@@ -5022,7 +5437,7 @@ function IDE() {
       cursorStyle:'block',
       cursorInactiveStyle:'outline',
       convertEol:true,
-      scrollback:5000,
+      scrollback:1500,
       fontFamily:'Consolas, "Cascadia Mono", monospace',
       fontSize:13,
       lineHeight:1.25,
@@ -6305,6 +6720,7 @@ function IDE() {
   },[currentFileWatchRoot,screen])
 
   const createNewAgentProject=async()=>{
+    const createContextEpoch=projectContextEpochRef.current
     if(!newAgentName.trim()){
       setNewAgentCreateResult({ok:false,message:'에이전트 이름을 입력하세요.'})
       return
@@ -6326,6 +6742,7 @@ function IDE() {
           models_path:newAgentModelsPath
         })
       })
+      if(projectContextEpochRef.current!==createContextEpoch) return
       setNewAgentCreateResult(r)
       if(r.ok){
         setSelectedProjectId(r.project_id||null)
@@ -6357,9 +6774,12 @@ function IDE() {
     }
   }
 
-  const refreshAdaptiveProjectAnalysis=async(projectRoot,requestText='')=>{
+  const refreshAdaptiveProjectAnalysis=async(projectRoot,requestText='',expectedContextEpoch=null)=>{
     const targetRoot=String(projectRoot||'').trim()
     if(!targetRoot) return null
+    const requestContextEpoch=Number.isInteger(expectedContextEpoch)
+      ? expectedContextEpoch
+      : projectContextEpochRef.current
     try{
       const adaptive=await api('/project/adaptive-report',{
         method:'POST',
@@ -6369,6 +6789,9 @@ function IDE() {
         })
       })
       if(adaptive?.ok){
+        // A project load/analysis can finish after the user has already clicked
+        // '+ 신규 Agent 만들기'.  Ignore that stale response completely.
+        if(projectContextEpochRef.current!==requestContextEpoch) return null
         setLoadedProjectAnalysis(prev=>({
           ...(prev||{}),
           ...adaptive,
@@ -6383,6 +6806,7 @@ function IDE() {
   }
 
   const loadProject=async(projectId)=>{
+    const loadContextEpoch=++projectContextEpochRef.current
     // Do not let the previous project's tree root leak into file operations
     // while the new project metadata is loading.
     fileTreeRootRef.current=''
@@ -6396,6 +6820,7 @@ function IDE() {
 
     try{
       const p=await api(`/projects/${projectId}`)
+      if(projectContextEpochRef.current!==loadContextEpoch) return
 
       if(!p.ok){
         const msg=p.message||'프로젝트를 불러오지 못했습니다.'
@@ -6425,6 +6850,10 @@ function IDE() {
       setPreviousTargetWorkflowPreview(null)
       setTargetWorkflowQuality(null)
       setDevelopmentFinalStatus(null)
+      setLoadedProjectAnalysis(null)
+      setAnalysis(null)
+      setDbErdReport(null)
+      setLiveDatabasePreview(null)
       setWorkflowReq(p.description||'')
 
       setSelectedProjectId(p.id)
@@ -6454,7 +6883,8 @@ function IDE() {
         message:'프로젝트 성격과 Workflow / Architecture를 분석하는 중...',
         failed:false
       })
-      await refreshAdaptiveProjectAnalysis(projectRoot,p.description||p.name||'')
+      await refreshAdaptiveProjectAnalysis(projectRoot,p.description||p.name||'',loadContextEpoch)
+      if(projectContextEpochRef.current!==loadContextEpoch) return
       await activateProjectTerminal(p)
       await loadGitInfo(projectRoot)
 
@@ -6524,16 +6954,43 @@ function IDE() {
 
 
   const startNewProject=()=>{
+    // v5.363: this is a hard project-context boundary, not just a navigation action.
+    // Invalidate every pending load/adaptive-analysis request before clearing state.
+    projectContextEpochRef.current+=1
     setAgentBuildMessage('')
     setWorkspaceTab('DESIGN')
+    setWorkflowView('TARGET')
     setScreen('WORKSPACE')
     setInput('')
     setNewAgentCreateResult(null)
     setSelectedProjectId(null)
     setGitInfo(null)
 
+    // Clear ALL project-derived analysis/design state.  In v5.360 these values
+    // survived startNewProject(), so Workflow/Report/Architecture could fall back
+    // to the previously loaded project's adaptive report (e.g. MINI_PRO).
+    setLoadedProjectAnalysis(null)
+    setExternalProjectAnalysis(null)
+    setAnalysis(null)
+    setDbErdReport(null)
+    setDbErdError('')
+    setLiveDatabasePreview(null)
+    setLiveDatabasePreviewError('')
+    setCodingStyleReport(null)
+    setReportGeneratedAt('')
+    setPptExportError('')
+    setDevelopmentFinalStatus(null)
+    setDevelopmentProgress({active:false,percent:0,stage:'대기',detail:'',startedAt:null,elapsedSeconds:0,events:[]})
+    setWorkflowProgress({active:false,percent:0,stage:'대기',detail:'',startedAt:null})
+    setTargetWorkflowError('')
+    setWorkflowReq('')
+    setUiLayoutConfig(null)
+    setUiLayoutGalleryOpen(false)
+    setConfirmedInterviewRequirements({})
+
     // '신규 Agent 만들기'는 기존 프로젝트/설계에서 사용하던 경로를 이어받지 않습니다.
     // 프로젝트 경로 input은 항상 빈 value로 시작하고 사용자가 직접 입력하거나 선택합니다.
+    setNewAgentName('')
     setNewAgentProjectRoot('')
     setRoot('')
     workspaceRootRef.current=''
@@ -6552,16 +7009,22 @@ function IDE() {
     setInterviewAttachmentMemory('')
     setInterviewAttachmentSummary('')
     setInterviewAttachmentSummaryFiles([])
+    setInterviewAttachmentRequirements([])
+    setInterviewAttachmentRequirementCoverage({})
     setInterviewAttachmentSummaryBusy(false)
     setInterviewAttachmentSummaryError('')
     interviewAttachmentSummaryRunRef.current=''
     setRequirementManualOverrides({})
+    setUiLayoutConfig(null)
+    setUiLayoutGalleryOpen(false)
     setRequirementRedefineId('')
     setRequirementRedefineText('')
     setRequirementDraftCandidate(null)
     setRequirementDraftDecisionPending(false)
     setRequirementDraftRestored(false)
     setRequirementDraftSavedAt('')
+    setRestoredBuildResume(null)
+    requirementCheckpointSignatureRef.current=''
     setInterviewAttachmentAnalysis({busy:false,ready:true,overallProgress:100,failedFiles:0,successfulFiles:0,files:[]})
     setChat([{
       role:'assistant',
@@ -7624,7 +8087,7 @@ function IDE() {
     {id:'files',label:'파일 형식',keywords:['.txt','.md','.py','파일 형식','확장자']},
     {id:'output',label:'결과 형식',keywords:['한국어','json','결과','저장','.txt','.md']},
     {id:'llm',label:'LLM',keywords:['gpt-4o-mini','openai','ollama','llm']},
-    {id:'ui',label:'UI',keywords:['react','vite','웹 gui','웹 ui']},
+    {id:'ui',label:'UI / Layout',keywords:['react','vite','streamlit','웹 gui','웹 ui','웹앱','대시보드','layout','레이아웃']},
     {id:'backend',label:'Backend',keywords:['fastapi','uvicorn','backend','백엔드']},
     {id:'mcp',label:'MCP / Transport',keywords:['mcp','stdio','streamable http','transport']},
     {id:'database',label:'DB',keywords:['데이터베이스','database','postgresql','db']},
@@ -7786,12 +8249,17 @@ function IDE() {
         }
 
         case 'ui':{
+          if(uiLayoutConfig?.template_id){
+            const framework=String(confirmed?.ui||'').trim()
+            return [framework,uiLayoutSummary(uiLayoutConfig)].filter(Boolean).join(' · ')
+          }
           if(
             String(confirmed?.ui||'').toLowerCase().includes('react')
             ||includesAny(['react + vite','react+vite','react 기반'])
           ){
             return includesAny(['vite'])?'React + Vite':'React'
           }
+          if(includesAny(['streamlit'])) return 'Streamlit'
           return confirmed?.ui||''
         }
 
@@ -7978,7 +8446,7 @@ function IDE() {
       if(def.id==='output' && confirmed?.result){
         collected=true
       }
-      if(def.id==='ui' && confirmed?.ui){
+      if(def.id==='ui' && (confirmed?.ui||confirmed?.ui_layout?.template_id||uiLayoutConfig?.template_id)){
         collected=true
       }
       if(def.id==='backend' && confirmed?.backend){
@@ -8020,6 +8488,27 @@ function IDE() {
       ...Object.values(requirementManualOverrides||{}).map(value=>String(value||'')),
     ].join('\n').toLowerCase()
     const uniqueValues=(values=[])=>[...new Set(values.filter(Boolean))]
+    const normalizeDatabaseValues=(values=[])=>{
+      const canonical=[]
+      const add=(raw)=>{
+        const token=String(raw||'').trim()
+        if(!token) return
+        const lower=token.toLowerCase()
+        let label=token
+        if(lower.includes('postgresql')) label='PostgreSQL'
+        else if(lower==='redis'||lower.includes('redis ')) label='Redis'
+        else if(lower.includes('pgvector')||lower==='vector db'||lower==='vector search') label='pgvector'
+        if(!canonical.includes(label)) canonical.push(label)
+      }
+      values.forEach(value=>{
+        String(value||'')
+          .split(/\s*[·,+/]\s*/g)
+          .map(part=>part.trim())
+          .filter(Boolean)
+          .forEach(add)
+      })
+      return canonical
+    }
     const features=[]
     const addFeature=(label,...keywords)=>{
       if(keywords.some(keyword=>conversation.includes(String(keyword).toLowerCase()))){
@@ -8054,7 +8543,7 @@ function IDE() {
       byId.mcp?.value,
       integrations.includes('MCP')?'MCP':'',
     ]).join(' · ')
-    const databaseValues=uniqueValues([
+    const databaseValues=normalizeDatabaseValues([
       byId.database?.value,
       ...integrations.filter(value=>['PostgreSQL','Redis','pgvector'].includes(value)),
     ]).join(' · ')
@@ -8071,14 +8560,15 @@ function IDE() {
       mcpTools:mcpToolValues||'외부 MCP / Tool 필요 여부를 확인하는 중',
       database:databaseValues||'DB / Cache / Vector 구성을 확인하는 중',
       runtime:runtimeValues||'실행 환경을 확인하는 중',
+      uiLayout:uiLayoutConfig?.template_id?uiLayoutSummary(uiLayoutConfig):'레이아웃 템플릿을 선택하는 중',
       confirmation:`요구사항 ${collected}/${statuses.length} · ${targetWorkflowPreview?'Workflow 설계됨':'인터뷰 진행 중'}`,
       collectedItems:statuses.filter(item=>item.collected&&item.value),
     }
   }
 
-  const buildRequirementDraftSnapshot=()=>{
+  const buildRequirementDraftSnapshot=(resumeOverride=null)=>{
     return {
-      version:1,
+      version:2,
       saved_at:new Date().toISOString(),
       agent_name:newAgentName||'',
       project_root:newAgentProjectRoot||root||'',
@@ -8091,24 +8581,51 @@ function IDE() {
       attachment_memory:interviewAttachmentMemory||'',
       attachment_summary:interviewAttachmentSummary||'',
       attachment_summary_files:interviewAttachmentSummaryFiles||[],
-      manual_requirement_overrides:requirementManualOverrides||{}
+      attachment_requirements:interviewAttachmentRequirements||[],
+      attachment_requirement_coverage:interviewAttachmentRequirementCoverage||{},
+      manual_requirement_overrides:requirementManualOverrides||{},
+      ui_layout:uiLayoutConfig||null,
+      build_resume:resumeOverride||(restoredBuildResume&&typeof restoredBuildResume==='object'?restoredBuildResume:null)
     }
   }
 
-  const saveRequirementDraft=()=>{
+  const persistRequirementCheckpoint=(snapshot)=>{
+    const projectRoot=String(snapshot?.project_root||newAgentProjectRoot||root||'').trim()
+    if(!projectRoot||!snapshot) return
+    try{
+      const signature=JSON.stringify({...snapshot,saved_at:''})
+      if(requirementCheckpointSignatureRef.current===signature) return
+      requirementCheckpointSignatureRef.current=signature
+      void api('/workflow/design-checkpoint',{
+        method:'POST',
+        body:JSON.stringify({project_root:projectRoot,snapshot})
+      }).catch(error=>{
+        console.warn('프로젝트 Resume Checkpoint 저장 실패',error)
+        if(requirementCheckpointSignatureRef.current===signature){
+          requirementCheckpointSignatureRef.current=''
+        }
+      })
+    }catch(e){
+      console.warn('Resume Checkpoint 직렬화 실패',e)
+    }
+  }
+
+  const saveRequirementDraft=(resumeOverride=null)=>{
     try{
       // If an older Draft exists for a newly selected path, do not silently
       // overwrite it before the user decides whether to restore or ignore it.
       if(requirementDraftDecisionPendingRef.current) return false
 
-      const snapshot=buildRequirementDraftSnapshot()
+      const snapshot=buildRequirementDraftSnapshot(resumeOverride)
       const hasUsefulData=
         snapshot.chat.some(item=>item?.role==='user')
         || Boolean(snapshot.workflow_request)
         || Object.keys(snapshot.confirmed_requirements||{}).length>0
         || Boolean(snapshot.workflow_preview)
         || Boolean(snapshot.attachment_summary)
+        || (Array.isArray(snapshot.attachment_requirements)&&snapshot.attachment_requirements.length>0)
         || Object.keys(snapshot.manual_requirement_overrides||{}).length>0
+        || Boolean(snapshot.ui_layout?.template_id)
 
       if(!hasUsefulData) return false
 
@@ -8117,21 +8634,25 @@ function IDE() {
         JSON.stringify(snapshot)
       )
       setRequirementDraftSavedAt(snapshot.saved_at)
-      return result
+      persistRequirementCheckpoint(snapshot)
+      return true
     }catch(e){
       console.warn('요구사항 Draft 저장 실패',e)
       return false
     }
   }
 
-  const restoreRequirementDraft=(keyOverride='')=>{
+  const restoreRequirementDraft=async(keyOverride='')=>{
     try{
       const key=keyOverride||requirementDraftKey()
-      const raw=localStorage.getItem(key)
-
-      if(!raw) return false
-
-      const snapshot=JSON.parse(raw)
+      let snapshot=(requirementDraftCandidate?.snapshot&&typeof requirementDraftCandidate.snapshot==='object')
+        ? requirementDraftCandidate.snapshot
+        : null
+      if(!snapshot){
+        const raw=localStorage.getItem(key)
+        snapshot=raw?JSON.parse(raw):null
+      }
+      if(!snapshot) return false
 
       if(Array.isArray(snapshot?.chat) && snapshot.chat.length){
         const restoredChat=snapshot.chat.map(item=>({
@@ -8141,73 +8662,74 @@ function IDE() {
             : sanitizeInterviewDisplayText(item?.content||'')
         })).filter(item=>String(item?.content||'').trim())
         setChat(restoredChat)
-        setBuilderStarted(
-          restoredChat.some(item=>item?.role==='user')
-        )
+        setBuilderStarted(restoredChat.some(item=>item?.role==='user'))
+      }else if(snapshot?.workflow_request){
+        setChat([
+          {role:'assistant',content:'이전 Agent 설계/개발 기록을 복원했습니다. 기존 요구사항과 실패 지점부터 이어서 진행할 수 있습니다.'},
+          {role:'user',content:sanitizeInterviewDisplayText(snapshot.workflow_request)}
+        ])
+        setBuilderStarted(true)
       }
 
       const restoredAttachmentMemory=sanitizeInterviewDisplayText(snapshot?.attachment_memory||'')
-      if(restoredAttachmentMemory){
-        setInterviewAttachmentMemory(restoredAttachmentMemory)
-      }
+      if(restoredAttachmentMemory) setInterviewAttachmentMemory(restoredAttachmentMemory)
       const restoredAttachmentSummary=sanitizeInterviewDisplayText(snapshot?.attachment_summary||'')
       setInterviewAttachmentSummary(restoredAttachmentSummary)
       setInterviewAttachmentSummaryFiles(
         Array.isArray(snapshot?.attachment_summary_files)
-          ? snapshot.attachment_summary_files
-              .map(item=>({name:String(item?.name||''),path:String(item?.path||'')}))
-              .filter(item=>item.name||item.path)
+          ? snapshot.attachment_summary_files.map(item=>({name:String(item?.name||''),path:String(item?.path||'')})).filter(item=>item.name||item.path)
           : []
       )
-      setRequirementManualOverrides(
-        snapshot?.manual_requirement_overrides&&typeof snapshot.manual_requirement_overrides==='object'
-          ? snapshot.manual_requirement_overrides
-          : {}
-      )
+      setInterviewAttachmentRequirements(Array.isArray(snapshot?.attachment_requirements)?snapshot.attachment_requirements:[])
+      setInterviewAttachmentRequirementCoverage(snapshot?.attachment_requirement_coverage&&typeof snapshot.attachment_requirement_coverage==='object'?snapshot.attachment_requirement_coverage:{})
+      setRequirementManualOverrides(snapshot?.manual_requirement_overrides&&typeof snapshot.manual_requirement_overrides==='object'?snapshot.manual_requirement_overrides:{})
+      setUiLayoutConfig(snapshot?.ui_layout&&typeof snapshot.ui_layout==='object'?snapshot.ui_layout:null)
 
-      // Rewrite legacy drafts immediately so credentials and repeated attachment
-      // labels are not only hidden in the UI but also removed from localStorage.
-      try{
-        snapshot.chat=Array.isArray(snapshot?.chat)
-          ? snapshot.chat.map(item=>({
-              ...item,
-              content:item?.role==='assistant'
-                ? protectInterviewAssistantAnswer(item?.content||'')
-                : sanitizeInterviewDisplayText(item?.content||'')
-            })).filter(item=>String(item?.content||'').trim())
-          : []
-        snapshot.attachment_memory=restoredAttachmentMemory
-        snapshot.attachment_summary=restoredAttachmentSummary
-        snapshot.attachment_summary_files=Array.isArray(snapshot?.attachment_summary_files)?snapshot.attachment_summary_files:[]
-        snapshot.manual_requirement_overrides=(snapshot?.manual_requirement_overrides&&typeof snapshot.manual_requirement_overrides==='object')?snapshot.manual_requirement_overrides:{}
-        localStorage.setItem(key,JSON.stringify(snapshot))
-      }catch{}
-
-      if(snapshot?.workflow_request){
-        setWorkflowReq(snapshot.workflow_request)
-      }
-
-      if(snapshot?.confirmed_requirements){
-        setConfirmedInterviewRequirements(
-          snapshot.confirmed_requirements
-        )
-      }
-
+      if(snapshot?.workflow_request) setWorkflowReq(snapshot.workflow_request)
+      if(snapshot?.confirmed_requirements) setConfirmedInterviewRequirements(snapshot.confirmed_requirements)
       if(snapshot?.workflow_preview){
         setTargetWorkflowPreview(snapshot.workflow_preview)
+        setPreviousTargetWorkflowPreview(snapshot.workflow_preview)
         setTargetWorkflowQuality(snapshot.workflow_quality||null)
-        setAgentBuildStage('WORKFLOW_READY')
-      }else if(snapshot?.agent_build_stage){
-        setAgentBuildStage(
-          snapshot.agent_build_stage==='BUILDING'
-            ? 'PROJECT_CREATED'
-            : snapshot.agent_build_stage
-        )
       }
 
-      if(snapshot?.agent_name && !newAgentName){
-        setNewAgentName(snapshot.agent_name)
+      const resumeCandidate=(requirementDraftCandidate?.build_resume&&typeof requirementDraftCandidate.build_resume==='object')
+        ? requirementDraftCandidate.build_resume
+        : (snapshot?.build_resume&&typeof snapshot.build_resume==='object'?snapshot.build_resume:null)
+      if(resumeCandidate){
+        setRestoredBuildResume(resumeCandidate)
+        const restoredState=resumeCandidate?.workflow_state&&typeof resumeCandidate.workflow_state==='object'
+          ? resumeCandidate.workflow_state
+          : null
+        if(restoredState&&Object.keys(restoredState).length){
+          setWorkflow({state:restoredState,failure_diagnostics:{
+            project_root:resumeCandidate.project_root||snapshot.project_root||'',
+            run_id:resumeCandidate.run_id||'',
+            status:resumeCandidate.status||restoredState.diagnostic_status||restoredState.status||'',
+            failure_stage:resumeCandidate.failure_stage||restoredState.diagnostic_failure_stage||'',
+            failure_reason:resumeCandidate.failure_reason||restoredState.diagnostic_failure_reason||restoredState.error||''
+          }})
+        }
+        const status=String(resumeCandidate.status||restoredState?.diagnostic_status||restoredState?.status||'')
+        const failed=/(FAIL|ERROR|INCOMPLETE|EXCEPTION)/i.test(status)
+        if(failed){
+          setAgentBuildStage('PROJECT_CREATED')
+          setAgentBuildMessage(`이전 개발 실패 기록 복원됨${status?` · ${status}`:''}. 기존 생성 파일과 진단 기록을 사용해 다시 개발할 수 있습니다.`)
+        }else if(snapshot?.workflow_preview){
+          setAgentBuildStage(snapshot?.agent_build_stage==='PROJECT_CREATED'?'PROJECT_CREATED':'WORKFLOW_READY')
+        }
+      }else if(snapshot?.workflow_preview){
+        setAgentBuildStage(snapshot?.agent_build_stage==='PROJECT_CREATED'?'PROJECT_CREATED':'WORKFLOW_READY')
+      }else if(snapshot?.agent_build_stage){
+        setAgentBuildStage(snapshot.agent_build_stage==='BUILDING'?'PROJECT_CREATED':snapshot.agent_build_stage)
       }
+
+      if(snapshot?.agent_name && !newAgentName) setNewAgentName(snapshot.agent_name)
+
+      // Rewrite local draft in the current safe v2 format and persist it to the project folder.
+      const safeSnapshot={...snapshot,version:2,build_resume:resumeCandidate||snapshot?.build_resume||null}
+      try{ localStorage.setItem(key,JSON.stringify(safeSnapshot)) }catch{}
+      persistRequirementCheckpoint(safeSnapshot)
 
       setRequirementDraftSavedAt(snapshot?.saved_at||'')
       setRequirementDraftRestored(true)
@@ -8215,7 +8737,7 @@ function IDE() {
       setRequirementDraftDecisionPending(false)
       return true
     }catch(e){
-      console.warn('요구사항 Draft 복원 실패',e)
+      console.warn('요구사항/개발 기록 복원 실패',e)
       return false
     }
   }
@@ -8237,6 +8759,7 @@ function IDE() {
         ||Boolean(snapshot.workflow_preview)
         ||Boolean(snapshot.attachment_summary)
         ||Object.keys(snapshot.manual_requirement_overrides||{}).length>0
+        ||Boolean(snapshot.ui_layout?.template_id)
       if(hasUsefulData){
         localStorage.setItem(requirementDraftKey(),JSON.stringify(snapshot))
         setRequirementDraftSavedAt(snapshot.saved_at)
@@ -8260,6 +8783,8 @@ function IDE() {
     setInterviewAttachmentMemory('')
     setInterviewAttachmentSummary('')
     setInterviewAttachmentSummaryFiles([])
+    setInterviewAttachmentRequirements([])
+    setInterviewAttachmentRequirementCoverage({})
     setRequirementManualOverrides({})
   }
 
@@ -8331,6 +8856,8 @@ function IDE() {
     setRequirementDraftCandidate(null)
     setRequirementDraftDecisionPending(false)
     requirementDraftDecisionPendingRef.current=false
+    setRestoredBuildResume(null)
+    requirementCheckpointSignatureRef.current=''
     setPreviousTargetWorkflowPreview(null)
     invalidateRequirementWorkflowAfterEdit('지난 요구사항을 삭제했습니다. 새 요구사항을 다시 정의해 주세요.')
   }
@@ -8417,7 +8944,22 @@ function IDE() {
 
     if(interviewAttachmentSummary?.trim()){
       rows.push(
-        '[첨부 파일에서 파악한 요구사항]\n'+interviewAttachmentSummary.trim()
+        '[첨부 파일에서 파악한 요구사항 요약]\n'+interviewAttachmentSummary.trim()
+      )
+    }
+    if(Array.isArray(interviewAttachmentRequirements)&&interviewAttachmentRequirements.length){
+      rows.push(
+        '[첨부 파일 Deep Requirement Registry - 명시적 문서 요구사항 우선]\n'
+        +interviewAttachmentRequirements.slice(0,80).map(item=>
+          `${item?.id||'REQ'} [${item?.category||'FUNCTIONAL'}] ${String(item?.text||'').trim()}${item?.source?` (출처: ${item.source}${item?.location?` / ${item.location}`:''})`:''}`
+        ).filter(Boolean).join('\n')
+      )
+    }
+
+    if(uiLayoutConfig?.template_id){
+      rows.push(
+        '[사용자가 선택한 UI / Layout 설계 - 코드 생성 시 반드시 반영]\n'
+        +JSON.stringify(uiLayoutConfig,null,2)
       )
     }
 
@@ -8439,6 +8981,12 @@ function IDE() {
   }
 
   useEffect(()=>{
+    // v5.360: 사용자 인터뷰 응답을 가장 먼저 반환합니다. 대화 LLM 처리 중에는
+    // DB 초안 재계산을 시작하지 않고, 응답이 화면에 표시된 뒤 Background Preview로 갱신합니다.
+    if(busy||interviewAttachmentSummaryBusy){
+      return undefined
+    }
+
     const requestText=buildRequirementRequestFromCollectedInfo().trim()
     const hasUserRequirement=Boolean(
       requestText
@@ -8475,13 +9023,13 @@ function IDE() {
       }finally{
         if(!cancelled) setLiveDatabasePreviewLoading(false)
       }
-    },550)
+    },900)
 
     return ()=>{
       cancelled=true
       clearTimeout(timer)
     }
-  },[chat,workflowReq,confirmedInterviewRequirements,requirementManualOverrides,interviewAttachmentSummary])
+  },[chat,workflowReq,confirmedInterviewRequirements,requirementManualOverrides,interviewAttachmentSummary,interviewAttachmentRequirements,busy,interviewAttachmentSummaryBusy])
 
   const canDesignFromCollectedInfo=()=>{
     const statuses=getRequirementKeywordStatus()
@@ -8515,6 +9063,8 @@ function IDE() {
       ...userMessages,
       ...assistantMessages,
       interviewAttachmentSummary||'',
+      ...(interviewAttachmentRequirements||[]).map(item=>String(item?.text||'')),
+      uiLayoutConfig?.template_id?uiLayoutSummary(uiLayoutConfig):'',
       ...manualRequirementLines
     ].join('\n').toLowerCase()
 
@@ -8536,9 +9086,12 @@ function IDE() {
           .reverse()
           .find(text=>text.includes('요구사항 분석 완료'))||'',
 
-      ui:has('react')
-        ? (has('vite')?'React + Vite':'React 기반 웹 GUI')
-        : '',
+      ui:has('streamlit')
+        ? 'Streamlit'
+        : has('react')
+          ? (has('vite')?'React + Vite':'React 기반 웹 GUI')
+          : '',
+      ui_layout:uiLayoutConfig?.template_id?{...uiLayoutConfig}:null,
 
       backend:has('fastapi')
         ? (has('uvicorn')?'FastAPI + Uvicorn':'FastAPI')
@@ -8638,6 +9191,8 @@ function IDE() {
         rbac:false
       },
       attachment_summary:interviewAttachmentSummary||'',
+      attachment_requirements:(interviewAttachmentRequirements||[]).slice(0,120),
+      attachment_requirement_coverage:interviewAttachmentRequirementCoverage||{},
       manual_overrides:{...(requirementManualOverrides||{})}
     }
 
@@ -9119,10 +9674,25 @@ function IDE() {
               content:item?.content||''
             })),
             interview_context:buildRequirementRequestFromCollectedInfo(),
-            previous_build_state:(
-              ['FULL_REUSE','PARTIAL_REVISE'].includes(String(targetWorkflowPreview?.design_runtime?.incremental_revision?.mode||''))
-              && String(workflow?.state?.project_root||'')===String(projectRoot||'')
-            )?(workflow?.state||{}):{}
+            previous_build_state:(()=>{
+              const restoredState=(restoredBuildResume?.workflow_state&&typeof restoredBuildResume.workflow_state==='object')
+                ? restoredBuildResume.workflow_state
+                : {}
+              if(Object.keys(restoredState).length && String(restoredBuildResume?.project_root||projectRoot||'')===String(projectRoot||'')){
+                return restoredState
+              }
+              return (
+                ['FULL_REUSE','PARTIAL_REVISE'].includes(String(targetWorkflowPreview?.design_runtime?.incremental_revision?.mode||''))
+                && String(workflow?.state?.project_root||'')===String(projectRoot||'')
+              )?(workflow?.state||{}):{}
+            })(),
+            resume_context:restoredBuildResume?{
+              run_id:restoredBuildResume.run_id||'',
+              status:restoredBuildResume.status||'',
+              failure_stage:restoredBuildResume.failure_stage||'',
+              failure_reason:restoredBuildResume.failure_reason||'',
+              continue_failed_build:true
+            }:{}
           }
         })
       })
@@ -9212,6 +9782,17 @@ function IDE() {
       const finalStatus=classifyDevelopmentStatus(workflowState)
 
       setDevelopmentFinalStatus(finalStatus)
+      const completedResume={
+        source:'AGENT_BUILD',
+        run_id:String(result?.thread_id||workflowThreadId||''),
+        status:String(finalStatus?.status||workflowState?.status||''),
+        failure_stage:String(workflowState?.diagnostic_failure_stage||''),
+        failure_reason:String(workflowState?.diagnostic_failure_reason||workflowState?.error||''),
+        project_root:projectRoot,
+        workflow_state:workflowState
+      }
+      setRestoredBuildResume(completedResume)
+      saveRequirementDraft(completedResume)
 
       setAgentBuildMessage(
         finalStatus.kind==='success'
@@ -9418,6 +9999,27 @@ function IDE() {
           ||'FETCH_FAILED'
       }
 
+      const failedResume={
+        source:'AGENT_BUILD_FAILURE',
+        run_id:String(recoveredDiagnostics?.run_id||workflowThreadId||''),
+        status:String(failureStatus.status||''),
+        failure_stage:String(recoveredDiagnostics?.failure_stage||'network/fetch'),
+        failure_reason:String(recoveredDiagnostics?.failure_reason||transportErrorMessage||''),
+        project_root:projectRoot,
+        workflow_state:(recoveredDiagnostics?.workflow_state&&typeof recoveredDiagnostics.workflow_state==='object')
+          ? recoveredDiagnostics.workflow_state
+          : {
+              project_root:projectRoot,
+              request,
+              thread_id:workflowThreadId,
+              diagnostic_status:failureStatus.status,
+              diagnostic_failure_stage:recoveredDiagnostics?.failure_stage||'network/fetch',
+              diagnostic_failure_reason:recoveredDiagnostics?.failure_reason||transportErrorMessage
+            }
+      }
+      setRestoredBuildResume(failedResume)
+      saveRequirementDraft(failedResume)
+
       setWorkflow({
         state:{
           status:failureStatus.status,
@@ -9555,6 +10157,24 @@ function IDE() {
 
       const nextAttachmentMemory=String(result?.attachment_memory||interviewAttachmentMemory||'')
       if(nextAttachmentMemory) setInterviewAttachmentMemory(nextAttachmentMemory)
+
+      // v5.360: 파일을 일반 인터뷰 메시지와 함께 보낸 경우에도 Backend가
+      // 만든 안전한 구조화 요약을 사용자 화면과 Draft에 남깁니다. 원문 Context는
+      // 표시하지 않고 요구사항/기술/추가 확인 항목만 보여 줍니다.
+      const visibleAttachmentSummary=sanitizeInterviewDisplayText(result?.attachment_summary||'')
+      if(visibleAttachmentSummary){
+        setInterviewAttachmentSummary(visibleAttachmentSummary)
+        setInterviewAttachmentSummaryFiles(prev=>{
+          const merged=[...(Array.isArray(prev)?prev:[]),...submittedAttachmentFiles]
+          const seen=new Set()
+          return merged.filter(item=>{
+            const key=String(item?.path||item?.name||'').toLowerCase()
+            if(!key||seen.has(key)) return false
+            seen.add(key)
+            return true
+          })
+        })
+      }
       if(interviewAttachments.length){
         const consumedIds=interviewAttachments.map(item=>item.attachment_id)
         setInterviewAttachments([])
@@ -9652,8 +10272,8 @@ function IDE() {
     }
   }
 
-  const sendChat=async()=>{
-    const typedMessage=input.trim()
+  const sendChat=async(messageOverride='',retryPayload=null)=>{
+    const typedMessage=String(messageOverride||input).trim()
     const message=typedMessage || (interviewAttachments.length
       ? '첨부한 참고 파일을 분석해서 Agent 요구사항을 파악해줘.'
       : '')
@@ -9692,18 +10312,28 @@ function IDE() {
     }
     setWorkflowReq(prev=>prev?.trim()?prev:message)
 
-    const historyBeforeSend=[...chat]
-    // Attachment names are UI/session metadata. Do not inject the same file list
-    // into every user message; Backend receives opaque ids separately.
+    const isRetry=Boolean(retryPayload?.historyBeforeSend)
+    const historyBeforeSend=isRetry ? retryPayload.historyBeforeSend : [...chat]
     const userMessage={role:'user',content:sanitizeInterviewDisplayText(message)}
 
-    setChat(prev=>[...prev,userMessage])
+    if(!isRetry) setChat(prev=>[...prev,userMessage])
     setInput('')
     setBusy(true)
+    setInterviewActivityError('')
+    setInterviewRetryPayload(null)
+
+    const controller=new AbortController()
+    interviewAbortRef.current=controller
+    const retryRecord={type:'CHAT',message,historyBeforeSend}
+    const submittedAttachmentFiles=(interviewAttachments||[]).map(item=>({
+      name:String(item?.name||''),
+      path:String(item?.path||'')
+    })).filter(item=>item.name||item.path)
 
     try{
       const result=await api('/chat/interview',{
         method:'POST',
+        signal:controller.signal,
         body:JSON.stringify({
           message,
           history:historyBeforeSend,
@@ -9724,6 +10354,23 @@ function IDE() {
         : ''
       const nextAttachmentMemory=String(result?.attachment_memory||interviewAttachmentMemory||'')
       if(nextAttachmentMemory) setInterviewAttachmentMemory(nextAttachmentMemory)
+      const visibleAttachmentSummary=sanitizeInterviewDisplayText(result?.attachment_summary||'')
+      const minedAttachmentRequirements=Array.isArray(result?.attachment_requirements)?result.attachment_requirements:[]
+      if(visibleAttachmentSummary) setInterviewAttachmentSummary(visibleAttachmentSummary)
+      if(minedAttachmentRequirements.length) setInterviewAttachmentRequirements(minedAttachmentRequirements)
+      if(result?.attachment_requirement_coverage&&typeof result.attachment_requirement_coverage==='object') setInterviewAttachmentRequirementCoverage(result.attachment_requirement_coverage)
+      if((visibleAttachmentSummary||minedAttachmentRequirements.length)&&submittedAttachmentFiles.length){
+        setInterviewAttachmentSummaryFiles(prev=>{
+          const merged=[...(Array.isArray(prev)?prev:[]),...submittedAttachmentFiles]
+          const seen=new Set()
+          return merged.filter(item=>{
+            const key=String(item?.path||item?.name||'').toLowerCase()
+            if(!key||seen.has(key)) return false
+            seen.add(key)
+            return true
+          })
+        })
+      }
       if(interviewAttachments.length){
         const consumedIds=interviewAttachments.map(item=>item.attachment_id)
         setInterviewAttachments([])
@@ -9738,24 +10385,50 @@ function IDE() {
         ...prev,
         {role:'assistant',content:answer+attachmentWarning}
       ])
+      setInterviewRetryPayload(null)
 
-      // 응답이 누적될 때마다 수집 요구사항 Draft를 갱신합니다.
       setTimeout(()=>{
         buildConfirmedRequirementsFromChat()
         saveRequirementDraft()
       },0)
     }catch(e){
+      const aborted=controller.signal.aborted || String(e?.name||'')==='AbortError'
+      const messageText=aborted
+        ? '현재 AI 응답 대기를 사용자가 취소했습니다. 필요하면 현재 요청을 다시 시도할 수 있습니다.'
+        : '대화 요청 실패: '+String(e?.message||e)
+      setInterviewActivityError(messageText)
+      setInterviewRetryPayload(retryRecord)
       setChat(prev=>[
         ...prev,
-        {
-          role:'assistant',
-          content:'대화 요청 실패: '+String(e)
-        }
+        {role:'assistant',content:messageText}
       ])
     }finally{
+      if(interviewAbortRef.current===controller) interviewAbortRef.current=null
       setBusy(false)
     }
   }
+
+  const cancelInterviewActivity=()=>{
+    if(interviewAbortRef.current){
+      try{interviewAbortRef.current.abort()}catch{}
+    }
+    if(interviewSummaryAbortRef.current){
+      try{interviewSummaryAbortRef.current.abort()}catch{}
+    }
+  }
+
+  const retryInterviewActivity=async()=>{
+    const retry=interviewRetryPayload
+    if(!retry) return
+    if(retry.type==='SUMMARY'){
+      await summarizeInterviewAttachments()
+      return
+    }
+    if(retry.type==='CHAT'){
+      await sendChat(retry.message,retry)
+    }
+  }
+
 
   const sendBuilderAnswer=async()=>{
     if(!input.trim()&&!interviewAttachments.length) return
@@ -10010,8 +10683,9 @@ function IDE() {
       ['02','기능',leftSummary.features],
       ['03','MCP / Tool',leftSummary.mcpTools],
       ['04','DB 설계',leftSummary.database],
-      ['05','실행 환경',leftSummary.runtime],
-      ['06','확인',leftSummary.confirmation]
+      ['05','UI / Layout',leftSummary.uiLayout],
+      ['06','실행 환경',leftSummary.runtime],
+      ['07','확인',leftSummary.confirmation]
     ]
     return <div className="builder-shell">
     <aside className="builder-steps">
@@ -10030,6 +10704,14 @@ function IDE() {
             </div>
           : <small>대화를 시작하면 확정된 내용이 여기에 자동 정리됩니다.</small>}
       </div>
+      {(interviewAttachmentSummary||interviewAttachmentRequirements.length>0)&&<AttachmentAnalysisSummaryCard
+        summary={interviewAttachmentSummary}
+        files={interviewAttachmentSummaryFiles}
+        requirements={interviewAttachmentRequirements}
+        coverage={interviewAttachmentRequirementCoverage}
+        compact={true}
+        restored={requirementDraftRestored}
+      />}
       <div className="builder-tip">
         <strong>질문 방식 · Quality Gate</strong>
         <span>이미 답한 내용과 AgentStudio가 자동 설계할 기술 세부사항은 다시 묻지 않고, 사용자 결정이 필요한 질문 하나만 이어갑니다.</span>
@@ -10040,6 +10722,7 @@ function IDE() {
       <div className="builder-chat-head">
         <div><span className="ai-avatar">AI</span><div><strong>Agent 설계 인터뷰</strong><small>{aiInterviewLabel}</small></div></div>
         <div className="builder-head-actions">
+          <button type="button" className="builder-layout-button" onClick={()=>setUiLayoutGalleryOpen(true)}>▦ UI Layout</button>
           <button
             type="button"
             className="builder-workflow-button"
@@ -10127,9 +10810,13 @@ function IDE() {
         <div className="requirement-draft-info">
           <span>
             {requirementDraftDecisionPending
-              ? '같은 경로의 이전 요구사항 Draft 발견'
+              ? (requirementDraftCandidate?.build_resume?.status
+                  ? `이전 요구사항 + 개발 기록 발견 · ${requirementDraftCandidate.build_resume.status}`
+                  : '같은 경로의 이전 요구사항 Draft 발견')
               : requirementDraftRestored
-                ? '이전 수집 정보 복원됨'
+                ? (restoredBuildResume?.status
+                    ? `이전 수집/개발 기록 복원됨 · ${restoredBuildResume.status}`
+                    : '이전 수집 정보 복원됨')
                 : requirementDraftSavedAt
                   ? '수집 정보 저장됨'
                   : '수집 정보 저장 대기'}
@@ -10143,14 +10830,16 @@ function IDE() {
 
         {requirementDraftCandidate&&requirementDraftDecisionPending&&
           <div className="requirement-draft-choice">
-            <p>프로젝트 경로만 선택한 상태에서는 과거 대화를 자동으로 불러오지 않습니다.</p>
+            <p>{requirementDraftCandidate?.build_resume?.status
+              ? '이 경로에 이전 Agent 설계와 개발 실행 기록이 있습니다. 요구사항·Workflow·실패 진단을 함께 복원해 이어서 개발할 수 있습니다.'
+              : '프로젝트 경로만 선택한 상태에서는 과거 대화를 자동으로 불러오지 않습니다.'}</p>
             <div>
               <button
                 type="button"
                 className="requirement-draft-restore-button"
                 onClick={()=>restoreRequirementDraft(requirementDraftCandidate.key)}
               >
-                이전 요구사항 이어서 불러오기
+                {requirementDraftCandidate?.build_resume?.status?'이전 설계/개발 기록 이어서 불러오기':'이전 요구사항 이어서 불러오기'}
               </button>
               <button
                 type="button"
@@ -10196,6 +10885,11 @@ function IDE() {
             }
           </div>
         </details>
+      </div>
+      <div className={`ui-layout-choice-card ${uiLayoutConfig?.template_id?'selected':''}`}>
+        <div className="ui-layout-choice-head"><div><strong>UI / Layout</strong><small>썸네일을 보고 웹/웹앱 화면 구조를 선택합니다.</small></div><span>{uiLayoutConfig?.template_id?'선택됨':'선택 전'}</span></div>
+        {uiLayoutConfig?.template_id?<><UILayoutWireframe config={uiLayoutConfig} compact={true}/><b>{uiLayoutSummary(uiLayoutConfig)}</b></>:<div className="ui-layout-choice-empty">좌측 메뉴, 상단 메뉴, Footer, 사용자 메뉴, Dashboard/Chat/Search Layout 등을 시각적으로 고를 수 있습니다.</div>}
+        <button type="button" onClick={()=>setUiLayoutGalleryOpen(true)}>{uiLayoutConfig?.template_id?'레이아웃 변경':'레이아웃 템플릿 선택'}</button>
       </div>
       <label className="ux-field"><span>에이전트 이름</span><input value={newAgentName} onChange={e=>setNewAgentName(e.target.value)} placeholder="예: YouTube MCP Agent"/></label>
       <label className="ux-field required"><span>프로젝트 경로</span>
@@ -10302,6 +10996,20 @@ function IDE() {
       </small>
       {newAgentCreateResult&&<div className={newAgentCreateResult.ok?'ux-result good':'ux-result bad'}>{newAgentCreateResult.message}</div>}
     </aside>
+    <UILayoutTemplateGallery
+      open={uiLayoutGalleryOpen}
+      value={uiLayoutConfig}
+      purposeText={buildRequirementRequestFromCollectedInfo()}
+      onClose={()=>setUiLayoutGalleryOpen(false)}
+      onApply={(config)=>{
+        setUiLayoutConfig(config)
+        setUiLayoutGalleryOpen(false)
+        setRequirementManualOverrides(prev=>({...prev,ui:uiLayoutSummary(config)}))
+        setConfirmedInterviewRequirements(prev=>({...prev,ui_layout:config}))
+        invalidateRequirementWorkflowAfterEdit('UI / Layout 템플릿을 변경했습니다. 선택한 레이아웃을 기준으로 Workflow와 코드 구조를 다시 설계할 수 있습니다.')
+        setTimeout(()=>saveRequirementDraft(),0)
+      }}
+    />
   </div>
   }
 
@@ -12455,11 +13163,24 @@ function IDE() {
       failedStatuses.has(status)
       ||testReturncode>0
     ){
+      const repairValidation=workflowState?.repair_plan_validation||{}
+      const repairTargets=Array.isArray(repairValidation?.targets)?repairValidation.targets:[]
+      const missingRepairTargets=Array.isArray(repairValidation?.missing_repair_targets)?repairValidation.missing_repair_targets:[]
+      const repairDetail=(status==='TEST_REPAIR_PLAN_INCOMPLETE'||status==='TEST_REPAIR_PLAN_FAILED')
+        ? [
+            '테스트 실패 자동 복구가 적용 가능한 수정안을 만들지 못했습니다.',
+            repairTargets.length?`분석 대상: ${repairTargets.join(', ')}`:'',
+            missingRepairTargets.length?`아직 수정안을 만들지 못한 파일: ${missingRepairTargets.join(', ')}`:'',
+            'v5.360은 Focused Repair와 대상 파일 단독 Recovery를 자동으로 시도한 뒤에도 적용 가능한 Patch가 없을 때만 이 상태로 종료합니다.'
+          ].filter(Boolean).join(' ')
+        : ''
+
       return {
         kind:'failure',
         title:'Agent 개발에 실패했습니다.',
         detail:
-          errorText
+          repairDetail
+          ||errorText
           ||(
             testReturncode>0
               ? `테스트가 실패했습니다. ReturnCode=${testReturncode}`
@@ -13025,9 +13746,11 @@ function IDE() {
     const state=workflow?.state||workflow||{}
     const packageResult=state?.package_result||{}
     const testResult=state?.test_result||{}
-    const adaptive=loadedProjectAnalysis?.adaptive_report
-      ||(loadedProjectAnalysis?.project_type?loadedProjectAnalysis:null)
-      ||{}
+    const adaptive=selectedProjectId
+      ? (loadedProjectAnalysis?.adaptive_report
+        ||(loadedProjectAnalysis?.project_type?loadedProjectAnalysis:null)
+        ||{})
+      : {}
     const adaptiveArchitecture=adaptive?.architecture||{}
     const targetWorkflow=state?.target_agent_workflow
       || targetWorkflowPreview?.target_agent_workflow
@@ -13172,7 +13895,8 @@ function IDE() {
           report:reportSnapshot,
           coding_style_report:codingStyleReport||{},
           llm_usage_summary:llmUsageSummary||{},
-          db_erd:dbErdReport||{}
+          db_erd:dbErdReport||{},
+          ui_layout:uiLayoutConfig||confirmedInterviewRequirements?.ui_layout||null
         })
       })
 
@@ -13276,6 +14000,15 @@ function IDE() {
               : <small>대화를 시작하면 확정된 내용이 여기에 자동 정리됩니다.</small>}
           </div>
 
+          {(interviewAttachmentSummary||interviewAttachmentRequirements.length>0)&&<AttachmentAnalysisSummaryCard
+            summary={interviewAttachmentSummary}
+            files={interviewAttachmentSummaryFiles}
+            requirements={interviewAttachmentRequirements}
+            coverage={interviewAttachmentRequirementCoverage}
+            compact={true}
+            restored={requirementDraftRestored}
+          />}
+
           <div className="builder-tip">
             <strong>질문 방식 · Quality Gate</strong>
             <span>
@@ -13290,8 +14023,7 @@ function IDE() {
         <strong>프로젝트</strong>
         <button onClick={startNewProject}>＋ 새 프로젝트</button>
       </div>
-      <input className="project-search" value={projectSearch}
-        onChange={e=>setProjectSearch(e.target.value)} placeholder="프로젝트 검색..."/>
+      <DebouncedProjectSearchInput value={projectSearch} onCommit={setProjectSearch} placeholder="프로젝트 검색..."/>
       <div className="project-filter-tabs">
         <button
           className={projectFilter==='ALL'?'active':''}
@@ -13552,6 +14284,7 @@ function IDE() {
               </div>
 
               <div className="builder-head-actions">
+                <button type="button" className="builder-layout-button" onClick={()=>setUiLayoutGalleryOpen(true)}>▦ UI Layout</button>
                 <button
                   type="button"
                   className="builder-workflow-button"
@@ -13615,36 +14348,51 @@ function IDE() {
               analysisActive={busy||interviewAttachmentSummaryBusy}
               onAnalysisStateChange={setInterviewAttachmentAnalysis}
             />
+            {interviewAttachments.length>0&&interviewAttachmentAnalysis.ready&&!busy&&!interviewAttachmentSummaryBusy&&<div className="attachment-ready-gate">
+              <div>
+                <strong>✓ 첨부 Context 준비 완료</strong>
+                <span>파일 첨부만으로 DB·Workflow·Architecture 심층 분석을 자동 시작하지 않습니다. 답변 보내기 또는 아래 버튼을 눌렀을 때 본격 분석합니다.</span>
+              </div>
+              <button type="button" onClick={summarizeInterviewAttachments}>첨부만 먼저 분석</button>
+            </div>}
+            <AgentActivityProgress
+              active={busy||interviewAttachmentSummaryBusy}
+              kind={interviewAttachmentSummaryBusy?'ATTACHMENT_SUMMARY':busy?'INTERVIEW':'IDLE'}
+              attachmentCount={interviewAttachments.length}
+              attachmentState={interviewAttachmentAnalysis}
+              databasePreviewLoading={liveDatabasePreviewLoading}
+              error={interviewActivityError}
+              canRetry={!!interviewRetryPayload}
+              onCancel={cancelInterviewActivity}
+              onRetry={retryInterviewActivity}
+            />
             {interviewAttachmentSummaryBusy&&<div className="attachment-intent-summary loading">
               <div className="attachment-intent-summary-head">
-                <strong>첨부 파일에서 만들고자 하는 내용을 정리하고 있습니다...</strong>
+                <strong>첨부 파일 통합 요구사항을 분석하고 있습니다...</strong>
                 <span>AI 통합 분석</span>
               </div>
-              <p>파일별 텍스트 추출은 완료되었습니다. 여러 파일의 목적·기능·데이터·기술 구성을 하나의 요구사항으로 통합하고 있습니다.</p>
+              <p>사용자가 시작한 첨부 분석입니다. 상세 진행 상태와 Backend Heartbeat는 위 진행 패널에서 확인할 수 있습니다.</p>
             </div>}
             {interviewAttachmentSummaryError&&<div className="attachment-intent-summary error">
               <div className="attachment-intent-summary-head"><strong>첨부 요구사항 정리 실패</strong></div>
               <p>{interviewAttachmentSummaryError}</p>
             </div>}
-            {interviewAttachmentSummary&&<div className="attachment-intent-summary">
-              <div className="attachment-intent-summary-head">
-                <strong>첨부 파일에서 파악한 만들고자 하는 내용</strong>
-                <span>요구사항 Context 반영 완료</span>
-              </div>
-              {interviewAttachmentSummaryFiles.length>0&&<div className="attachment-intent-files">
-                {interviewAttachmentSummaryFiles.map((item,index)=><span key={`${item.path||item.name}-${index}`}>{item.name||item.path}</span>)}
-              </div>}
-              <div className="attachment-intent-summary-body">{interviewAttachmentSummary}</div>
-              <div className="attachment-intent-summary-actions">
-                <button type="button" onClick={()=>{
-                  setInterviewAttachmentSummary('')
-                  setInterviewAttachmentSummaryFiles([])
-                  setInterviewAttachmentMemory('')
-                  setConfirmedInterviewRequirements({})
-                  invalidateRequirementWorkflowAfterEdit('첨부 파일 분석 Context를 지웠습니다. 남은 요구사항 기준으로 다시 정의해 주세요.')
-                }}>첨부 분석 Context 지우기</button>
-              </div>
-            </div>}
+            {(interviewAttachmentSummary||interviewAttachmentRequirements.length>0)&&<AttachmentAnalysisSummaryCard
+              summary={interviewAttachmentSummary}
+              files={interviewAttachmentSummaryFiles}
+              requirements={interviewAttachmentRequirements}
+              coverage={interviewAttachmentRequirementCoverage}
+              restored={requirementDraftRestored}
+              onClear={()=>{
+                setInterviewAttachmentSummary('')
+                setInterviewAttachmentSummaryFiles([])
+                setInterviewAttachmentRequirements([])
+                setInterviewAttachmentRequirementCoverage({})
+                setInterviewAttachmentMemory('')
+                setConfirmedInterviewRequirements({})
+                invalidateRequirementWorkflowAfterEdit('첨부 파일 분석 Context를 지웠습니다. 남은 요구사항 기준으로 다시 정의해 주세요.')
+              }}
+            />}
             {interviewAttachmentMemory&&!interviewAttachments.length&&!interviewAttachmentSummary&&<div className="interview-attachment-memory">
               <span>✓ 참고 파일 분석 내용이 현재 인터뷰 Context에 반영되었습니다. 원본 첨부는 자동 해제되어 다음 질문에 반복 첨부되지 않습니다.</span>
               <button type="button" onClick={()=>setInterviewAttachmentMemory('')}>참고 Context 지우기</button>
@@ -13671,6 +14419,20 @@ function IDE() {
             </div>
           </section>
         </div>}
+        {workspaceTab==='DESIGN'&&<UILayoutTemplateGallery
+          open={uiLayoutGalleryOpen}
+          value={uiLayoutConfig}
+          purposeText={buildRequirementRequestFromCollectedInfo()}
+          onClose={()=>setUiLayoutGalleryOpen(false)}
+          onApply={(config)=>{
+            setUiLayoutConfig(config)
+            setUiLayoutGalleryOpen(false)
+            setRequirementManualOverrides(prev=>({...prev,ui:uiLayoutSummary(config)}))
+            setConfirmedInterviewRequirements(prev=>({...prev,ui_layout:config}))
+            invalidateRequirementWorkflowAfterEdit('UI / Layout 템플릿을 변경했습니다. 선택한 레이아웃을 기준으로 Workflow와 코드 구조를 다시 설계할 수 있습니다.')
+            setTimeout(()=>saveRequirementDraft(),0)
+          }}
+        />}
 
         {workspaceTab==='WORKFLOW'&&<div className="workflow-page visual-workflow-page">
           <div className="workflow-page-head visual">
@@ -13732,8 +14494,8 @@ function IDE() {
               <div>
                 <span className="section-visual-icon target">⇢</span>
                 <div>
-                  <strong>{targetWorkflowPreview?.target_agent_workflow?.name||loadedProjectAnalysis?.adaptive_report?.workflow?.name||'개발 대상 Agent Workflow'}</strong>
-                  <small>{loadedProjectAnalysis?.adaptive_report?.workflow?.source==='PROJECT_SOURCE_INFERENCE'?'현재 프로젝트 소스에서 추론한 실제 처리 흐름':'실제 사용자가 Agent를 실행했을 때 처리되는 업무 순서'}</small>
+                  <strong>{targetWorkflowPreview?.target_agent_workflow?.name||(selectedProjectId?loadedProjectAnalysis?.adaptive_report?.workflow?.name:null)||'개발 대상 Agent Workflow'}</strong>
+                  <small>{selectedProjectId&&loadedProjectAnalysis?.adaptive_report?.workflow?.source==='PROJECT_SOURCE_INFERENCE'?'현재 프로젝트 소스에서 추론한 실제 처리 흐름':'실제 사용자가 Agent를 실행했을 때 처리되는 업무 순서'}</small>
                 </div>
               </div>
               <span className="workflow-type-badge target">TARGET AGENT</span>
@@ -13900,7 +14662,7 @@ function IDE() {
               </>}
             </div>}
 
-            <TargetWorkflowDiagram workflow={targetWorkflowPreview?.target_agent_workflow||loadedProjectAnalysis?.adaptive_report?.workflow}/>
+            <TargetWorkflowDiagram workflow={targetWorkflowPreview?.target_agent_workflow||(selectedProjectId?loadedProjectAnalysis?.adaptive_report?.workflow:null)}/>
           </div>}
         </div>}
 
@@ -15338,6 +16100,17 @@ function IDE() {
           </div>
 
 
+
+          <div className={`ui-layout-choice-card ${uiLayoutConfig?.template_id?'selected':''}`}>
+            <div className="ui-layout-choice-head">
+              <div><strong>UI / Layout</strong><small>좌측 메뉴·상단 메뉴·Footer·사용자 메뉴·웹/웹앱 구조를 시각적으로 선택합니다.</small></div>
+              <span>{uiLayoutConfig?.template_id?'선택됨':'선택 전'}</span>
+            </div>
+            {uiLayoutConfig?.template_id
+              ? <><UILayoutWireframe config={uiLayoutConfig} compact={true}/><b>{uiLayoutSummary(uiLayoutConfig)}</b></>
+              : <div className="ui-layout-choice-empty">Agent 성격에 맞는 레이아웃 템플릿을 선택하세요.</div>}
+            <button type="button" onClick={()=>setUiLayoutGalleryOpen(true)}>{uiLayoutConfig?.template_id?'레이아웃 변경':'레이아웃 템플릿 선택'}</button>
+          </div>
 
           <label className="ux-field">
             <span>에이전트 이름</span>

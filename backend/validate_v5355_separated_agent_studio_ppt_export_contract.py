@@ -73,7 +73,7 @@ base = {
 
 # Agent full deck must contain only target project/agent content.
 agent_payload = dict(base, scope="ALL", deck_type="AGENT")
-agent_blob, agent_name = build_agentstudio_presentation(agent_payload, "5.356")
+agent_blob, agent_name = build_agentstudio_presentation(agent_payload, "5.368")
 agent_text = "\n".join(texts(agent_blob))
 require(agent_blob[:2] == b"PK", "Agent PPTX signature missing")
 require("Demo Target Workflow" in agent_text, "Agent deck missing target workflow")
@@ -85,7 +85,7 @@ require("_Agent_PPT_전체_" in agent_name, "Agent full filename must be explici
 
 # Page-level workflow export is target-only and does not contain Studio content or a full-deck cover.
 workflow_payload = dict(base, scope="WORKFLOW", deck_type="AGENT")
-workflow_blob, workflow_name = build_agentstudio_presentation(workflow_payload, "5.356")
+workflow_blob, workflow_name = build_agentstudio_presentation(workflow_payload, "5.368")
 workflow_slides = texts(workflow_blob)
 workflow_text = "\n".join(workflow_slides)
 require(len(workflow_slides) == 1, "Agent workflow page export should contain only the target workflow slide")
@@ -95,7 +95,7 @@ require("_워크플로우_" in workflow_name, "workflow filename missing scope l
 
 # Studio deck must be self-contained and target-project independent.
 studio_payload = dict(base, scope="ALL", deck_type="STUDIO")
-studio_blob, studio_name = build_agentstudio_presentation(studio_payload, "5.356")
+studio_blob, studio_name = build_agentstudio_presentation(studio_payload, "5.368")
 studio_text = "\n".join(texts(studio_blob))
 require(studio_blob[:2] == b"PK", "Studio PPTX signature missing")
 require("THEANOVA\nAgentStudio" in studio_text or "AgentStudio" in studio_text, "Studio cover missing")
@@ -120,6 +120,6 @@ for scope in ("WORKFLOW", "RUN", "REPORT", "ARCHITECTURE", "DB_ERD"):
 require('deck_type: str = "AGENT"' in routes, "deck_type request field missing")
 require('deck_type == "STUDIO" and scope != "ALL"' in routes, "backend must block page-level Studio exports")
 require('if deck_type == "STUDIO"' in service, "Studio deck builder branch missing")
-require("AGENTSTUDIO_FRONTEND_VERSION='5.356'" in app, "frontend version must be 5.356")
+require("AGENTSTUDIO_FRONTEND_VERSION='5.368'" in app, "frontend version must be 5.368")
 
-print("PASS v5.356 Separated Agent / Studio PPT Export contract")
+print("PASS v5.368 Separated Agent / Studio PPT Export contract")

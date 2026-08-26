@@ -504,8 +504,8 @@ def build_attachment_context(
     }
 
 
-_REQUIREMENTS_TOTAL_CONTEXT_CHARS = 18_000
-_REQUIREMENTS_PER_FILE_CHARS = 8_000
+_REQUIREMENTS_TOTAL_CONTEXT_CHARS = 28_000
+_REQUIREMENTS_PER_FILE_CHARS = 12_000
 
 
 def _unique_lines(lines: Iterable[str], limit: int = 160) -> list[str]:
@@ -525,22 +525,99 @@ def _unique_lines(lines: Iterable[str], limit: int = 160) -> list[str]:
     return result
 
 
-def _requirements_outline(content: str, content_type: str, limit: int) -> str:
-    """Build a compact, deterministic evidence digest for requirements interviews.
+def _requirement_candidate_lines(content: str, limit: int = 220) -> list[str]:
+    """Extract requirement-bearing natural language before source-code compression.
 
-    Requirements interviews need enough evidence to understand an attached sample
-    project, but they must not inject tens of thousands of source-code characters
-    into a small local model.  This outline preserves headings, comments, imports,
-    declarations, UI/DB/LLM/MCP integration clues, and representative text while
-    aggressively removing repeated implementation bodies.
+    Notebook problem statements are commonly written in Markdown cells.  Older
+    requirements digests kept imports/framework clues but could drop ordinary
+    Korean bullets and paragraphs, which meant a requirement-rich assignment was
+    reduced to only a handful of technologies.  This pass keeps Markdown prose,
+    bullets, constraints and deliverables as first-class evidence.
+    """
+    text = str(content or '').replace('\r\n', '\n').replace('\r', '\n')
+    lines = text.splitlines()
+    result: list[str] = []
+    seen: set[str] = set()
+    notebook_cell = ''
+    notebook_cell_type = ''
+
+    requirement_words = re.compile(
+        r'(?i)(해야|한다|하도록|필수|반드시|금지|제한|사용|구현|제공|저장|조회|검색|처리|관리|구성|연결|'
+        r'목표|산출물|제약|제공 자료|환경 확인|streamlit|fastapi|postgres|pgvector|redis|langchain|langgraph|'
+        r'openai|ollama|mcp|csv|api key|password|환경변수|최대\s*\d+|\d+\s*건)'
+    )
+    bullet_re = re.compile(r'^\s*(?:[-*+]\s+|\d+[.)]\s+)')
+    cell_re = re.compile(r'^##\s+Cell\s+(\d+)\s+\(([^)]+)\)\s*$', re.IGNORECASE)
+
+    def add(raw: str, location: str = '') -> None:
+        value = str(raw or '').strip()
+        if not value or value.startswith('```'):
+            return
+        if len(value) > 900:
+            value = value[:900]
+        # Skip obvious source-code statements. Comments in code cells may still be
+        # useful and are handled by the structural clue pass below.
+        if value.startswith(('import ', 'from ', 'def ', 'class ', 'async def ', 'SELECT ', 'CREATE ', 'INSERT ', 'UPDATE ')):
+            return
+        cleaned = re.sub(r'^\s*(?:[-*+]\s+|\d+[.)]\s+)', '', value).strip()
+        cleaned = re.sub(r'^#{1,6}\s+', '', cleaned).strip()
+        if not cleaned:
+            return
+        key = re.sub(r'\s+', ' ', cleaned).casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        prefix = f'[{location}] ' if location else ''
+        result.append(prefix + cleaned)
+
+    for line in lines:
+        match = cell_re.match(str(line or '').strip())
+        if match:
+            notebook_cell = f'Cell {match.group(1)} {match.group(2).strip()}'
+            notebook_cell_type = match.group(2).strip().casefold()
+            continue
+
+        stripped = str(line or '').strip()
+        if not stripped:
+            continue
+
+        is_markdown = notebook_cell_type == 'markdown'
+        is_bullet = bool(bullet_re.match(stripped))
+        is_heading = bool(re.match(r'^#{1,6}\s+', stripped))
+        has_requirement_signal = bool(requirement_words.search(stripped))
+        has_korean_prose = bool(re.search(r'[가-힣]', stripped)) and not re.search(r'[{}();=]{3,}', stripped)
+
+        if is_markdown and (is_bullet or is_heading or has_requirement_signal or has_korean_prose):
+            # Long assignment paragraphs frequently contain several independent
+            # requirements. Split on sentence boundaries before adding them.
+            pieces = re.split(r'(?<=[.!?。])\s+', stripped)
+            for piece in pieces:
+                add(piece, notebook_cell)
+        elif is_bullet and (has_requirement_signal or has_korean_prose):
+            add(stripped, notebook_cell)
+        elif has_requirement_signal and has_korean_prose:
+            add(stripped, notebook_cell)
+
+        if len(result) >= limit:
+            break
+
+    return result[:limit]
+
+
+def _requirements_outline(content: str, content_type: str, limit: int) -> str:
+    """Build a requirement-first, bounded evidence digest for design interviews.
+
+    Explicit Markdown requirements are preserved before framework/import clues.
+    This prevents large Notebook assignments from losing ordinary prose bullets
+    when a local LLM receives the compact context.
     """
     text = str(content or '').replace('\r\n', '\n').replace('\r', '\n').strip()
     if not text:
         return ''
 
-    target = max(2_000, int(limit))
-    if len(text) <= target:
-        return text
+    target = max(3_000, int(limit))
+    candidate_lines = _requirement_candidate_lines(text, limit=240)
+    candidate_block = '\n'.join(f'- {line}' for line in candidate_lines)
 
     lines = text.splitlines()
     selected: list[str] = []
@@ -557,27 +634,29 @@ def _requirements_outline(content: str, content_type: str, limit: int) -> str:
     for line in lines:
         if combined.search(line):
             selected.append(line)
-
     selected = _unique_lines(selected, 220)
-    outline = '\n'.join(selected)
+    structure = '\n'.join(selected)
 
-    # Keep short representative beginning/end excerpts for natural-language
-    # requirements that may not match the structural patterns above.
-    head_budget = min(2_400, max(900, target // 4))
-    tail_budget = min(1_200, max(500, target // 8))
-    head = text[:head_budget]
-    tail = text[-tail_budget:] if len(text) > head_budget + tail_budget else ''
+    # Requirements receive most of the budget.  Structure clues are secondary,
+    # and small head/tail excerpts remain only as a safety net.
+    candidate_budget = min(len(candidate_block), max(1_800, int(target * 0.62)))
+    structure_budget = max(900, int(target * 0.22))
+    excerpt_budget = max(600, target - candidate_budget - structure_budget - 350)
+    head_budget = max(400, int(excerpt_budget * 0.7))
+    tail_budget = max(200, excerpt_budget - head_budget)
 
-    chunks = [
-        '[문서/코드 구조 및 핵심 단서]',
-        outline[: max(0, target - head_budget - tail_budget - 500)],
-        '\n[대표 앞부분]\n' + head,
-    ]
-    if tail:
-        chunks.append('\n[대표 끝부분]\n' + tail)
-    compact = '\n'.join(part for part in chunks if str(part).strip())
+    chunks: list[str] = []
+    if candidate_block:
+        chunks.append('[명시적 요구사항 후보]\n' + candidate_block[:candidate_budget])
+    if structure:
+        chunks.append('[기술/구조 단서]\n' + structure[:structure_budget])
+    if not candidate_block or len(candidate_block) < candidate_budget // 2:
+        chunks.append('[대표 앞부분]\n' + text[:head_budget])
+        if len(text) > head_budget + tail_budget:
+            chunks.append('[대표 끝부분]\n' + text[-tail_budget:])
+
+    compact = '\n\n'.join(part for part in chunks if str(part).strip())
     return compact[:target]
-
 
 def build_requirements_attachment_context(
     ids: Iterable[str],
@@ -605,6 +684,14 @@ def build_requirements_attachment_context(
         _cleanup_locked()
         records = [(_registry.get(value), value) for value in requested]
 
+    # Share the requirements context budget across all selected files.  Older
+    # behavior allowed the first two large files to consume the whole budget and
+    # silently omit a later primary Notebook problem statement.
+    fair_share = min(
+        max(1_500, int(per_file_char_limit)),
+        max(3_000, int(total_char_limit) // max(1, len(records))),
+    )
+
     for record, requested_id in records:
         if not record:
             warnings.append(f'첨부 ID가 만료되었거나 존재하지 않습니다: {requested_id[:8]}')
@@ -627,7 +714,7 @@ def build_requirements_attachment_context(
             warnings.append('Agent 설계 인터뷰용 첨부 Context 예산을 초과하여 일부 파일을 생략했습니다.')
             break
 
-        allowed = min(max(1_500, int(per_file_char_limit)), remaining)
+        allowed = min(fair_share, remaining)
         digest = _requirements_outline(content, content_type, allowed).strip()
         if not digest:
             warnings.append(f'{record.name}: 인터뷰용 분석 요약을 만들지 못했습니다.')

@@ -57,11 +57,11 @@ if (-not $IsAdministrator) {
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# v5.356: SYSTEM_ADMIN must not carry a hand-maintained stale version literal.
+# v5.363: SYSTEM_ADMIN must not carry a hand-maintained stale version literal.
 # Resolve the expected version from this checkout's backend source so the launcher
 # can still detect a genuinely old process on the selected port without failing
 # simply because SYSTEM_ADMIN.ps1 itself was not bumped during packaging.
-$FallbackAgentStudioVersion = "5.356"
+$FallbackAgentStudioVersion = "5.368"
 function Resolve-LocalAgentStudioVersion {
     param(
         [string]$ProjectRoot,

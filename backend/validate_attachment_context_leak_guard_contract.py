@@ -14,10 +14,10 @@ checks = {
     'interview route uses digest': 'attachment_context = build_requirements_attachment_context(' in ROUTES,
     'legacy 90k interview context removed': 'attachment_context = build_requirements_attachment_context(' in ROUTES and 'purpose="Agent 설계 인터뷰 요구사항/참고자료 분석",\n            total_char_limit=90000' not in ROUTES,
     'system no raw attachment rule': '첨부 파일의 코드/문서 원문을 답변에 그대로 복사' in AGENT,
-    'echo guard': 'def _looks_like_attachment_echo(' in AGENT and 'if _looks_like_attachment_echo(content, attachment_block):' in AGENT,
+    'echo guard': 'def _looks_like_attachment_echo(' in AGENT and 'if fresh_attachment_block and _looks_like_attachment_echo(content, fresh_attachment_block):' in AGENT,
     'safe fallback': 'def _safe_attachment_fallback(' in AGENT,
     'frontend last-resort guard': 'const protectInterviewAssistantAnswer=' in APP and 'const answer=protectInterviewAssistantAnswer(' in APP,
-    'version': "AGENTSTUDIO_FRONTEND_VERSION='5.356'" in APP,
+    'version': "AGENTSTUDIO_FRONTEND_VERSION='5.368'" in APP,
 }
 failed = [name for name, ok in checks.items() if not ok]
 for name, ok in checks.items():

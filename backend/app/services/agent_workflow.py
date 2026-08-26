@@ -14,8 +14,8 @@ from app.services.as_built_architecture import analyze_as_built_architecture, bu
 from app.services.approval_service import approval_payload, requires_approval
 from app.services.debug_service import analyze_failure
 from app.services.git_service import checkpoint
-from app.services.local_control import read_file, run_command
-from app.services.patch_service import PatchApplyError, apply_patch, create_patch
+from app.services.local_control import read_file, write_file, run_command
+from app.services.patch_service import PatchApplyError, _safe_replacement, _strip_outer_markdown_fence_for_source, apply_patch, create_patch
 from app.services.project_analyzer import local_project_summary
 from app.services.coding_rule_selector import coding_rules_for_request
 from app.services.coding_rule_validator import validate_code_style
@@ -77,6 +77,7 @@ class AgentState(TypedDict, total=False):
     # Runtime validation
     test_command: str
     test_result: dict
+    pretest_source_repair: list[dict]
     debug_iteration: int
     debug_history: list[dict]
 
@@ -510,6 +511,15 @@ def _normalize_react_frontend_plan_extensions(value: dict, *, typescript: bool) 
         path = str(raw or "").replace("\\", "/")
         low = path.casefold()
         if low.startswith("frontend/src/"):
+            # React/Vite의 표준 entry 파일은 운영체제와 무관하게 canonical casing을 유지합니다.
+            # Windows에서는 app.tsx/App.tsx가 같은 파일처럼 보이지만 Linux CI/Vercel에서는
+            # 서로 다른 경로이므로 File Plan 단계에서부터 App.tsx로 고정합니다.
+            if low in {"frontend/src/app.jsx", "frontend/src/app.tsx"}:
+                return "frontend/src/App.tsx"
+            if low in {"frontend/src/main.jsx", "frontend/src/main.tsx"}:
+                return "frontend/src/main.tsx"
+            if low in {"frontend/src/services/api.js", "frontend/src/services/api.ts"}:
+                return "frontend/src/services/api.ts"
             if low.endswith(".jsx"):
                 return path[:-4] + ".tsx"
             if low.endswith(".js"):
@@ -545,6 +555,75 @@ def _normalize_react_frontend_plan_extensions(value: dict, *, typescript: bool) 
         normalized_map.append(row)
     value["component_file_map"] = normalized_map
     return value
+
+
+def _cleanup_react_typescript_legacy_sources(state: AgentState) -> dict:
+    """React + TypeScript 확정 Agent에 남은 legacy JS/JSX entry를 결정적으로 제거합니다.
+
+    LLM Repair가 금지 파일을 빈 파일로 덮어쓰는 것만으로는 ``Path.is_file()`` 기반
+    Architecture Validator를 통과할 수 없습니다. 또한 빈 App.jsx/main.jsx/api.js가 남으면
+    Vite/IDE가 잘못된 entry를 잡거나 사용자가 중복 구현으로 오해할 수 있습니다.
+
+    따라서 TypeScript 계약이 확정된 경우 AgentStudio가 LLM에 삭제를 맡기지 않고
+    정확히 알려진 legacy entry 세 개를 직접 삭제합니다. 이 처리는 idempotent하며
+    ``frontend/src``의 다른 JavaScript 설정/라이브러리 파일은 건드리지 않습니다.
+    """
+    contracts = _requirement_contracts(state)
+    if not contracts.get("react_typescript"):
+        return {"ok": True, "patch_rows": [], "removed": []}
+
+    root = Path(state["project_root"]).resolve()
+    legacy_paths = (
+        "frontend/src/App.jsx",
+        "frontend/src/main.jsx",
+        "frontend/src/services/api.js",
+    )
+    rows: list[dict] = []
+    removed: list[str] = []
+
+    for relative in legacy_paths:
+        target = (root / relative).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            continue
+        if not target.is_file():
+            continue
+        try:
+            previous_bytes = target.stat().st_size
+            target.unlink(missing_ok=True)
+        except OSError as exc:
+            return {
+                "ok": False,
+                "patch_rows": rows,
+                "removed": removed,
+                "error": f"{type(exc).__name__}: {exc}",
+                "path": str(target),
+            }
+        if target.exists():
+            return {
+                "ok": False,
+                "patch_rows": rows,
+                "removed": removed,
+                "error": "legacy React JavaScript entry 삭제 후 파일이 남아 있습니다.",
+                "path": str(target),
+            }
+        removed.append(relative)
+        rows.append({
+            "path": str(target),
+            "changed": True,
+            "deleted": True,
+            "verified": True,
+            "bytes": 0,
+            "previous_bytes": previous_bytes,
+            "reason": (
+                "React + TypeScript 확정 요구와 충돌하는 legacy JavaScript/JSX entry를 "
+                "AgentStudio가 결정적으로 제거했습니다."
+            ),
+            "replacement_strategies": ["delete_legacy_react_javascript_entry"],
+        })
+
+    return {"ok": True, "patch_rows": rows, "removed": removed}
 
 
 def _react_frontend_minimum_files(*, typescript: bool) -> list[tuple[str, str]]:
@@ -1699,6 +1778,13 @@ def _deterministic_support_file_change(
             default = field.get("default")
             secret = bool(field.get("secret"))
             value = "" if secret or default is None else str(default)
+            if env_key == "DATABASE_URL":
+                rows += [
+                    "# DATABASE_URL 입력 방법 (PostgreSQL)",
+                    "# 형식: postgresql://사용자:비밀번호@호스트:포트/데이터베이스명",
+                    "# 로컬 예시: postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/postgres",
+                    "# 예시의 YOUR_PASSWORD와 DB 이름은 실제 환경에 맞게 변경하세요.",
+                ]
             rows.append(f"{env_key}={value}")
 
         if not seen:
@@ -2300,13 +2386,21 @@ def _test_repair_target_paths(state: AgentState, analysis: dict) -> list[str]:
             result.append(rel)
 
     for raw in candidates:
+        raw_slash = str(raw or "").replace("\\", "/").strip()
         normalized = _normalize_relative_path(raw, project_root)
         if normalized and not re.match(r"^[a-z]:/", normalized):
-            if "/" in normalized:
+            # Traceback/compileall commonly emits `.\main.py`.  That is an
+            # explicit project-root path and must win over a File Plan entry such
+            # as backend/app/main.py that merely shares the same basename.
+            exact_root_candidate = (root / normalized).is_file()
+            explicitly_relative = raw_slash.startswith("./")
+            if "/" in normalized or explicitly_relative or exact_root_candidate:
+                before_count = len(result)
                 add(normalized)
-                continue
+                if len(result) > before_count:
+                    continue
 
-        basename = Path(str(raw).replace("\\", "/")).name.casefold()
+        basename = Path(raw_slash).name.casefold()
         if not basename:
             continue
         matches = [path for path in planned if Path(path).name.casefold() == basename]
@@ -2332,6 +2426,72 @@ def _test_repair_target_paths(state: AgentState, analysis: dict) -> list[str]:
             add(disk_matches[0])
 
     return result[:3]
+
+
+def _materialize_focused_repair_change(change: dict, current_content: str) -> dict | None:
+    """Focused Repair가 replacements를 반환해도 안전하게 전체 파일 내용으로 승격합니다.
+
+    v5.359은 ``content``가 있는 replace_entire_file 응답만 허용했기 때문에,
+    모델이 유효한 replacements를 반환한 경우에도 "수정 대상 파일을 완전하게 포함하지 못함"으로
+    조기 종료될 수 있었습니다. PatchService와 동일한 안전 치환 규칙으로 메모리에서만 적용한 뒤
+    전체 파일 교체 형태로 정규화합니다.
+    """
+    row = dict(change or {})
+    direct = str(row.get("content") or "")
+    if direct.strip():
+        row["content"] = direct
+        row["create_file"] = False
+        row["replace_entire_file"] = True
+        row["replacements"] = []
+        return row
+
+    replacements = list(row.get("replacements") or [])
+    if not replacements:
+        return None
+
+    content = str(current_content or "")
+    for rep in replacements:
+        old = str((rep or {}).get("old") or "")
+        new = str((rep or {}).get("new") or "")
+        if not old:
+            return None
+        applied = _safe_replacement(content, old, new)
+        if applied is None:
+            return None
+        content, _strategy = applied
+
+    if content == str(current_content or ""):
+        return None
+
+    row["content"] = content
+    row["create_file"] = False
+    row["replace_entire_file"] = True
+    row["replacements"] = []
+    return row
+
+
+def _matching_focused_repair_change(
+    normalized: dict,
+    canonical_target: str,
+    current_content: str,
+    project_root: str,
+    manifest_paths: set[str],
+) -> dict | None:
+    matches: list[dict] = []
+    for change in normalized.get("changes") or []:
+        change_path = _canonical_manifest_path(
+            str(change.get("path") or ""),
+            project_root,
+            manifest_paths,
+        )
+        if change_path.casefold() != canonical_target.casefold():
+            continue
+        row = _materialize_focused_repair_change(change, current_content)
+        if row is None:
+            continue
+        row["path"] = canonical_target
+        matches.append(row)
+    return matches[0] if len(matches) == 1 else None
 
 
 async def _focused_test_failure_repair_plan(
@@ -2397,36 +2557,70 @@ async def _focused_test_failure_repair_plan(
             state["project_root"],
             _required_manifest_paths(state),
         )
+        manifest_paths = _required_manifest_paths(state)
         canonical_target = _canonical_manifest_path(
             relative,
             state["project_root"],
-            _required_manifest_paths(state),
+            manifest_paths,
         )
-        matching = []
-        for change in normalized.get("changes") or []:
-            change_path = _canonical_manifest_path(
-                str(change.get("path") or ""),
-                state["project_root"],
-                _required_manifest_paths(state),
-            )
-            if change_path.casefold() != canonical_target.casefold():
-                continue
-            row = dict(change)
-            row["path"] = canonical_target
-            if str(row.get("content") or "").strip():
-                row["create_file"] = False
-                row["replace_entire_file"] = True
-                row["replacements"] = []
-            matching.append(row)
+        matched = _matching_focused_repair_change(
+            normalized,
+            canonical_target,
+            current_content,
+            state["project_root"],
+            manifest_paths,
+        )
 
-        if len(matching) != 1 or not str(matching[0].get("content") or "").strip():
+        # 첫 응답이 경로를 누락하거나 content 대신 불완전한 형식으로 왔을 때
+        # 한 번만 더 좁은 Recovery Prompt로 재시도합니다. 전체 개발을 즉시 실패시키지 않습니다.
+        if matched is None:
+            recovery_request = (
+                request
+                + "\n\n[Focused Patch Recovery]\n"
+                  "이전 응답은 AgentStudio가 적용 가능한 완전한 수정 파일을 만들지 못했습니다. "
+                  f"changes 배열에 정확히 '{canonical_target}' 한 파일만 넣고, "
+                  "replace_entire_file=true, content에는 수정 완료된 전체 파일을 반드시 반환하십시오. "
+                  "replacements만 반환하지 마십시오."
+            )
+            try:
+                retry_plan = await create_patch(
+                    recovery_request,
+                    {canonical_target: current_content},
+                    state.get("provider"),
+                    project_scope=True,
+                )
+                retry_normalized = _normalize_patch_plan(
+                    retry_plan,
+                    state["project_root"],
+                    manifest_paths,
+                )
+                matched = _matching_focused_repair_change(
+                    retry_normalized,
+                    canonical_target,
+                    current_content,
+                    state["project_root"],
+                    manifest_paths,
+                )
+            except Exception as _retry_exc:
+                matched = None
+
+        if matched is None:
             missing.append(relative)
             continue
-        combined_changes.append(matching[0])
+        combined_changes.append(matched)
 
     validation["missing_repair_targets"] = missing
     validation["planned_repair_count"] = len(combined_changes)
-    validation["ok"] = bool(combined_changes) and not missing
+    # 일부 안전한 수정이라도 확보했으면 우선 적용 후 테스트를 다시 실행합니다.
+    # 다음 TEST_FAILED 반복에서 남은 실제 원인만 다시 추적하는 편이, 호출 스택의 모든
+    # 파일을 한 번에 수정하라고 강제해 개발 전체를 조기 실패시키는 것보다 안전합니다.
+    validation["partial"] = bool(combined_changes) and bool(missing)
+    validation["ok"] = bool(combined_changes)
+    if validation["partial"]:
+        validation["warning"] = (
+            "일부 Focused Repair 대상만 안전하게 생성되었습니다. 우선 적용 후 테스트를 재실행하고 "
+            "남은 실패가 실제 원인으로 확인될 때 다음 Debug 반복에서 추가 수정합니다."
+        )
     return {"changes": combined_changes}, validation
 
 
@@ -3401,6 +3595,11 @@ def _looks_like_placeholder(content: str, suffix: str = "") -> bool:
 
 
 async def build_artifact_validation_node(state: AgentState):
+    # v5.368: React + TypeScript 계약에서는 App.jsx/main.jsx/api.js가 내용이 비어 있어도
+    # 존재 자체가 Architecture 오류입니다. LLM Repair가 빈 파일로 만드는 우회 대신
+    # 검증 전에 legacy entry를 결정적으로 삭제합니다.
+    react_ts_cleanup = _cleanup_react_typescript_legacy_sources(state)
+
     # v5.174: Settings Generator까지 끝난 최종 backend/app 코드도 다시 정규화합니다.
     fastapi_import_validation = _normalize_generated_fastapi_imports(state["project_root"])
     existing_patch_rows = list(state.get("patch_result") or [])
@@ -3409,6 +3608,11 @@ async def build_artifact_validation_node(state: AgentState):
         for row in existing_patch_rows
         if isinstance(row, dict)
     }
+    for row in react_ts_cleanup.get("patch_rows") or []:
+        key = (str(row.get("path") or "").casefold(), str(row.get("reason") or ""))
+        if key not in seen_patch_keys:
+            existing_patch_rows.append(row)
+            seen_patch_keys.add(key)
     for row in fastapi_import_validation.get("patch_rows") or []:
         key = (str(row.get("path") or "").casefold(), str(row.get("reason") or ""))
         if key not in seen_patch_keys:
@@ -3488,6 +3692,15 @@ async def build_artifact_validation_node(state: AgentState):
         })
     contracts = _requirement_contracts(state)
     root = Path(state["project_root"]).resolve()
+
+    if not react_ts_cleanup.get("ok", True):
+        architecture_errors.append({
+            "path": str(react_ts_cleanup.get("path") or root / "frontend/src"),
+            "message": (
+                "React + TypeScript legacy JavaScript entry 자동 정리에 실패했습니다: "
+                + str(react_ts_cleanup.get("error") or "unknown cleanup error")
+            ),
+        })
 
     source_suffixes = {
         ".py", ".js", ".jsx", ".ts", ".tsx",
@@ -3705,6 +3918,7 @@ async def build_artifact_validation_node(state: AgentState):
         "coding_style_errors": style_failures,
         "coding_style_warnings": style_warnings,
         "architecture_errors": architecture_errors,
+        "react_typescript_legacy_cleanup": react_ts_cleanup,
         "fastapi_import_validation": fastapi_import_validation,
         "selected_rule_ids": [
             rule.get("id")
@@ -3831,6 +4045,52 @@ async def environment_configuration_node(state: AgentState):
     }
 
 
+_PRETEST_SOURCE_SUFFIXES = {'.py', '.js', '.jsx', '.ts', '.tsx', '.json', '.sql', '.sh', '.ps1', '.html', '.css'}
+
+
+async def _repair_wrapped_generated_source_files(project_root: str) -> list[dict]:
+    """Deterministically repair source files accidentally saved as Markdown blocks.
+
+    This runs immediately before validation, so both newly generated files and a
+    partially failed project from an earlier AgentStudio version can recover
+    without spending another Debug LLM iteration.
+    """
+    root = Path(project_root).resolve()
+    rows: list[dict] = []
+    if not root.exists():
+        return rows
+    for path in root.rglob('*'):
+        if not path.is_file() or path.suffix.casefold() not in _PRETEST_SOURCE_SUFFIXES:
+            continue
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if _is_runtime_artifact_path(project_root, relative):
+            continue
+        try:
+            current = await read_file(str(path))
+            repaired, changed = _strip_outer_markdown_fence_for_source(path, current)
+            if not changed:
+                continue
+            await write_file(str(path), repaired)
+            verified = await read_file(str(path))
+            if verified != repaired:
+                continue
+            rows.append({
+                'path': str(path),
+                'changed': True,
+                'created': False,
+                'verified': True,
+                'bytes': path.stat().st_size,
+                'reason': '소스 전체를 감싼 Markdown 코드 펜스를 테스트 전에 결정적으로 제거했습니다.',
+                'replacement_strategies': ['pretest_outer_markdown_fence_removed'],
+            })
+        except Exception:
+            continue
+    return rows
+
+
 async def test_node(state: AgentState):
     environment = state.get("environment_plan") or {}
 
@@ -3842,19 +4102,24 @@ async def test_node(state: AgentState):
 
     cmd = cmd or "python -m compileall ."
 
+    pretest_repairs = await _repair_wrapped_generated_source_files(state["project_root"])
     result = await run_command(
         cmd,
         state["project_root"],
     )
 
-    return {
+    update = {
         "test_result": result,
+        "pretest_source_repair": pretest_repairs,
         "status": (
             "TEST_PASSED"
             if result.get("returncode") == 0
             else "TEST_FAILED"
         ),
     }
+    if pretest_repairs:
+        update["patch_result"] = list(state.get("patch_result") or []) + pretest_repairs
+    return update
 
 
 def route_after_test(
@@ -4023,6 +4288,32 @@ function Test-SetupValueReady {
     ))
 }
 
+function Ensure-EnvSetupGuides {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return }
+    $lines = @(Get-Content $Path -ErrorAction SilentlyContinue)
+    if ($lines.Count -eq 0) { return }
+
+    $dbGuideMarker = "# DATABASE_URL 입력 방법 (PostgreSQL)"
+    if (($lines -contains $dbGuideMarker) -or -not ($lines -match '^\s*DATABASE_URL\s*=')) {
+        return
+    }
+
+    $result = New-Object System.Collections.Generic.List[string]
+    $inserted = $false
+    foreach ($line in $lines) {
+        if (-not $inserted -and ([string]$line -match '^\s*DATABASE_URL\s*=')) {
+            $result.Add($dbGuideMarker)
+            $result.Add("# 형식: postgresql://사용자:비밀번호@호스트:포트/데이터베이스명")
+            $result.Add("# 로컬 예시: postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/postgres")
+            $result.Add("# YOUR_PASSWORD와 마지막 DB 이름을 실제 PostgreSQL 환경에 맞게 변경하세요.")
+            $inserted = $true
+        }
+        $result.Add([string]$line)
+    }
+    [System.IO.File]::WriteAllLines($Path, $result, $Utf8NoBom)
+}
+
 function Test-InitialConfiguration {
     if (-not (Test-Path $SetupManifest)) {
         Write-Ok "초기 설정 Manifest 없음 - 별도 필수 설정 없이 실행 가능"
@@ -4060,6 +4351,7 @@ function Test-InitialConfiguration {
             $envText += "`n$key="
         }
     }
+    Ensure-EnvSetupGuides $EnvFile
 
     $values = Read-EnvValues @($EnvFile, $BackendEnvFile)
     $missing = @()
@@ -4095,6 +4387,14 @@ function Test-InitialConfiguration {
         $key = [string]$item.key
         if (-not $label) { $label = $key }
         Write-Host (" - {0} ({1})" -f $label, $key)
+    }
+    $missingKeys = @($missing | ForEach-Object { ([string]$_.key).ToUpperInvariant() })
+    if ($missingKeys -contains "DATABASE_URL") {
+        Write-Host ""
+        Write-Host "DATABASE_URL 입력 가이드:" -ForegroundColor Cyan
+        Write-Host " - 형식: postgresql://사용자:비밀번호@호스트:포트/데이터베이스명"
+        Write-Host " - 로컬 예시: postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/postgres"
+        Write-Host " - YOUR_PASSWORD와 DB 이름을 실제 PostgreSQL 환경에 맞게 변경하세요."
     }
     Write-Host ""
     Write-Host "설정 파일: $EnvFile" -ForegroundColor Cyan

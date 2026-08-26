@@ -13,7 +13,7 @@ def require(ok, message):
         raise AssertionError(message)
 
 
-require("AGENTSTUDIO_FRONTEND_VERSION='5.356'" in APP, 'frontend version must be 5.356')
+require("AGENTSTUDIO_FRONTEND_VERSION='5.368'" in APP, 'frontend version must be 5.368')
 require('projectFileSearch' in APP and '파일명 또는 경로 찾기' in APP, 'project file name/path search UI missing')
 require('projectTreeForDisplay' in APP and 'projectFileSearchMatches' in APP, 'project tree filtering missing')
 require("openEditorTextSearch('CURRENT')" in APP, 'current file text search button missing')
@@ -28,4 +28,4 @@ require('_PROJECT_TEXT_SEARCH_MAX_FILE_BYTES' in LOCAL, 'large file safety limit
 require('_search_notebook_source' in LOCAL and 'cell_index' in LOCAL, 'Notebook cell source search missing')
 require('revealSearchMatch' in NOTEBOOK and 'data-notebook-cell-index' in NOTEBOOK, 'Notebook search navigation missing')
 require('revealSearchMatch' in NOTEBOOK_TYPES, 'Notebook controller contract missing')
-print('PASS v5.356 Project Search & Text Find contract')
+print('PASS v5.368 Project Search & Text Find contract')

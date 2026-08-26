@@ -26,8 +26,8 @@ main = read(BACKEND / "app/main.py")
 
 # Version / build marker.
 require("5.351" in app, "Frontend version must be 5.345")
-require('version="5.356"' in main or "version='5.356'" in main, "FastAPI version must be 5.345")
-require('"version": "5.356"' in routes, "Health version must be 5.345")
+require('version="5.368"' in main or "version='5.368'" in main, "FastAPI version must be 5.345")
+require('"version": "5.368"' in routes, "Health version must be 5.345")
 require("GeneratedAgentSetupIncrementalBuildTrace" in routes, "Health build marker missing")
 
 # Generated Agent setup-first runtime gate.

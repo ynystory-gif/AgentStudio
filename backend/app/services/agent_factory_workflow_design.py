@@ -783,6 +783,7 @@ def _impact_sections(changed_groups: list[str], delta_text: str) -> list[str]:
     mapping = {
         "original_request": set(_DESIGN_SECTION_KEYS),
         "ui": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
+        "ui_layout": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
         "backend": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
         "llm": {"requirement_spec", "capability_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
         "file_access": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan"},

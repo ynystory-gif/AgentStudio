@@ -18,7 +18,7 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-require("AGENTSTUDIO_FRONTEND_VERSION='5.356'" in APP, "frontend version must be 5.356")
+require("AGENTSTUDIO_FRONTEND_VERSION='5.368'" in APP, "frontend version must be 5.368")
 require("def _new_notebook_payload() -> bytes:" in SERVICE, "Notebook initializer missing")
 require('target.suffix.casefold() == ".ipynb"' in SERVICE, "ipynb create branch missing")
 require("repaired_empty_notebook" in SERVICE, "legacy zero-byte Notebook repair missing")
@@ -65,4 +65,4 @@ async def run() -> None:
 
 
 asyncio.run(run())
-print("PASS v5.356 Valid Notebook Create contract")
+print("PASS v5.368 Valid Notebook Create contract")

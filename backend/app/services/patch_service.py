@@ -64,6 +64,60 @@ def _restore_newline_style(original: str, normalized: str) -> str:
     return str(normalized or "")
 
 
+_SOURCE_FENCE_LANGS = {
+    '.py': {'python', 'py'},
+    '.js': {'javascript', 'js'},
+    '.jsx': {'javascript', 'jsx', 'js'},
+    '.ts': {'typescript', 'ts'},
+    '.tsx': {'typescript', 'tsx', 'ts'},
+    '.json': {'json'},
+    '.sql': {'sql'},
+    '.sh': {'bash', 'sh', 'shell'},
+    '.ps1': {'powershell', 'ps1'},
+    '.html': {'html'},
+    '.css': {'css'},
+}
+
+
+def _strip_outer_markdown_fence_for_source(target: Path, content: str) -> tuple[str, bool]:
+    """Remove an accidental Markdown wrapper around an entire source file.
+
+    LLM code plans occasionally return `````python ... ````` even though the JSON
+    ``content`` field must contain raw source.  Persisting that wrapper makes the
+    generated project fail immediately at compile time.  Only a fence that wraps
+    the *whole* known source file is removed; Markdown documents are untouched.
+    """
+    suffix = target.suffix.casefold()
+    allowed = _SOURCE_FENCE_LANGS.get(suffix)
+    if not allowed:
+        return str(content or ''), False
+    source = str(content or '')
+    newline = '\r\n' if '\r\n' in source else '\n'
+    normalized = source.replace('\r\n', '\n').replace('\r', '\n')
+    lines = normalized.split('\n')
+    if not lines:
+        return source, False
+    first = 0
+    while first < len(lines) and not lines[first].strip():
+        first += 1
+    last = len(lines) - 1
+    while last >= 0 and not lines[last].strip():
+        last -= 1
+    if first >= last:
+        return source, False
+    open_match = re.fullmatch(r'```\s*([A-Za-z0-9_+.-]*)\s*', lines[first].strip())
+    if not open_match or lines[last].strip() != '```':
+        return source, False
+    language = str(open_match.group(1) or '').casefold()
+    if language and language not in allowed:
+        return source, False
+    repaired = lines[:first] + lines[first + 1:last] + lines[last + 1:]
+    value = '\n'.join(repaired)
+    if newline == '\r\n':
+        value = value.replace('\n', '\r\n')
+    return value, True
+
+
 def _unique_flexible_whitespace_span(content: str, old: str):
     """
     old의 비공백 토큰은 그대로 보존하고 공백/줄바꿈만 유연하게 허용합니다.
@@ -533,6 +587,10 @@ async def apply_patch(
 
         if create_file or replace_entire_file:
             new_content = str(change.get("content") or "")
+            new_content, outer_fence_removed = _strip_outer_markdown_fence_for_source(
+                target,
+                new_content,
+            )
 
             write_result = await _verified_write(
                 target,
@@ -549,7 +607,7 @@ async def apply_patch(
                 "reason": change.get("reason", ""),
                 "replacement_strategies": [
                     "create_file" if create_file and not replace_entire_file else "replace_entire_file"
-                ],
+                ] + (["outer_markdown_fence_removed"] if outer_fence_removed else []),
             })
             continue
 

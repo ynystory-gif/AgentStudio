@@ -13,7 +13,7 @@ PANELS = (ROOT / 'frontend/src/components/architecture/ArchitecturePanels.tsx').
 POLICY = (ROOT / 'backend/app/data/agent_factory/agent_factory_workflow_policy.json').read_text(encoding='utf-8')
 
 checks = {
-    'frontend version 5.341': "AGENTSTUDIO_FRONTEND_VERSION='5.356'" in APP,
+    'frontend version 5.341': "AGENTSTUDIO_FRONTEND_VERSION='5.368'" in APP,
     'as-built workflow node': '"as_built_architecture"' in WORKFLOW and 'as_built_architecture_node' in WORKFLOW,
     'conformance workflow node': '"architecture_conformance"' in WORKFLOW and 'architecture_conformance_node' in WORKFLOW,
     'conformance repair route': 'ARCHITECTURE_REPAIR_READY' in WORKFLOW and 'architecture_repair_iteration' in WORKFLOW,

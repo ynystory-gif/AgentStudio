@@ -108,7 +108,8 @@ from app.services.ai_attachment_service import (
 )
 from app.services.local_control import list_files, list_directories, read_file, write_file, run_command, register_runtime_project_root, get_runtime_project_roots, create_folder, rename_path, create_file, delete_files, project_file_snapshot, get_file_meta, get_file_hash_states, validate_project_root, watch_project_changes, search_project_text, ExternalFileChangedError, InvalidNotebookContentError
 from app.services.tavily_service import web_search
-from app.services.requirements_agent import next_interview_message, summarize_attachment_requirements
+from app.services.requirements_agent import next_interview_message, summarize_attachment_requirements, build_attachment_requirements_display_summary
+from app.services.attachment_requirement_mining import extract_attachment_requirement_registry, format_requirement_registry_memory
 from app.services.llm_usage_service import usage_context, read_usage_summary, read_llm_history
 from app.services.agent_builder import build_plan
 from app.services.tool_analyzer import analyze_tool
@@ -488,6 +489,10 @@ class WorkflowResumeRequest(BaseModel):
     decision: str
 
 
+class AgentDesignCheckpointRequest(BaseModel):
+    project_root: str
+    snapshot: dict = {}
+
 
 class PresentationExportRequest(BaseModel):
     scope: str = "ALL"
@@ -501,6 +506,7 @@ class PresentationExportRequest(BaseModel):
     coding_style_report: dict = {}
     llm_usage_summary: dict = {}
     db_erd: dict = {}
+    ui_layout: dict = {}
 
 class FolderCreateRequest(BaseModel):
     root: str
@@ -2709,7 +2715,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.356", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.368", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -2761,6 +2767,9 @@ async def interview_attachment_summary(req: AttachmentRequirementsSummaryRequest
             "attachment_warnings": attachment_context.get("warnings") or ["분석할 첨부 텍스트가 없습니다."],
         }
 
+    requirement_registry = extract_attachment_requirement_registry(context_text)
+    registry_memory = format_requirement_registry_memory(requirement_registry)
+
     with usage_context(
         project_root=req.project_root,
         operation="requirements_attachment_summary",
@@ -2772,18 +2781,22 @@ async def interview_attachment_summary(req: AttachmentRequirementsSummaryRequest
         )
 
     summary = redact_sensitive_text(summary).strip()
-    memory = (
-        "[첨부 파일에서 파악한 사용자 요구사항 요약]\n" + summary
-        if summary
-        else redact_sensitive_text(req.attachment_memory or "").strip()
-    )
+    current_memory_parts = []
+    if registry_memory:
+        current_memory_parts.append(registry_memory)
+    if summary:
+        current_memory_parts.append("[첨부 파일에서 파악한 사용자 요구사항 요약]\n" + summary)
+    current_memory = "\n\n".join(current_memory_parts)
+    memory = _merge_interview_attachment_memory(req.attachment_memory, current_memory, limit=18_000)
     return {
-        "ok": bool(summary),
+        "ok": bool(summary or requirement_registry.get("requirements")),
         "summary": summary,
-        "attachment_memory": memory[-7000:],
+        "attachment_memory": memory,
         "attachments": attachment_context.get("files") or [],
         "attachment_warnings": attachment_context.get("warnings") or [],
         "attachments_consumed": bool(req.attachment_ids),
+        "attachment_requirements": requirement_registry.get("requirements") or [],
+        "attachment_requirement_coverage": requirement_registry.get("coverage") or {},
     }
 
 
@@ -2797,15 +2810,25 @@ async def interview(req: ChatRequest):
             req.attachment_ids,
             purpose="Agent 설계 인터뷰 요구사항/참고자료 분석",
         )
+        fresh_attachment_text = str(attachment_context.get("text") or "").strip()
+        requirement_registry = extract_attachment_requirement_registry(fresh_attachment_text) if fresh_attachment_text else {"requirements": [], "coverage": {}}
+        registry_memory = format_requirement_registry_memory(requirement_registry)
         attachment_memory = _merge_interview_attachment_memory(
             req.attachment_memory,
-            attachment_context.get("text") or "",
+            registry_memory or fresh_attachment_text,
         )
+        # v5.363: normal interview-with-files exposes the requirement registry
+        # immediately without a second LLM call. The richer summary action can
+        # still call the model explicitly.
+        attachment_summary = build_attachment_requirements_display_summary(
+            fresh_attachment_text
+        ) if fresh_attachment_text else ""
         answer = await next_interview_message(
             req.message,
             req.history,
             req.provider,
-            attachment_context=attachment_memory,
+            attachment_context=fresh_attachment_text,
+            attachment_memory=attachment_memory,
         )
 
     return {
@@ -2813,6 +2836,9 @@ async def interview(req: ChatRequest):
         "attachments": attachment_context.get("files") or [],
         "attachment_warnings": attachment_context.get("warnings") or [],
         "attachment_memory": attachment_memory,
+        "attachment_summary": attachment_summary,
+        "attachment_requirements": requirement_registry.get("requirements") or [],
+        "attachment_requirement_coverage": requirement_registry.get("coverage") or {},
         "attachments_consumed": bool(req.attachment_ids),
     }
 
@@ -3227,7 +3253,7 @@ async def export_agentstudio_presentation(payload: PresentationExportRequest):
     if not data.get("generated_at"):
         data["generated_at"] = datetime.now().isoformat(timespec="seconds")
 
-    # v5.356: Agent PPT만 현재 프로젝트를 재분석합니다. Studio PPT는 현재 프로젝트와 완전히 분리합니다.
+    # v5.363: Agent PPT만 현재 프로젝트를 재분석합니다. Studio PPT는 현재 프로젝트와 완전히 분리합니다.
     # Agent PPT는 UI의 오래된 Snapshot만 신뢰하지 않습니다. 프로젝트 루트가 있으면
     # 내보내기 직전에 실제 소스를 다시 분석하고, Agent Factory의 실제 실행/설계 결과가
     # 없는 항목만 Project Adaptive Snapshot으로 채웁니다. 따라서 감지되지 않은 DB/LLM/MCP를
@@ -3263,7 +3289,7 @@ async def export_agentstudio_presentation(payload: PresentationExportRequest):
             # Adaptive 분석 실패가 PPT 다운로드 자체를 막지는 않습니다. 기존 Snapshot으로 계속 생성합니다.
             pass
 
-    # v5.356: DB ERD는 PPT 생성 직전 서버에서 다시 구성해 UI Snapshot과 분리합니다.
+    # v5.363: DB ERD는 PPT 생성 직전 서버에서 다시 구성해 UI Snapshot과 분리합니다.
     try:
         if deck_type == "STUDIO":
             studio_root = str(Path(__file__).resolve().parents[3])
@@ -3285,7 +3311,7 @@ async def export_agentstudio_presentation(payload: PresentationExportRequest):
         content, filename = await asyncio.to_thread(
             build_agentstudio_presentation,
             data,
-            "5.356",
+            "5.368",
         )
     except Exception as exc:
         raise HTTPException(
@@ -5123,6 +5149,7 @@ def _build_interview_requirement_context(
         "5. UI 표시와 파일 저장처럼 결과 경로가 둘 이상이면 분기 단계로 표현합니다.",
         "6. 재시도와 실패 처리를 별도 정책/분기로 설계합니다.",
         "7. 단순히 3~4단계로 축약하지 말고 실제 실행 가능한 업무 Workflow를 설계합니다.",
+        "8. confirmed_requirements.ui_layout이 있으면 선택한 Header/Sidebar/Footer/User Menu/Main Layout/Theme/Components를 UI 파일 구조와 코드 생성 계획에 반드시 반영합니다.",
     ])
 
     return "\n".join(rows)
@@ -5186,6 +5213,13 @@ async def workflow_preview(req: WorkflowPreviewRequest):
             current_confirmed_requirements=req.confirmed_requirements,
             interview_messages=req.interview_messages,
         )
+
+    selected_ui_layout = (req.confirmed_requirements or {}).get("ui_layout") or {}
+    if isinstance(selected_ui_layout, dict) and selected_ui_layout.get("template_id"):
+        requirement_spec = design.setdefault("requirement_spec", {})
+        if isinstance(requirement_spec, dict):
+            requirement_spec["ui_layout"] = selected_ui_layout
+        design.setdefault("design_runtime", {})["selected_ui_layout"] = selected_ui_layout
 
     target = design.get("target_agent_workflow") or {}
 
@@ -5527,6 +5561,163 @@ async def workflow_definition():
             "각 Workflow 실행 State의 target_agent_workflow 필드에 "
             "별도 설계 결과로 저장됩니다."
         ),
+    }
+
+
+def _agent_design_checkpoint_path(root: Path) -> Path:
+    return root / "reports" / "agentstudio_design_checkpoint.json"
+
+
+def _safe_resume_value(value):
+    """Persist only resumable design/build context and redact secret-looking text."""
+    secret_keys = {
+        "password", "passwd", "pwd", "api_key", "apikey", "access_token",
+        "refresh_token", "token", "secret", "authorization", "private_key",
+    }
+    if isinstance(value, dict):
+        clean = {}
+        for key, item in value.items():
+            name = str(key or "")
+            if name.lower() in secret_keys:
+                clean[name] = "***"
+            else:
+                clean[name] = _safe_resume_value(item)
+        return clean
+    if isinstance(value, list):
+        return [_safe_resume_value(item) for item in value]
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    return value
+
+
+def _compact_resume_workflow_state(state: dict) -> dict:
+    if not isinstance(state, dict):
+        return {}
+    keep = (
+        "thread_id", "project_root", "request", "status", "error",
+        "requirement_spec", "capability_plan", "tool_mcp_plan",
+        "agent_architecture", "database_plan", "target_agent_workflow",
+        "file_plan", "environment_plan", "settings_plan", "settings_schema",
+        "settings_ui_plan", "as_built_architecture", "architecture_conformance",
+        "build_artifact_validation", "code_plan_validation", "settings_validation_result",
+        "debug_iteration", "debug_history", "patch_result", "test_result",
+        "diagnostic_run_id", "diagnostic_status", "diagnostic_failure_stage",
+        "diagnostic_failure_reason", "diagnostic_generated_at", "run_started_at",
+    )
+    compact = {key: state.get(key) for key in keep if key in state}
+    if isinstance(compact.get("debug_history"), list):
+        compact["debug_history"] = compact["debug_history"][-8:]
+    if isinstance(compact.get("patch_result"), list):
+        compact["patch_result"] = compact["patch_result"][-80:]
+    return _safe_resume_value(compact)
+
+
+def _read_json_dict(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+@router.post("/workflow/design-checkpoint")
+async def save_workflow_design_checkpoint(req: AgentDesignCheckpointRequest):
+    root = Path(req.project_root).expanduser().resolve()
+    # Do not create a not-yet-generated Agent project merely because the
+    # interview autosave fired. Browser localStorage remains the pre-create
+    # draft store; project-folder persistence starts after the folder exists.
+    if not root.exists() or not root.is_dir():
+        return {"ok": False, "reason": "PROJECT_NOT_CREATED", "project_root": str(root)}
+    reports = root / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    allowed = {
+        "version", "saved_at", "agent_name", "project_root", "workflow_request",
+        "chat", "confirmed_requirements", "workflow_preview", "workflow_quality",
+        "agent_build_stage", "attachment_memory", "attachment_summary",
+        "attachment_summary_files", "attachment_requirements",
+        "attachment_requirement_coverage", "manual_requirement_overrides",
+        "ui_layout", "build_resume",
+    }
+    snapshot = {
+        key: value for key, value in (req.snapshot or {}).items()
+        if key in allowed
+    }
+    snapshot["version"] = 2
+    snapshot["project_root"] = str(root)
+    snapshot["saved_at"] = str(snapshot.get("saved_at") or datetime.now().astimezone().isoformat())
+    snapshot["server_saved_at"] = datetime.now().astimezone().isoformat()
+    safe = _safe_resume_value(snapshot)
+    path = _agent_design_checkpoint_path(root)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    return {"ok": True, "path": str(path), "saved_at": safe.get("saved_at", "")}
+
+
+@router.get("/workflow/design-checkpoint")
+async def load_workflow_design_checkpoint(project_root: str):
+    root = Path(project_root).expanduser().resolve()
+    reports = root / "reports"
+    checkpoint = _read_json_dict(_agent_design_checkpoint_path(root))
+    current_run = _read_json_dict(reports / "current_run.json")
+    workflow_state = _read_json_dict(reports / "workflow_state.json")
+    requirements_snapshot = _read_json_dict(reports / "requirements_snapshot.json")
+
+    runtime = {
+        "current_run": _safe_resume_value(current_run),
+        "workflow_state": _compact_resume_workflow_state(workflow_state),
+        "requirements_snapshot": _safe_resume_value(requirements_snapshot),
+    }
+
+    # Legacy v5.368-and-earlier projects may have failure diagnostics but no
+    # persisted UI checkpoint. Build a conservative fallback so the user can
+    # still continue from the failed project's design instead of starting over.
+    legacy_snapshot = {}
+    if not checkpoint and (requirements_snapshot or workflow_state):
+        req = requirements_snapshot or {}
+        workflow_preview = {
+            "target_agent_workflow": req.get("target_agent_workflow") or workflow_state.get("target_agent_workflow") or {},
+            "agent_architecture": req.get("agent_architecture") or workflow_state.get("agent_architecture") or {},
+            "database_plan": workflow_state.get("database_plan") or {},
+            "file_plan": req.get("file_plan") or workflow_state.get("file_plan") or {},
+        }
+        legacy_snapshot = {
+            "version": 2,
+            "saved_at": str(
+                workflow_state.get("diagnostic_generated_at")
+                or current_run.get("updated_at")
+                or requirements_snapshot.get("diagnostic_generated_at")
+                or ""
+            ),
+            "project_root": str(root),
+            "workflow_request": str(req.get("request") or workflow_state.get("request") or ""),
+            "confirmed_requirements": {
+                "original_request": str(req.get("request") or workflow_state.get("request") or ""),
+                "restored_requirement_spec": req.get("requirement_spec") or workflow_state.get("requirement_spec") or {},
+            },
+            "workflow_preview": workflow_preview,
+            "workflow_quality": None,
+            "agent_build_stage": "PROJECT_CREATED",
+            "build_resume": {
+                "source": "PROJECT_DIAGNOSTICS",
+                "run_id": str(current_run.get("run_id") or workflow_state.get("diagnostic_run_id") or workflow_state.get("thread_id") or ""),
+                "status": str(current_run.get("status") or workflow_state.get("diagnostic_status") or workflow_state.get("status") or ""),
+                "failure_stage": str(workflow_state.get("diagnostic_failure_stage") or ""),
+                "failure_reason": str(workflow_state.get("diagnostic_failure_reason") or workflow_state.get("error") or ""),
+            },
+        }
+        legacy_snapshot = _safe_resume_value(legacy_snapshot)
+
+    chosen = checkpoint or legacy_snapshot
+    return {
+        "ok": True,
+        "available": bool(chosen or workflow_state or requirements_snapshot),
+        "project_root": str(root),
+        "checkpoint": chosen,
+        "checkpoint_source": "SAVED_CHECKPOINT" if checkpoint else ("PROJECT_DIAGNOSTICS" if legacy_snapshot else ""),
+        "runtime": runtime,
     }
 
 

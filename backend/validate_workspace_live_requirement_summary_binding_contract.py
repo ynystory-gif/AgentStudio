@@ -4,7 +4,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / "frontend" / "src" / "App.jsx").read_text(encoding="utf-8")
 
 checks = {
-    "frontend version 5.343": "AGENTSTUDIO_FRONTEND_VERSION='5.356'" in APP,
+    "frontend version 5.343": "AGENTSTUDIO_FRONTEND_VERSION='5.368'" in APP,
     "workspace computes live summary": "const leftSummary=getBuilderConversationSummary()" in APP,
     "workspace live step source": "const designBuilderSteps=[" in APP and "['01','목적',leftSummary.purpose]" in APP,
     "feature live step": "['02','기능',leftSummary.features]" in APP,

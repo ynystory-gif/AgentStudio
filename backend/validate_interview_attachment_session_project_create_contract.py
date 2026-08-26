@@ -7,7 +7,7 @@ ROUTES = (ROOT / 'backend' / 'app' / 'api' / 'routes.py').read_text(encoding='ut
 ATTACH = (ROOT / 'backend' / 'app' / 'services' / 'ai_attachment_service.py').read_text(encoding='utf-8')
 
 checks = {
-    'v5.341 frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.356'" in APP,
+    'v5.341 frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.368'" in APP,
     'no per-turn attachment label builder': 'const interviewAttachmentLabel=' not in APP,
     'frontend hidden attachment session memory': 'interviewAttachmentMemory' in APP and 'attachment_memory:interviewAttachmentMemory' in APP,
     'attachment ids consumed after successful analysis': 'setInterviewAttachments([])' in APP and "/ai/attachments/release" in APP,
