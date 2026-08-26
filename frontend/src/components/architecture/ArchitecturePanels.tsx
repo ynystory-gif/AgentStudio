@@ -95,26 +95,47 @@ export function GeneratedAgentArchitecturePanel({ report }: GeneratedAgentArchit
   const persistence = normalizeArchitectureList(architecture.persistence)
   const security = normalizeArchitectureList(architecture.security)
   const stateRows = normalizeArchitectureList(architecture.state)
-  const componentTitles = components.slice(0, 4).map((item, index) => typeof item === 'string'
+  const infrastructure = normalizeArchitectureList(architecture.infrastructure)
+  const adaptiveSource = architecture.source === 'PROJECT_SOURCE_INFERENCE'
+  const profileLabel = report?.projectProfile?.project_type_label || ''
+  const componentTitles = components.map((item, index) => typeof item === 'string'
     ? item
     : (item.label || item.name || item.component || `구성요소 ${index + 1}`))
-  const centerTitle = componentTitles[0] || 'AI Agent Core'
-  const rightTitle = componentTitles[1] || 'Action / Tool Executor'
-  const leftTitle = componentTitles[2] || 'User Input / Interface'
-  const memoryTitle = componentTitles[3] || 'Memory / State'
+  const interfaceTitles = interfaces.map((item, index) => typeof item === 'string'
+    ? item
+    : (item.label || item.name || item.component || `인터페이스 ${index + 1}`))
+  const persistenceTitles = persistence.map((item, index) => typeof item === 'string'
+    ? item
+    : (item.label || item.name || item.component || `영속성 ${index + 1}`))
+  const findComponent = (tokens: string[]) => componentTitles.find(title => {
+    const lower = String(title || '').toLowerCase()
+    return tokens.some(token => lower.includes(token))
+  })
+  const centerTitle = adaptiveSource
+    ? (findComponent(['agent','orchestrator','backend','core','service']) || componentTitles[0] || 'Application Core')
+    : (componentTitles[0] || 'AI Agent Core')
+  const rightTitle = adaptiveSource
+    ? (findComponent(['tool','mcp','response','output','llm']) || componentTitles.find(title => title !== centerTitle) || 'Connected Component')
+    : (componentTitles[1] || 'Action / Tool Executor')
+  const leftTitle = adaptiveSource
+    ? (interfaceTitles[0] || componentTitles[0] || 'Program Entry Point')
+    : (componentTitles[2] || 'User Input / Interface')
+  const memoryTitle = adaptiveSource
+    ? (persistenceTitles[0] || (stateRows.length ? 'Runtime State' : 'No Persistence Detected'))
+    : (componentTitles[3] || 'Memory / State')
 
   return <div className="architecture-panel">
     <div className="architecture-panel-head">
       <div>
-        <small>TARGET AGENT ARCHITECTURE</small>
-        <strong>신규 에이전트 아키텍처</strong>
+        <small>{adaptiveSource?'PROJECT ADAPTIVE ARCHITECTURE':'TARGET AGENT ARCHITECTURE'}</small>
+        <strong>{adaptiveSource?'프로젝트 적응형 아키텍처':'신규 에이전트 아키텍처'}</strong>
       </div>
-      <span>{safeArchitectureText(report?.requirementSpec?.goal, '확정된 요구사항을 기반으로 구성 요소를 시각화합니다.')}</span>
+      <span>{profileLabel?`${profileLabel} · `:''}{safeArchitectureText(report?.requirementSpec?.goal, '현재 프로젝트에서 확인된 구성 요소를 시각화합니다.')}</span>
     </div>
 
     <div className="architecture-canvas generated-agent">
       <div className="architecture-top-stack">
-        <ArchitectureNode title="User / Client" subtitle="요청 · 입력 · 승인" tone="soft" />
+        <ArchitectureNode title={adaptiveSource?'Input / Client':'User / Client'} subtitle={adaptiveSource?'프로젝트 진입점 / 요청':'요청 · 입력 · 승인'} tone="soft" />
         <div className="architecture-vertical-arrow">↓</div>
         <ArchitectureNode title={leftTitle} subtitle="입력 채널 / 외부 인터페이스" tone="blue" />
       </div>
@@ -123,21 +144,21 @@ export function GeneratedAgentArchitecturePanel({ report }: GeneratedAgentArchit
         <div className="architecture-stage-row">
           <ArchitectureNode title={leftTitle} subtitle="Perception / Input" tone="soft" />
           <ArchitectureArrow label="context" />
-          <ArchitectureNode title={centerTitle} subtitle="Planning / LLM / Cognition" tone="accent" />
+          <ArchitectureNode title={centerTitle} subtitle={adaptiveSource?'Core Service / Logic':'Planning / LLM / Cognition'} tone="accent" />
           <ArchitectureArrow label="execute" />
-          <ArchitectureNode title={rightTitle} subtitle="Action / Tool / MCP" tone="purple" />
+          <ArchitectureNode title={rightTitle} subtitle={adaptiveSource?'Connected Component / Output':'Action / Tool / MCP'} tone="purple" />
         </div>
 
         <div className="architecture-feedback-loop">
           <div className="architecture-feedback-bubble">
             <strong>State / Feedback Loop</strong>
-            <small>{stateRows.length ? `${stateRows.length}개 상태 항목` : '실행 상태와 결과를 다시 Agent로 피드백'}</small>
+            <small>{stateRows.length ? `${stateRows.length}개 상태 항목` : (adaptiveSource?'별도 Runtime State 저장소 미감지':'실행 상태와 결과를 다시 Agent로 피드백')}</small>
           </div>
         </div>
 
         <div className="architecture-side-band">
           <ArchitectureNode title={memoryTitle} subtitle="Memory / Persistence" tone="soft" />
-          <ArchitectureNode title="Policy / Security" subtitle={security.length ? `${security.length}개 보안 규칙` : '권한 · Secret · Guardrail'} tone="soft" />
+          <ArchitectureNode title="Policy / Security" subtitle={security.length ? `${security.length}개 보안 규칙` : (adaptiveSource?'별도 보안 계층 미감지':'권한 · Secret · Guardrail')} tone="soft" />
         </div>
       </div>
     </div>
@@ -149,11 +170,11 @@ export function GeneratedAgentArchitecturePanel({ report }: GeneratedAgentArchit
       <ReportSection icon="⇄" title="인터페이스" subtitle="Interfaces">
         <ArchitectureList items={interfaces} />
       </ReportSection>
-      <ReportSection icon="💾" title="영속성" subtitle="Persistence">
-        <ArchitectureList items={persistence} />
+      <ReportSection icon="DB" title="영속성" subtitle="Persistence">
+        <ArchitectureList items={persistence} empty="별도 Persistence가 감지되지 않았습니다." />
       </ReportSection>
-      <ReportSection icon="🔐" title="보안" subtitle="Security">
-        <ArchitectureList items={security} />
+      <ReportSection icon="NET" title={infrastructure.length?'인프라 / 보안':'보안'} subtitle={infrastructure.length?'Infrastructure & Security':'Security'}>
+        <ArchitectureList items={[...infrastructure, ...security]} empty="별도 Infrastructure/Security가 감지되지 않았습니다." />
       </ReportSection>
     </div>
   </div>

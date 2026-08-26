@@ -74,5 +74,6 @@ export interface NotebookEditorController {
   stopExecution: () => Promise<void>
   isRunning: () => boolean
   getActiveCellIndex: () => number
+  revealSearchMatch: (cellIndex: number, lineNumber?: number, column?: number, length?: number) => void
 }
 

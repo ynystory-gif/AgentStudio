@@ -16,10 +16,12 @@ _WORKER_RESPONSE_PREFIX = '__AGENTSTUDIO_PY_RESPONSE_V1__'
 
 _WORKER_CODE = r'''
 import ast
+import asyncio
 import builtins
 import contextlib
 import io
 import importlib
+import inspect
 import json
 import linecache
 import os
@@ -35,6 +37,38 @@ namespace = {
     "__package__": None,
     "__builtins__": builtins,
 }
+
+# v5.349: AgentStudio Notebook cells now support the same top-level await
+# syntax users expect from Jupyter/IPython.  The worker itself is synchronous,
+# so keep a private event loop alive across persistent Notebook cell runs.
+# If user code closes/replaces the current loop, create a fresh one lazily.
+_agentstudio_asyncio_loop = None
+
+def _agentstudio_run_awaitable(value):
+    global _agentstudio_asyncio_loop
+    if not inspect.isawaitable(value):
+        return value
+
+    loop = _agentstudio_asyncio_loop
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        _agentstudio_asyncio_loop = loop
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(value)
+    finally:
+        # Preserve this loop for the next Notebook cell.  This mirrors the
+        # persistent-kernel behavior better than asyncio.run(), which closes
+        # its loop after every call and can break loop-bound async objects.
+        if not loop.is_closed():
+            asyncio.set_event_loop(loop)
+
+def _agentstudio_execute_compiled(compiled, global_namespace):
+    # eval() works for code compiled in both exec/eval modes.  When
+    # PyCF_ALLOW_TOP_LEVEL_AWAIT is present, executing a coroutine code object
+    # returns an awaitable which must be driven to completion explicitly.
+    value = eval(compiled, global_namespace, global_namespace)
+    return _agentstudio_run_awaitable(value)
 
 def _agentstudio_notebook_pip(arguments):
     """Run %pip with the exact interpreter backing the Notebook session."""
@@ -286,23 +320,32 @@ for raw in sys.stdin:
                 filename,
             )
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                # Jupyter/IPython accepts ``await`` directly in a Code cell.
+                # Python's compile() can provide the same semantics via
+                # PyCF_ALLOW_TOP_LEVEL_AWAIT, but only in Notebook mode so
+                # normal .py editor execution continues to enforce standard
+                # Python script syntax.
+                compile_flags = ast.PyCF_ALLOW_TOP_LEVEL_AWAIT if notebook_mode else 0
                 if capture_last_expression:
                     tree = ast.parse(code, filename=filename, mode="exec")
                     if tree.body and isinstance(tree.body[-1], ast.Expr):
                         body_module = ast.Module(body=tree.body[:-1], type_ignores=getattr(tree, "type_ignores", []))
                         ast.fix_missing_locations(body_module)
                         if body_module.body:
-                            exec(compile(body_module, filename, "exec"), namespace, namespace)
+                            body_compiled = compile(body_module, filename, "exec", flags=compile_flags)
+                            _agentstudio_execute_compiled(body_compiled, namespace)
                         expression = ast.Expression(body=tree.body[-1].value)
                         ast.fix_missing_locations(expression)
-                        result = eval(compile(expression, filename, "eval"), namespace, namespace)
+                        expression_compiled = compile(expression, filename, "eval", flags=compile_flags)
+                        result = _agentstudio_execute_compiled(expression_compiled, namespace)
                         if result is not None:
                             print(repr(result))
                     else:
-                        exec(compile(tree, filename, "exec"), namespace, namespace)
+                        compiled = compile(tree, filename, "exec", flags=compile_flags)
+                        _agentstudio_execute_compiled(compiled, namespace)
                 else:
-                    compiled = compile(code, filename, "exec")
-                    exec(compiled, namespace, namespace)
+                    compiled = compile(code, filename, "exec", flags=compile_flags)
+                    _agentstudio_execute_compiled(compiled, namespace)
         except SystemExit as exc:
             ok = exc.code in (None, 0)
             if not ok:

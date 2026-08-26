@@ -8,10 +8,11 @@ import { NotebookEditor } from './components/notebook/NotebookEditor'
 import { PdfViewer, PresentationViewer } from './components/viewers/DocumentViewers'
 import { MiniBadge, SectionTitle, StatusDot, StudioIcon } from './components/common/CommonUi'
 import { FileChangeList, KeyValueGrid, MetricCard, ReportSection, StatusBadge, WorkflowMiniMap } from './components/reports/ReportComponents'
-import { AgentStudioArchitecturePanel, ArchitectureConformancePanel, AsBuiltAgentArchitecturePanel, GeneratedAgentArchitecturePanel } from './components/architecture/ArchitecturePanels'
+import { ArchitectureConformancePanel, AsBuiltAgentArchitecturePanel, GeneratedAgentArchitecturePanel } from './components/architecture/ArchitecturePanels'
 import { LlmCatalogPanel } from './components/llm/LlmCatalogPanel'
 import { DatabaseBrowserContextMenus, FirestoreBrowserPanel, RedisBrowserPanel, SqlObjectTreePanel } from './components/database/DatabaseBrowsers'
 import { DatabaseDiagramViewer } from './components/database/DatabaseDiagramViewer'
+import { DatabaseErdPanel } from './components/database/DatabaseErdPanel'
 import { SqlResultsPane } from './components/database/SqlResultsPane'
 import { TerminalPanel } from './components/terminal/TerminalPanel'
 import { OllamaSettingsPanel, RuntimeDatabasePanel, ServicePortSettingsPanel, SystemStatusSummary } from './components/system/SystemRuntimePanels'
@@ -24,7 +25,7 @@ import { getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isDatabaseD
 import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSqlCode } from './utils/notebook'
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.345'
+const AGENTSTUDIO_FRONTEND_VERSION='5.356'
 
 const joinWin = (root, file) => `${root}\\${file}`.replaceAll('\\\\', '\\')
 const localIsoDate = () => {
@@ -1725,6 +1726,10 @@ function IDE() {
   // switching or DB metadata refreshes are in flight; file operations must not
   // lose the root during that transient window.
   const workspaceRootRef=useRef('')
+  // The file tree has its own authoritative root. Some project-open flows can
+  // populate the tree before React's project/root state has committed, so file
+  // operations must be able to use the exact root that produced the visible tree.
+  const fileTreeRootRef=useRef('')
 
   const [newAgentName,setNewAgentName]=useState('')
   const [newAgentProjectRoot,setNewAgentProjectRoot]=useState('')
@@ -1852,6 +1857,7 @@ function IDE() {
   const [externalProjectMode,setExternalProjectMode]=useState(false)
   const [loadedProjectAnalysis,setLoadedProjectAnalysis]=useState(null)
   const [files,setFiles]=useState([])
+  const [projectFileSearch,setProjectFileSearch]=useState('')
   const [fileLoading,setFileLoading]=useState(false)
   const [fileLoadingPath,setFileLoadingPath]=useState('')
   const [editorLoadErrors,setEditorLoadErrors]=useState({})
@@ -1864,6 +1870,9 @@ function IDE() {
   const [editorFileDirty,setEditorFileDirty]=useState({})
   const [editorFileDiskMeta,setEditorFileDiskMeta]=useState({})
   const editorFileDiskMetaRef=useRef({})
+  // Remember the project root for every opened relative path so an editor tab
+  // never falls back to another project's root after project switching.
+  const editorFileRootRef=useRef({})
   const [editorExternalState,setEditorExternalState]=useState({})
   const [pdfPreviewRevision,setPdfPreviewRevision]=useState({})
   const [presentationPreviewRevision,setPresentationPreviewRevision]=useState({})
@@ -1905,6 +1914,14 @@ function IDE() {
   const editorInstanceRef=useRef(null)
   const notebookEditorControllerRef=useRef(null)
   const editorTabsScrollRef=useRef(null)
+  const [editorTextSearchOpen,setEditorTextSearchOpen]=useState(false)
+  const [editorTextSearchScope,setEditorTextSearchScope]=useState('CURRENT')
+  const [editorTextSearchQuery,setEditorTextSearchQuery]=useState('')
+  const [editorTextSearchResults,setEditorTextSearchResults]=useState([])
+  const [editorTextSearchBusy,setEditorTextSearchBusy]=useState(false)
+  const [editorTextSearchError,setEditorTextSearchError]=useState('')
+  const [editorTextSearchMeta,setEditorTextSearchMeta]=useState(null)
+  const editorTextSearchInputRef=useRef(null)
 
   const setFocusOwnerSafe=(owner)=>{
     focusOwnerRef.current=owner
@@ -2155,6 +2172,11 @@ function IDE() {
   const [llmUsageDate,setLlmUsageDate]=useState(localIsoDate)
   const [llmUsageMonth,setLlmUsageMonth]=useState(localIsoMonth)
   const [reportGeneratedAt,setReportGeneratedAt]=useState('')
+  const [pptExportBusy,setPptExportBusy]=useState('')
+  const [pptExportError,setPptExportError]=useState('')
+  const [dbErdReport,setDbErdReport]=useState(null)
+  const [dbErdBusy,setDbErdBusy]=useState(false)
+  const [dbErdError,setDbErdError]=useState('')
   const [analysis,setAnalysis]=useState(null)
   const [mcpName,setMcpName]=useState('Local MCP')
   const [mcpEndpoint,setMcpEndpoint]=useState('http://127.0.0.1:8001/mcp')
@@ -2743,13 +2765,25 @@ function IDE() {
   const currentProjectName = currentProject?.name || newAgentName || (root ? root.split(/[\\/]/).filter(Boolean).pop() : '') || '프로젝트 선택'
   const currentProjectPath = currentProject?.project_root || currentProject?.root_path || root || newAgentProjectRoot || ''
   const activeWorkspaceRoot = currentProjectPath
-  const resolveWorkspaceRoot=()=>String(
-    activeWorkspaceRoot
-    ||root
-    ||newAgentProjectRoot
-    ||workspaceRootRef.current
-    ||''
-  ).trim()
+  const resolveWorkspaceRoot=(preferredRoot='')=>{
+    const activeTerminalRoot=String(
+      terminalSessions.find(item=>item.id===activeTerminalId)?.root
+      ||terminalRootRef.current?.[activeTerminalId]
+      ||''
+    ).trim()
+
+    return String(
+      preferredRoot
+      ||activeWorkspaceRoot
+      ||root
+      ||newAgentProjectRoot
+      ||fileTreeRootRef.current
+      ||workspaceRootRef.current
+      ||activeTerminalRoot
+      ||externalProjectAnalysis?.project_root
+      ||''
+    ).trim()
+  }
 
   useEffect(()=>{
     const nextRoot=String(activeWorkspaceRoot||'').trim()
@@ -5725,6 +5759,7 @@ function IDE() {
     const targetRoot=String(rootOverride||resolveWorkspaceRoot()||'').trim()
 
     if(!targetRoot){
+      fileTreeRootRef.current=''
       setFiles([])
       setProjectDirs([])
       return {files:[],dirs:[]}
@@ -5747,13 +5782,24 @@ function IDE() {
         .map(normalizeProjectRelativePath)
         .filter(Boolean)
 
+      const previousTreeRoot=String(fileTreeRootRef.current||'').trim()
+      if(previousTreeRoot&&previousTreeRoot.toLocaleLowerCase()!==targetRoot.toLocaleLowerCase()){
+        setProjectFileSearch('')
+        setEditorTextSearchResults([])
+        setEditorTextSearchMeta(null)
+        setEditorTextSearchError('')
+      }
       workspaceRootRef.current=targetRoot
+      fileTreeRootRef.current=targetRoot
       setFiles(nextFiles)
       setProjectDirs(nextDirs)
 
       return {files:nextFiles,dirs:nextDirs}
     }catch(e){
       console.error('프로젝트 파일/폴더 목록 로드 실패',e)
+      if(String(fileTreeRootRef.current||'').trim()===targetRoot){
+        fileTreeRootRef.current=''
+      }
       setFiles([])
       setProjectDirs([])
       throw e
@@ -5779,7 +5825,9 @@ function IDE() {
 
   const reloadExternalEditorFile=async(editorPath,{activate=false}={})=>{
     const normalized=normalizeProjectRelativePath(editorPath)
-    const workspaceRoot=resolveWorkspaceRoot()
+    const workspaceRoot=resolveWorkspaceRoot(
+      fileTreeRootRef.current||editorFileRootRef.current?.[editorPath]||''
+    )
     if(!workspaceRoot){
       throw new Error('프로젝트 root를 확인할 수 없습니다. 프로젝트를 다시 선택한 뒤 파일을 열어주세요.')
     }
@@ -5972,10 +6020,12 @@ function IDE() {
   // log line for every poll. On HDD systems this was enough to keep the disk
   // awake continuously. The watcher below is event-driven: while nothing
   // changes there is no project scan, no open-file hashing, and no polling log.
+  const currentFileWatchRoot=resolveWorkspaceRoot(fileTreeRootRef.current||root||'')
   useEffect(()=>{
     fileWatchBusyRef.current=false
 
-    if(!root||screen!=='WORKSPACE') return
+    const watchRoot=String(currentFileWatchRoot||'').trim()
+    if(!watchRoot||screen!=='WORKSPACE') return
 
     let cancelled=false
     let socket=null
@@ -6026,7 +6076,7 @@ function IDE() {
 
       let hashStateFiles={}
       try{
-        const workspaceRoot=resolveWorkspaceRoot()||root
+        const workspaceRoot=resolveWorkspaceRoot(watchRoot)||watchRoot
         const hashState=await api('/files/hash-state',{
           method:'POST',
           body:JSON.stringify({
@@ -6169,7 +6219,7 @@ function IDE() {
       fileWatchBusyRef.current=true
       try{
         if(rows.some(row=>row.kind==='added'||row.kind==='deleted')){
-          try{ await loadFiles(root) }catch(_){ }
+          try{ await loadFiles(watchRoot) }catch(_){ }
         }
         await reconcileOpenFiles(rows)
       }finally{
@@ -6190,7 +6240,7 @@ function IDE() {
         // A reconnect is rare. One tree refresh + opened-file hash check makes
         // changes that happened during the disconnected window visible without
         // returning to continuous polling.
-        try{ await loadFiles(root) }catch(_){ }
+        try{ await loadFiles(watchRoot) }catch(_){ }
         await reconcileOpenFiles([],{checkAllOpen:true})
       }finally{
         fileWatchBusyRef.current=false
@@ -6201,7 +6251,7 @@ function IDE() {
       if(cancelled) return
       const apiBase=String(runtimeInfo().apiBase||'')
       const wsBase=apiBase.replace(/^http:/,'ws:').replace(/^https:/,'wss:')
-      const wsUrl=`${wsBase}/files/watch?root=${encodeURIComponent(root)}`
+      const wsUrl=`${wsBase}/files/watch?root=${encodeURIComponent(watchRoot)}`
       const ws=new WebSocket(wsUrl)
       socket=ws
 
@@ -6252,7 +6302,7 @@ function IDE() {
       socket=null
       fileWatchBusyRef.current=false
     }
-  },[root,screen])
+  },[currentFileWatchRoot,screen])
 
   const createNewAgentProject=async()=>{
     if(!newAgentName.trim()){
@@ -6279,10 +6329,12 @@ function IDE() {
       setNewAgentCreateResult(r)
       if(r.ok){
         setSelectedProjectId(r.project_id||null)
-        setRoot(r.project_root||newAgentProjectRoot)
+        const createdRoot=r.project_root||newAgentProjectRoot
+        setRoot(createdRoot)
         setProjectLoadMessage(`프로젝트 #${r.project_id||''} ${r.name||newAgentName} 생성 완료`)
         setScreen('WORKSPACE')
-        setTimeout(()=>loadFiles(),100)
+        setTimeout(()=>loadFiles(createdRoot),100)
+        setTimeout(()=>refreshAdaptiveProjectAnalysis(createdRoot,workflowReq||newAgentName),180)
       }
     }catch(e){
       setNewAgentCreateResult({ok:false,message:String(e)})
@@ -6305,7 +6357,35 @@ function IDE() {
     }
   }
 
+  const refreshAdaptiveProjectAnalysis=async(projectRoot,requestText='')=>{
+    const targetRoot=String(projectRoot||'').trim()
+    if(!targetRoot) return null
+    try{
+      const adaptive=await api('/project/adaptive-report',{
+        method:'POST',
+        body:JSON.stringify({
+          project_root:targetRoot,
+          request:String(requestText||workflowReq||'프로젝트 성격에 맞는 Workflow, 분석 리포트, Architecture를 구성')
+        })
+      })
+      if(adaptive?.ok){
+        setLoadedProjectAnalysis(prev=>({
+          ...(prev||{}),
+          ...adaptive,
+          adaptive_report:adaptive
+        }))
+        return adaptive
+      }
+    }catch(error){
+      console.warn('Project adaptive analysis failed:',error)
+    }
+    return null
+  }
+
   const loadProject=async(projectId)=>{
+    // Do not let the previous project's tree root leak into file operations
+    // while the new project metadata is loading.
+    fileTreeRootRef.current=''
     setProjectLoadMessage('프로젝트를 불러오는 중...')
     setProjectLoadProgress({
       active:true,
@@ -6338,6 +6418,15 @@ function IDE() {
 
       const projectRoot=p.project_root||root||''
 
+      // v5.356: 다른 프로젝트의 Agent Factory/Workflow Snapshot이 새 프로젝트에
+      // 우선 적용되지 않도록 프로젝트 전환 시 실행/설계 상태를 먼저 비웁니다.
+      setWorkflow(null)
+      setTargetWorkflowPreview(null)
+      setPreviousTargetWorkflowPreview(null)
+      setTargetWorkflowQuality(null)
+      setDevelopmentFinalStatus(null)
+      setWorkflowReq(p.description||'')
+
       setSelectedProjectId(p.id)
       setNewAgentName(p.name||'')
       setNewAgentProjectRoot(projectRoot)
@@ -6359,6 +6448,13 @@ function IDE() {
       // setRoot()의 비동기 state 반영을 기다리지 않고
       // API에서 받은 projectRoot를 직접 사용한다.
       await loadFiles(projectRoot)
+      setProjectLoadProgress({
+        active:true,
+        percent:55,
+        message:'프로젝트 성격과 Workflow / Architecture를 분석하는 중...',
+        failed:false
+      })
+      await refreshAdaptiveProjectAnalysis(projectRoot,p.description||p.name||'')
       await activateProjectTerminal(p)
       await loadGitInfo(projectRoot)
 
@@ -6393,6 +6489,7 @@ function IDE() {
       setProjectLoadMessage(`프로젝트 #${p.id} ${p.name} 불러오기 완료`)
       setProjectListOpen(false)
       setWorkspaceTab('CODE')
+      setWorkflowView('TARGET')
       setScreen('WORKSPACE')
 
       setProjectLoadProgress({
@@ -6440,6 +6537,8 @@ function IDE() {
     setNewAgentProjectRoot('')
     setRoot('')
     workspaceRootRef.current=''
+    fileTreeRootRef.current=''
+    editorFileRootRef.current={}
 
     // 경로를 새로 선택해도 동일 경로의 과거 Draft를 자동 복원하지 않습니다.
     // Draft가 있으면 우측에서 사용자가 직접 이어서 불러올 수 있습니다.
@@ -6486,7 +6585,9 @@ function IDE() {
   },[root])
 
   const writeEditorFile=async(relativePath,content,{force=false,promptOnConflict=true}={})=>{
-    const workspaceRoot=resolveWorkspaceRoot()
+    const workspaceRoot=resolveWorkspaceRoot(
+      editorFileRootRef.current?.[relativePath]||fileTreeRootRef.current||''
+    )
     if(!workspaceRoot || !relativePath){
       throw new Error('프로젝트와 파일을 먼저 선택하세요.')
     }
@@ -6559,6 +6660,7 @@ function IDE() {
       ...prev,
       [relativePath]:false
     }))
+    editorFileRootRef.current[relativePath]=workspaceRoot
 
     return {
       ...result,
@@ -6584,7 +6686,7 @@ function IDE() {
       return
     }
     setFileSaveStatus('저장 중')
-    if(!root || !selected){
+    if(!resolveWorkspaceRoot(editorFileRootRef.current?.[selected]||fileTreeRootRef.current||'') || !selected){
       setFileSaveStatus('저장 실패')
       setTerminal(prev=>(prev||'')+'\n[저장 실패] 프로젝트와 파일을 먼저 선택하세요.\n')
       return
@@ -6674,7 +6776,7 @@ function IDE() {
   }
 
   const saveAllDirtyFiles=async()=>{
-    if(!root){
+    if(!resolveWorkspaceRoot(fileTreeRootRef.current||'')){
       setFileSaveStatus('저장 실패')
       setTerminal(prev=>(prev||'')+'\n[모두 저장 실패] 프로젝트를 먼저 선택하세요.\n')
       return
@@ -7084,10 +7186,13 @@ function IDE() {
       return new Blob([content],{type:'text/plain;charset=utf-8'})
     }
 
-    if(!root) throw new Error('프로젝트가 선택되지 않았습니다.')
+    const workspaceRoot=resolveWorkspaceRoot(
+      editorFileRootRef.current?.[relativePath]||fileTreeRootRef.current||''
+    )
+    if(!workspaceRoot) throw new Error('프로젝트가 선택되지 않았습니다.')
     const info=runtimeInfo()
     const params=new URLSearchParams({
-      root:String(root),
+      root:String(workspaceRoot),
       relative_path:String(relativePath)
     })
     const response=await fetch(`${info.apiBase}/files/raw?${params.toString()}`)
@@ -7142,11 +7247,15 @@ function IDE() {
     if(!relativePath) return
 
     const hasCachedContent=Object.prototype.hasOwnProperty.call(editorFileContents,relativePath)
-    if(!isBinaryPreviewFile(relativePath)&&!hasCachedContent){
+    const cachedRoot=String(editorFileRootRef.current?.[relativePath]||'').trim()
+    const currentRoot=resolveWorkspaceRoot(fileTreeRootRef.current||'')
+    const normalizeRoot=value=>String(value||'').trim().replace(/\\/g,'/').replace(/\/+$/,'').toLowerCase()
+    const cachedRootMatches=!cachedRoot||!currentRoot||normalizeRoot(cachedRoot)===normalizeRoot(currentRoot)
+    if(!isBinaryPreviewFile(relativePath)&&(!hasCachedContent||!cachedRootMatches)){
       // An open tab can outlive its in-memory content during project/file state
       // transitions. Never activate an empty/default buffer for that file;
       // reload the authoritative disk content first.
-      openFile(relativePath)
+      openFile(relativePath,currentRoot||fileTreeRootRef.current||'')
       return
     }
 
@@ -7335,14 +7444,18 @@ function IDE() {
   }
 
 
-  const openFile=async(relativePath)=>{
+  const openFile=async(relativePath,rootOverride='')=>{
     setWorkspaceTab('CODE')
 
     const requestedPath=relativePath
     if(!requestedPath) return
 
+    const workspaceRoot=resolveWorkspaceRoot(rootOverride||fileTreeRootRef.current||'')
+    const cachedRoot=String(editorFileRootRef.current?.[requestedPath]||'').trim()
+    const normalizeRoot=value=>String(value||'').trim().replace(/\\/g,'/').replace(/\/+$/,'').toLowerCase()
+    const cachedRootMatches=!cachedRoot||!workspaceRoot||normalizeRoot(cachedRoot)===normalizeRoot(workspaceRoot)
     const hasCachedContent=Object.prototype.hasOwnProperty.call(editorFileContents,requestedPath)
-    if(openEditorFiles.includes(requestedPath)&&(isBinaryPreviewFile(requestedPath)||hasCachedContent)){
+    if(openEditorFiles.includes(requestedPath)&&(isBinaryPreviewFile(requestedPath)||hasCachedContent)&&cachedRootMatches){
       setSelected(requestedPath)
       setFileTreeSelected(requestedPath)
       setCode(editorFileContents[requestedPath]??'')
@@ -7351,7 +7464,6 @@ function IDE() {
     }
 
     const token=++fileLoadTokenRef.current
-    const workspaceRoot=resolveWorkspaceRoot()
 
     setSelected(requestedPath)
     setFileTreeSelected(requestedPath)
@@ -7386,6 +7498,7 @@ function IDE() {
         }
 
         setOpenEditorFiles(prev=>prev.includes(requestedPath)?prev:[...prev,requestedPath])
+        editorFileRootRef.current[requestedPath]=workspaceRoot
         setEditorFileContents(prev=>({...prev,[requestedPath]:''}))
         setEditorFileDirty(prev=>({...prev,[requestedPath]:false}))
         if(isPdfFile(requestedPath)){
@@ -7412,6 +7525,8 @@ function IDE() {
 
       const content=r.content??''
       const canonicalPath=r.relative_path||requestedPath
+      editorFileRootRef.current[canonicalPath]=workspaceRoot
+      editorFileRootRef.current[requestedPath]=workspaceRoot
       const metaKey=normalizeProjectRelativePath(canonicalPath)
       if(r.mtime_ns){
         const loadedMeta={
@@ -10897,8 +11012,11 @@ function IDE() {
     if(codeEditAttachments.length&&!codeEditAttachmentAnalysis.ready) return
 
     const projectMode=codeEditScope==='PROJECT'
+    const workspaceRoot=resolveWorkspaceRoot(
+      projectMode ? (fileTreeRootRef.current||'') : (editorFileRootRef.current?.[selected]||fileTreeRootRef.current||'')
+    )
 
-    if(!root){
+    if(!workspaceRoot){
       setCodeEditChat(prev=>[
         ...prev,
         {role:'user',content:prompt},
@@ -10982,7 +11100,7 @@ function IDE() {
         const result=await api('/ai/project-edit',{
           method:'POST',
           body:JSON.stringify({
-            root,
+            root:workspaceRoot,
             instruction:prompt,
             max_context_files:10,
             attachment_ids:codeEditAttachments.map(item=>item.attachment_id)
@@ -11026,7 +11144,7 @@ function IDE() {
           return next
         })
 
-        await loadFiles()
+        await loadFiles(workspaceRoot)
 
         const primary=
           result.primary_file
@@ -11052,7 +11170,7 @@ function IDE() {
             setFileTreeSelected(primary)
             setCode(primaryResult.content??'')
           }else{
-            await openFile(primary)
+            await openFile(primary,workspaceRoot)
           }
 
           setTimeout(()=>{
@@ -11083,7 +11201,7 @@ function IDE() {
       const result=await api('/ai/edit',{
         method:'POST',
         body:JSON.stringify({
-          root,
+          root:workspaceRoot,
           path:targetPath,
           instruction:prompt,
           content:currentCode,
@@ -11256,6 +11374,154 @@ function IDE() {
   }
 
 
+  const buildCurrentFileTextSearchResults=(query)=>{
+    const needle=String(query||'')
+    if(!needle.trim()||!selected) return []
+    const loweredNeedle=needle.toLocaleLowerCase()
+    const results=[]
+    const pushTextMatches=(text,extra={})=>{
+      const lines=String(text||'').replace(/\r\n|\r/g,'\n').split('\n')
+      for(let lineIndex=0;lineIndex<lines.length;lineIndex+=1){
+        const rawLine=lines[lineIndex]
+        const compare=rawLine.toLocaleLowerCase()
+        let start=0
+        while(true){
+          const column=compare.indexOf(loweredNeedle,start)
+          if(column<0) break
+          results.push({
+            path:selected,
+            line_number:lineIndex+1,
+            column:column+1,
+            snippet:rawLine.trim().slice(0,240),
+            ...extra
+          })
+          if(results.length>=300) return
+          start=column+Math.max(1,loweredNeedle.length)
+        }
+      }
+    }
+
+    if(isNotebookFile(selected)){
+      try{
+        const notebook=JSON.parse(String(code||''))
+        const cells=Array.isArray(notebook?.cells)?notebook.cells:[]
+        cells.forEach((cell,cellIndex)=>{
+          if(results.length>=300) return
+          const source=Array.isArray(cell?.source)?cell.source.join(''):String(cell?.source||'')
+          pushTextMatches(source,{
+            cell_index:cellIndex,
+            cell_number:cellIndex+1,
+            cell_type:String(cell?.cell_type||'')
+          })
+        })
+        return results
+      }catch{
+        // Invalid/partially edited notebook JSON: fall back to the live buffer.
+      }
+    }
+    pushTextMatches(code)
+    return results
+  }
+
+  const openEditorTextSearch=(scope='CURRENT')=>{
+    setEditorTextSearchScope(scope)
+    setEditorTextSearchOpen(true)
+    setEditorTextSearchError('')
+    setEditorTextSearchResults([])
+    setEditorTextSearchMeta(null)
+    window.setTimeout(()=>editorTextSearchInputRef.current?.focus?.(),0)
+  }
+
+  const runEditorTextSearch=async()=>{
+    const query=String(editorTextSearchQuery||'').trim()
+    if(!query){
+      setEditorTextSearchResults([])
+      setEditorTextSearchMeta(null)
+      setEditorTextSearchError('찾을 텍스트를 입력하세요.')
+      return
+    }
+    setEditorTextSearchBusy(true)
+    setEditorTextSearchError('')
+    try{
+      if(editorTextSearchScope==='CURRENT'){
+        if(!selected){
+          setEditorTextSearchResults([])
+          setEditorTextSearchError('현재 열린 파일이 없습니다.')
+          return
+        }
+        if(isBinaryPreviewFile(selected)||isPdfFile(selected)||isPresentationFile(selected)||isDatabaseDiagramFile(selected)){
+          setEditorTextSearchResults([])
+          setEditorTextSearchError('현재 파일 형식은 텍스트 찾기를 지원하지 않습니다.')
+          return
+        }
+        const results=buildCurrentFileTextSearchResults(query)
+        setEditorTextSearchResults(results)
+        setEditorTextSearchMeta({files_scanned:1,truncated:results.length>=300,live_buffer:true})
+        return
+      }
+
+      const workspaceRoot=resolveWorkspaceRoot(fileTreeRootRef.current||editorFileRootRef.current?.[selected]||'')
+      if(!workspaceRoot){
+        setEditorTextSearchResults([])
+        setEditorTextSearchError('프로젝트 root를 확인할 수 없습니다. 프로젝트를 다시 선택해 주세요.')
+        return
+      }
+      const response=await api('/files/search-text',{
+        method:'POST',
+        body:JSON.stringify({
+          root:workspaceRoot,
+          query,
+          max_results:300,
+          max_files:10000
+        })
+      })
+      setEditorTextSearchResults(Array.isArray(response?.results)?response.results:[])
+      setEditorTextSearchMeta(response||null)
+    }catch(e){
+      setEditorTextSearchResults([])
+      setEditorTextSearchMeta(null)
+      setEditorTextSearchError(String(e?.message||e))
+    }finally{
+      setEditorTextSearchBusy(false)
+    }
+  }
+
+  const revealEditorTextSearchResult=async(result)=>{
+    const path=normalizeProjectRelativePath(result?.path||selected)
+    if(!path) return
+    const workspaceRoot=editorFileRootRef.current?.[path]||fileTreeRootRef.current||resolveWorkspaceRoot()
+    if(path!==selected){
+      try{ await openFile(path,workspaceRoot) }catch{return}
+    }
+    const reveal=()=>{
+      if(Number.isInteger(result?.cell_index) && notebookEditorControllerRef.current?.revealSearchMatch){
+        notebookEditorControllerRef.current.revealSearchMatch(
+          Number(result.cell_index),
+          Number(result.line_number||1),
+          Number(result.column||1),
+          String(editorTextSearchQuery||'').length
+        )
+        return true
+      }
+      const editor=editorInstanceRef.current
+      if(!editor?.setSelection) return false
+      const line=Math.max(1,Number(result?.line_number||1))
+      const column=Math.max(1,Number(result?.column||1))
+      const length=Math.max(1,String(editorTextSearchQuery||'').length)
+      editor.revealLineInCenter?.(line)
+      editor.setSelection({
+        startLineNumber:line,
+        startColumn:column,
+        endLineNumber:line,
+        endColumn:column+length
+      })
+      editor.focus?.()
+      return true
+    }
+    window.setTimeout(()=>{ if(!reveal()) window.setTimeout(reveal,180) },60)
+  }
+
+
   const buildProjectTree=(fileList,dirList=[])=>{
     const rootNode={name:'',path:'',type:'folder',children:{}}
 
@@ -11321,6 +11587,31 @@ function IDE() {
   }
 
   const projectTree=buildProjectTree(files,projectDirs)
+  const projectFileSearchNeedle=String(projectFileSearch||'').trim().toLocaleLowerCase()
+  const projectFileSearchMatches=projectFileSearchNeedle
+    ? files.filter(path=>String(path||'').toLocaleLowerCase().includes(projectFileSearchNeedle))
+    : files
+  const projectTreeForDisplay=projectFileSearchNeedle
+    ? buildProjectTree(projectFileSearchMatches,[])
+    : projectTree
+
+  useEffect(()=>{
+    // v5.349: 검색 결과는 처음에는 일치 파일의 상위 폴더를 자동으로 펼칩니다.
+    // 이후에는 fileTreeExpanded 상태만 사용하므로 사용자가 검색 중에도 + / - 버튼으로
+    // 폴더를 자유롭게 접고 다시 펼칠 수 있습니다. 검색 결과를 강제로 열린 상태로
+    // 고정하지 않습니다.
+    if(!projectFileSearchNeedle) return
+    const ancestors={}
+    projectFileSearchMatches.forEach(path=>{
+      const parts=normalizeProjectRelativePath(path).split('/').filter(Boolean)
+      let current=''
+      parts.slice(0,-1).forEach(part=>{
+        current=current?`${current}/${part}`:part
+        ancestors[current]=true
+      })
+    })
+    setFileTreeExpanded(prev=>({...prev,...ancestors}))
+  },[projectFileSearchNeedle])
 
   const toggleTreeFolder=(path)=>{
     setFileTreeExpanded(prev=>({...prev,[path]:!prev[path]}))
@@ -11796,7 +12087,7 @@ function IDE() {
             setFileTreeSelectedPaths([normalizeProjectRelativePath(node.path)])
             fileTreeSelectionAnchorRef.current=normalizeProjectRelativePath(node.path)
             setWorkspaceTab('CODE')
-            openFile(node.path)
+            openFile(node.path,fileTreeRootRef.current||resolveWorkspaceRoot())
           }
         }}
         onContextMenu={(e)=>openProjectFileContextMenu(node,e)}
@@ -12734,20 +13025,29 @@ function IDE() {
     const state=workflow?.state||workflow||{}
     const packageResult=state?.package_result||{}
     const testResult=state?.test_result||{}
+    const adaptive=loadedProjectAnalysis?.adaptive_report
+      ||(loadedProjectAnalysis?.project_type?loadedProjectAnalysis:null)
+      ||{}
+    const adaptiveArchitecture=adaptive?.architecture||{}
     const targetWorkflow=state?.target_agent_workflow
       || targetWorkflowPreview?.target_agent_workflow
+      || adaptive?.workflow
       || {}
     const requirementSpec=state?.requirement_spec
       || targetWorkflowPreview?.requirement_spec
+      || adaptive?.requirement_spec
       || {}
     const capabilityPlan=state?.capability_plan
       || targetWorkflowPreview?.capability_plan
+      || adaptive?.capability_plan
       || {}
     const toolMcpPlan=state?.tool_mcp_plan
       || targetWorkflowPreview?.tool_mcp_plan
+      || adaptive?.tool_mcp_plan
       || {}
     const architecture=state?.agent_architecture
       || targetWorkflowPreview?.agent_architecture
+      || adaptiveArchitecture
       || {}
     const databasePlan=state?.database_plan
       || targetWorkflowPreview?.database_plan
@@ -12758,10 +13058,14 @@ function IDE() {
     const architectureConformance=state?.architecture_conformance
       || packageResult?.architecture_conformance
       || {}
+    const executionBaseline=adaptive?.execution_baseline||{}
+    const runtimeStatus=state?.status
+      ||executionBaseline?.status
+      ||(adaptive?.project_type?'PROJECT_LOADED':'NOT_STARTED')
 
     return {
       state,
-      status:state?.status||'NOT_STARTED',
+      status:runtimeStatus,
       packageResult,
       testResult,
       targetWorkflow,
@@ -12772,6 +13076,8 @@ function IDE() {
       asBuiltArchitecture,
       architectureConformance,
       databasePlan,
+      projectProfile:adaptive,
+      analysisReport:adaptive?.analysis_report||{},
       settingsPlan:state?.settings_plan||packageResult?.settings_plan||{},
       settingsValidation:state?.settings_validation_result||packageResult?.settings_validation||{},
       settingsGeneration:state?.settings_generation_result||{},
@@ -12779,11 +13085,138 @@ function IDE() {
       modifiedFiles:packageResult?.modified_files||[],
       debugHistory:state?.debug_history||[],
       debugIteration:Number(state?.debug_iteration||0),
-      testCommand:packageResult?.test_command||state?.test_command||'python -m compileall .',
+      testCommand:packageResult?.test_command||state?.test_command||executionBaseline?.test_command||'',
       testReturncode:
         packageResult?.test_returncode
         ?? testResult?.returncode
+        ?? executionBaseline?.test_returncode
         ?? null
+    }
+  }
+
+  const refreshDbErd=async()=>{
+    if(dbErdBusy) return
+    setDbErdBusy(true)
+    setDbErdError('')
+    try{
+      const r=getWorkflowReportState()
+      const result=await api('/db-erd/analyze',{
+        method:'POST',
+        body:JSON.stringify({
+          project_root:resolveWorkspaceRoot(),
+          database_plan:r.databasePlan||{},
+          project_profile:r.projectProfile||{},
+          workflow_request:workflowReq||r.requirementSpec?.goal||'',
+          deck_type:'AGENT'
+        })
+      })
+      setDbErdReport(result||null)
+    }catch(error){
+      setDbErdError(error instanceof Error?error.message:String(error||'DB ERD 분석 실패'))
+    }finally{
+      setDbErdBusy(false)
+    }
+  }
+
+  useEffect(()=>{
+    if(screen==='WORKSPACE'&&workspaceTab==='DB_ERD'){
+      refreshDbErd()
+    }
+  },[screen,workspaceTab,root])
+
+  const exportWorkspacePowerPoint=async(scope='ALL',deckType='AGENT')=>{
+    const exportScope=String(scope||'ALL').toUpperCase()
+    const exportDeckType=String(deckType||'AGENT').toUpperCase()
+    const busyKey=`${exportDeckType}:${exportScope}`
+    if(pptExportBusy) return
+    setPptExportError('')
+    setPptExportBusy(busyKey)
+
+    try{
+      const r=getWorkflowReportState()
+      const reportSnapshot={
+        status:r.status,
+        testResult:r.testResult,
+        targetWorkflow:r.targetWorkflow,
+        requirementSpec:r.requirementSpec,
+        capabilityPlan:r.capabilityPlan,
+        toolMcpPlan:r.toolMcpPlan,
+        architecture:r.architecture,
+        asBuiltArchitecture:r.asBuiltArchitecture,
+        architectureConformance:r.architectureConformance,
+        databasePlan:r.databasePlan,
+        projectProfile:r.projectProfile,
+        analysisReport:r.analysisReport,
+        settingsPlan:r.settingsPlan,
+        settingsValidation:r.settingsValidation,
+        settingsGeneration:r.settingsGeneration,
+        createdFiles:r.createdFiles,
+        modifiedFiles:r.modifiedFiles,
+        debugHistory:r.debugHistory,
+        debugIteration:r.debugIteration,
+        testCommand:r.testCommand,
+        testReturncode:r.testReturncode
+      }
+
+      const response=await fetch(`${runtimeInfo().apiBase}/presentation/export`,{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          scope:exportScope,
+          deck_type:exportDeckType,
+          project_name:currentProjectName||'AgentStudio Project',
+          project_root:resolveWorkspaceRoot(),
+          generated_at:new Date().toISOString(),
+          workflow_request:workflowReq||r.requirementSpec?.goal||'',
+          workflow_definition:workflowDefinition||{},
+          report:reportSnapshot,
+          coding_style_report:codingStyleReport||{},
+          llm_usage_summary:llmUsageSummary||{},
+          db_erd:dbErdReport||{}
+        })
+      })
+
+      if(!response.ok){
+        const text=await response.text()
+        let message=text
+        try{
+          const parsed=JSON.parse(text)
+          message=parsed?.detail?.message||parsed?.detail||text
+        }catch{}
+        throw new Error(String(message||`HTTP ${response.status}`))
+      }
+
+      const blob=await response.blob()
+      const disposition=String(response.headers.get('Content-Disposition')||'')
+      let filename=''
+      const encodedMatch=disposition.match(/filename\*=UTF-8''([^;]+)/i)
+      const plainMatch=disposition.match(/filename=\"?([^\";]+)\"?/i)
+      if(encodedMatch?.[1]){
+        try{ filename=decodeURIComponent(encodedMatch[1].trim()) }catch{}
+      }
+      if(!filename&&plainMatch?.[1]) filename=plainMatch[1].trim()
+      if(!filename){
+        const safeProject=String(currentProjectName||'AgentStudio_Project').replace(/[\\/:*?"<>|]+/g,'_')
+        const label={ALL:'전체',WORKFLOW:'워크플로우',RUN:'실행결과',REPORT:'분석리포트',ARCHITECTURE:'아키텍처',DB_ERD:'DB_ERD'}[exportScope]||exportScope
+        filename=exportDeckType==='STUDIO'
+          ? `THEANOVA_AgentStudio_Studio_PPT_${label}.pptx`
+          : `${safeProject}_${exportScope==='ALL'?'Agent_PPT_전체':label}.pptx`
+      }
+
+      const url=URL.createObjectURL(blob)
+      const anchor=document.createElement('a')
+      anchor.href=url
+      anchor.download=filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.setTimeout(()=>URL.revokeObjectURL(url),1500)
+    }catch(error){
+      const message=error instanceof Error?error.message:String(error||'알 수 없는 오류')
+      setPptExportError(message)
+      window.alert(`PPT 다운로드 실패: ${message}`)
+    }finally{
+      setPptExportBusy('')
     }
   }
 
@@ -13038,7 +13471,7 @@ function IDE() {
     />}
 
     <main className={`workspace-main workspace-tab-${workspaceTab.toLowerCase()} ${
-      ['RUN','REPORT','ARCHITECTURE','LLM','BROWSER'].includes(workspaceTab)
+      ['RUN','REPORT','ARCHITECTURE','DB_ERD','LLM','BROWSER'].includes(workspaceTab)
         ? 'compact-workspace result-only-workspace'
         : workspaceTab==='CODE'&&!isBinaryPreviewFile(selected)
           ? 'workspace-with-bottom-tools code-tools-workspace'
@@ -13063,12 +13496,33 @@ function IDE() {
             ['RUN','실행 결과'],
             ['REPORT','분석 리포트'],
             ['ARCHITECTURE','아키텍처'],
+            ['DB_ERD','DB ERD'],
             ['LLM','LLM 리스트'],
             ['BROWSER','웹브라우저']
           ].map(([k,t])=><button key={k}
             className={workspaceTab===k?'active':''}
             onClick={()=>setWorkspaceTab(k)}>{t}</button>)}
         </div>
+        {['WORKFLOW','RUN','REPORT','ARCHITECTURE','DB_ERD'].includes(workspaceTab)&&<div className="workspace-ppt-export-group">
+          <button
+            type="button"
+            className="workspace-ppt-export-button all"
+            onClick={()=>exportWorkspacePowerPoint('ALL','AGENT')}
+            disabled={!!pptExportBusy}
+            title="현재 생성 중인 Agent 또는 로드된 프로젝트의 워크플로우·실행결과·분석리포트·아키텍처·DB ERD 전체를 PowerPoint로 다운로드"
+          >
+            {pptExportBusy==='AGENT:ALL'?'PPT 생성 중...':'▣ Agent PPT'}
+          </button>
+          <button
+            type="button"
+            className="workspace-ppt-export-button studio"
+            onClick={()=>exportWorkspacePowerPoint('ALL','STUDIO')}
+            disabled={!!pptExportBusy}
+            title="THEANOVA AgentStudio 자체의 전체 Workflow·기능·Runtime·Architecture·DB ERD 문서를 PowerPoint로 다운로드"
+          >
+            {pptExportBusy==='STUDIO:ALL'?'PPT 생성 중...':'▣ Studio PPT'}
+          </button>
+        </div>}
         <button
           type="button"
           className={`workspace-panel-toggle workspace-panel-toggle-right ${workspaceRightCollapsed?'collapsed':''}`}
@@ -13082,7 +13536,7 @@ function IDE() {
       </div>
 
       <div className={
-        ['RUN','REPORT','ARCHITECTURE','LLM','BROWSER'].includes(workspaceTab)
+        ['RUN','REPORT','ARCHITECTURE','DB_ERD','LLM','BROWSER'].includes(workspaceTab)
           ? 'workspace-top-pane compact-result-pane'
           : 'workspace-top-pane'
       }>
@@ -13225,8 +13679,19 @@ function IDE() {
               <h2>Workflow 설계도</h2>
               <p>단계를 나열하는 화면이 아니라, Agent가 어떻게 설계되고 움직이는지 한눈에 보는 구조도입니다.</p>
             </div>
-            <button type="button" onClick={loadWorkflowDefinition}>↻ 새로고침</button>
+            <div className="workspace-export-actions">
+              <button
+                type="button"
+                className="workspace-ppt-export-button"
+                onClick={()=>exportWorkspacePowerPoint('WORKFLOW','AGENT')}
+                disabled={!!pptExportBusy}
+              >
+                {pptExportBusy==='AGENT:WORKFLOW'?'PPT 생성 중...':'▣ PPT 다운로드'}
+              </button>
+              <button type="button" onClick={loadWorkflowDefinition}>↻ 새로고침</button>
+            </div>
           </div>
+          {pptExportError&&<div className="workspace-export-error">PPT 내보내기 오류: {pptExportError}</div>}
 
           <div className="workflow-view-tabs visual">
             <button
@@ -13267,8 +13732,8 @@ function IDE() {
               <div>
                 <span className="section-visual-icon target">⇢</span>
                 <div>
-                  <strong>{targetWorkflowPreview?.target_agent_workflow?.name||'개발 대상 Agent Workflow'}</strong>
-                  <small>실제 사용자가 Agent를 실행했을 때 처리되는 업무 순서</small>
+                  <strong>{targetWorkflowPreview?.target_agent_workflow?.name||loadedProjectAnalysis?.adaptive_report?.workflow?.name||'개발 대상 Agent Workflow'}</strong>
+                  <small>{loadedProjectAnalysis?.adaptive_report?.workflow?.source==='PROJECT_SOURCE_INFERENCE'?'현재 프로젝트 소스에서 추론한 실제 처리 흐름':'실제 사용자가 Agent를 실행했을 때 처리되는 업무 순서'}</small>
                 </div>
               </div>
               <span className="workflow-type-badge target">TARGET AGENT</span>
@@ -13435,7 +13900,7 @@ function IDE() {
               </>}
             </div>}
 
-            <TargetWorkflowDiagram workflow={targetWorkflowPreview?.target_agent_workflow}/>
+            <TargetWorkflowDiagram workflow={targetWorkflowPreview?.target_agent_workflow||loadedProjectAnalysis?.adaptive_report?.workflow}/>
           </div>}
         </div>}
 
@@ -13590,6 +14055,15 @@ function IDE() {
             </button>
 
             <div className="code-file-actions-fixed">
+              <button
+                type="button"
+                className="powershell-run-button editor-find-toolbar-button"
+                onClick={()=>openEditorTextSearch('CURRENT')}
+                disabled={!selected}
+                title="현재 파일에서 찾기 · 검색창에서 프로젝트 전체로 전환할 수 있습니다."
+              >
+                ⌕ 찾기
+              </button>
               {selected?.toLowerCase?.().endsWith('.ps1')&&
                 <div className="powershell-editor-actions">
                   <button
@@ -13704,6 +14178,47 @@ function IDE() {
             </div>
           </div>
 
+          {editorTextSearchOpen&&<div className="editor-text-search-panel">
+            <div className="editor-text-search-head">
+              <div className="editor-text-search-scope">
+                <button type="button" className={editorTextSearchScope==='CURRENT'?'active':''} onClick={()=>{setEditorTextSearchScope('CURRENT');setEditorTextSearchResults([]);setEditorTextSearchMeta(null)}}>현재 파일</button>
+                <button type="button" className={editorTextSearchScope==='PROJECT'?'active':''} onClick={()=>{setEditorTextSearchScope('PROJECT');setEditorTextSearchResults([]);setEditorTextSearchMeta(null)}}>프로젝트 전체</button>
+              </div>
+              <form onSubmit={e=>{e.preventDefault();runEditorTextSearch()}}>
+                <input
+                  ref={editorTextSearchInputRef}
+                  value={editorTextSearchQuery}
+                  onChange={e=>setEditorTextSearchQuery(e.target.value)}
+                  placeholder={editorTextSearchScope==='CURRENT'?'현재 파일에서 찾을 텍스트':'프로젝트에서 찾을 텍스트'}
+                />
+                <button type="submit" disabled={editorTextSearchBusy||!editorTextSearchQuery.trim()}>{editorTextSearchBusy?'검색 중…':'찾기'}</button>
+                <button type="button" className="close" onClick={()=>setEditorTextSearchOpen(false)} title="검색 닫기">×</button>
+              </form>
+            </div>
+            {editorTextSearchError&&<div className="editor-text-search-error">{editorTextSearchError}</div>}
+            {!editorTextSearchError&&editorTextSearchMeta&&<div className="editor-text-search-summary">
+              <strong>{editorTextSearchResults.length}개 결과</strong>
+              {editorTextSearchScope==='PROJECT'&&<span> · 파일 {Number(editorTextSearchMeta?.files_scanned||0)}개 검색</span>}
+              {editorTextSearchMeta?.live_buffer&&<span> · 저장 전 편집 내용 포함</span>}
+              {Number(editorTextSearchMeta?.skipped_large||0)>0&&<span> · 큰 파일 {Number(editorTextSearchMeta.skipped_large)}개 제외</span>}
+              {Number(editorTextSearchMeta?.skipped_binary||0)>0&&<span> · 바이너리 {Number(editorTextSearchMeta.skipped_binary)}개 제외</span>}
+              {editorTextSearchMeta?.truncated&&<span> · 결과 상한에 도달</span>}
+            </div>}
+            <div className="editor-text-search-results">
+              {editorTextSearchResults.map((row,index)=><button
+                type="button"
+                className="editor-text-search-result"
+                key={`${row.path}-${row.cell_index??''}-${row.line_number}-${row.column}-${index}`}
+                onClick={()=>revealEditorTextSearchResult(row)}
+              >
+                <span className="path">{row.path}</span>
+                <span className="location">{Number.isInteger(row.cell_index)?`셀 ${Number(row.cell_index)+1} · `:''}L{row.line_number}:C{row.column}</span>
+                <code>{row.snippet||'(빈 줄)'}</code>
+              </button>)}
+              {editorTextSearchMeta&&!editorTextSearchBusy&&!editorTextSearchResults.length&&!editorTextSearchError&&<div className="editor-text-search-empty">검색 결과가 없습니다.</div>}
+            </div>
+          </div>}
+
           {editorFilesMenu&&
             <div
               className="editor-tab-context-menu editor-files-actions-menu"
@@ -13794,7 +14309,7 @@ function IDE() {
                     <p>{editorLoadErrors[selected]?.message||'파일 읽기 오류가 발생했습니다.'}</p>
                     <code>{selected}</code>
                     <small>오류 내용은 파일 본문에 넣지 않았으며 저장도 차단되어 원본 파일을 보호합니다.</small>
-                    <button type="button" onClick={()=>openFile(selected)}>↻ 다시 불러오기</button>
+                    <button type="button" onClick={()=>openFile(selected,editorFileRootRef.current?.[selected]||fileTreeRootRef.current||'')}>↻ 다시 불러오기</button>
                   </div>
                 </div>
               </div>
@@ -13850,7 +14365,7 @@ function IDE() {
               ? <NotebookEditor
                   value={code}
                   filePath={selected}
-                  projectRoot={root}
+                  projectRoot={resolveWorkspaceRoot(editorFileRootRef.current?.[selected]||fileTreeRootRef.current||'')}
                   onChange={v=>updateActiveEditorCode(v)}
                   onExecutePython={executeNotebookPythonCode}
                   onStopPython={stopPythonExecution}
@@ -13933,18 +14448,30 @@ function IDE() {
 
         {workspaceTab==='RUN'&&(()=>{
           const r=getWorkflowReportState()
+          const adaptiveProject=Boolean(r.projectProfile?.project_type)&&!r.packageResult?.created_files
           const testPassed=r.testReturncode===0
           const testKnown=r.testReturncode!==null&&r.testReturncode!==undefined
 
           return <div className="execution-dashboard">
             <div className="dashboard-hero execution">
               <div>
-                <span className="dashboard-eyebrow">AGENT FACTORY EXECUTION</span>
+                <span className="dashboard-eyebrow">{adaptiveProject?'PROJECT EXECUTION STATUS':'AGENT FACTORY EXECUTION'}</span>
                 <h2>실행 결과</h2>
-                <p>Agent 제작 Workflow의 실행·테스트·파일 변경·디버그 상태를 실시간으로 확인합니다.</p>
+                <p>{adaptiveProject?`${r.projectProfile?.project_type_label||'현재 프로젝트'}의 실행 준비 상태와 실제 테스트 결과를 확인합니다.`:'Agent 제작 Workflow의 실행·테스트·파일 변경·디버그 상태를 실시간으로 확인합니다.'}</p>
               </div>
-              <StatusBadge status={r.status}/>
+              <div className="report-hero-actions">
+                <button
+                  type="button"
+                  className="workspace-ppt-export-button"
+                  onClick={()=>exportWorkspacePowerPoint('RUN','AGENT')}
+                  disabled={!!pptExportBusy}
+                >
+                  {pptExportBusy==='AGENT:RUN'?'PPT 생성 중...':'▣ PPT 다운로드'}
+                </button>
+                <StatusBadge status={r.status}/>
+              </div>
             </div>
+            {pptExportError&&<div className="workspace-export-error">PPT 내보내기 오류: {pptExportError}</div>}
 
             {renderDevelopmentFinalStatus()}
             {renderFailureDiagnostics()}
@@ -14001,7 +14528,7 @@ function IDE() {
               <ReportSection
                 icon="▤"
                 title="파일 변경"
-                subtitle="AgentStudio가 실제로 만든 파일"
+                subtitle={adaptiveProject?"현재 실행에서 생성/수정된 파일":"AgentStudio가 실제로 만든 파일"}
               >
                 <FileChangeList
                   created={r.createdFiles}
@@ -14044,6 +14571,7 @@ function IDE() {
 
         {workspaceTab==='REPORT'&&(()=>{
           const r=getWorkflowReportState()
+          const adaptiveProject=Boolean(r.projectProfile?.project_type)
           const style=codingStyleReport||{
             checked_files:0,
             pass:0,
@@ -14067,11 +14595,19 @@ function IDE() {
           return <div className="analysis-report-dashboard">
             <div className="dashboard-hero report">
               <div>
-                <span className="dashboard-eyebrow">AGENT DEVELOPMENT REPORT</span>
+                <span className="dashboard-eyebrow">{adaptiveProject?'PROJECT ADAPTIVE ANALYSIS':'AGENT DEVELOPMENT REPORT'}</span>
                 <h2>분석 리포트</h2>
-                <p>요구사항부터 Architecture, MCP, Workflow, 코드 품질, 최종 완료 상태까지 한 번에 확인합니다.</p>
+                <p>{adaptiveProject?`${r.projectProfile?.project_type_label||'현재 프로젝트'} 성격과 실제 감지 기술을 기준으로 Workflow·Architecture·Tool·Data 구성을 분석합니다.`:'요구사항부터 Architecture, MCP, Workflow, 코드 품질, 최종 완료 상태까지 한 번에 확인합니다.'}</p>
               </div>
               <div className="report-hero-actions">
+                <button
+                  type="button"
+                  className="workspace-ppt-export-button"
+                  onClick={()=>exportWorkspacePowerPoint('REPORT','AGENT')}
+                  disabled={!!pptExportBusy}
+                >
+                  {pptExportBusy==='AGENT:REPORT'?'PPT 생성 중...':'▣ PPT 다운로드'}
+                </button>
                 <button
                   type="button"
                   onClick={()=>runProjectCodingStyleValidation(root||newAgentProjectRoot)}
@@ -14081,6 +14617,7 @@ function IDE() {
                 <StatusBadge status={r.status}/>
               </div>
             </div>
+            {pptExportError&&<div className="workspace-export-error">PPT 내보내기 오류: {pptExportError}</div>}
 
             <div className="metric-grid report-metrics">
               <MetricCard
@@ -14118,8 +14655,8 @@ function IDE() {
             <div className="report-layout">
               <ReportSection
                 icon="✦"
-                title="요구사항"
-                subtitle="인터뷰에서 확정된 Agent 목표"
+                title={adaptiveProject?"프로젝트 성격 / 목표":"요구사항"}
+                subtitle={adaptiveProject?"소스 분석 기반 프로젝트 프로필":"인터뷰에서 확정된 Agent 목표"}
                 className="span-2"
               >
                 <div className="requirement-goal-box">{goal}</div>
@@ -14137,8 +14674,8 @@ function IDE() {
 
               <ReportSection
                 icon="⬡"
-                title="Agent Architecture"
-                subtitle="구성 요소와 인터페이스"
+                title={adaptiveProject?"Project Architecture":"Agent Architecture"}
+                subtitle={adaptiveProject?"실제 감지 구성 요소와 인터페이스":"구성 요소와 인터페이스"}
               >
                 <KeyValueGrid items={[
                   {label:'Components',value:`${(r.architecture?.components||[]).length}개`},
@@ -14314,7 +14851,7 @@ function IDE() {
               <ReportSection
                 icon="★"
                 title="최종 완료 상태"
-                subtitle="Agent Factory 완료 조건"
+                subtitle={adaptiveProject?"프로젝트 분석 / 실행 상태":"Agent Factory 완료 조건"}
                 className="span-2 final-status-section"
               >
                 <div className={`final-status-card ${String(r.status).includes('COMPLETED')?'completed':'pending'}`}>
@@ -14324,7 +14861,9 @@ function IDE() {
                     <small>
                       {String(r.status).includes('COMPLETED')
                         ? '코드 생성 · 테스트 · 패키지 · 최종 검토가 완료되었습니다.'
-                        : 'Agent Factory Workflow가 아직 최종 완료 상태가 아닙니다.'}
+                        : (adaptiveProject&&r.status==='PROJECT_LOADED'
+                          ? '프로젝트 소스 분석이 완료되었으며 실제 실행/테스트 전 상태입니다.'
+                          : 'Agent Factory Workflow가 아직 최종 완료 상태가 아닙니다.')}
                     </small>
                   </div>
                 </div>
@@ -14335,6 +14874,7 @@ function IDE() {
 
         {workspaceTab==='ARCHITECTURE'&&(()=>{
           const r=getWorkflowReportState()
+          const adaptiveProject=Boolean(r.architecture?.source==='PROJECT_SOURCE_INFERENCE')
           const designArchitectureReady=Boolean(
             (r.architecture?.components||[]).length
             ||(r.architecture?.interfaces||[]).length
@@ -14355,19 +14895,34 @@ function IDE() {
               <div>
                 <span className="dashboard-eyebrow">ARCHITECTURE VISUALIZATION</span>
                 <h2>아키텍처</h2>
-                <p>설계 아키텍처와 실제 생성 코드를 역분석한 As-Built 구조를 비교하고 일치 여부를 검증합니다.</p>
+                <p>{adaptiveProject?`${r.projectProfile?.project_type_label||'현재 프로젝트'}에서 실제 감지한 구성 요소·인터페이스·DB·인프라를 기준으로 아키텍처를 구성합니다.`:'설계 아키텍처와 실제 생성 코드를 역분석한 As-Built 구조를 비교하고 일치 여부를 검증합니다.'}</p>
               </div>
               <div className="report-hero-actions">
+                <button
+                  type="button"
+                  className="workspace-ppt-export-button"
+                  onClick={()=>exportWorkspacePowerPoint('ARCHITECTURE','AGENT')}
+                  disabled={!!pptExportBusy}
+                >
+                  {pptExportBusy==='AGENT:ARCHITECTURE'?'PPT 생성 중...':'▣ PPT 다운로드'}
+                </button>
                 <button type="button" onClick={()=>setWorkspaceTab('REPORT')}>↔ 분석 리포트 보기</button>
                 <StatusBadge status={r.status} />
               </div>
             </div>
+            {pptExportError&&<div className="workspace-export-error">PPT 내보내기 오류: {pptExportError}</div>}
 
             <div className="metric-grid report-metrics">
-              <MetricCard label="구성 요소" value={designArchitectureReady?`${(r.architecture?.components||[]).length}개`:'-'} sub={designArchitectureReady?'Design Architecture':'설계 전'} icon="⬢" tone="info" />
+              <MetricCard label="구성 요소" value={designArchitectureReady?`${(r.architecture?.components||[]).length}개`:'-'} sub={designArchitectureReady?(adaptiveProject?'Project Adaptive':'Design Architecture'):'설계 전'} icon="⬢" tone="info" />
               <MetricCard label="인터페이스" value={designArchitectureReady?`${(r.architecture?.interfaces||[]).length}개`:'-'} sub={designArchitectureReady?'연결 지점':'설계 전'} icon="⇄" tone="default" />
               <MetricCard label="영속성" value={designArchitectureReady?`${(r.architecture?.persistence||[]).length}개`:'-'} sub={designArchitectureReady?'DB / 상태 저장':'설계 전'} icon="💾" tone="warning" />
-              <MetricCard label="Conformance" value={conformanceReady?`${Number(r.architectureConformance?.score||0).toFixed(0)}점`:'-'} sub={conformanceReady?(r.architectureConformance?.ok?'PASS':'검증 필요'):'코드 생성 후 검증'} icon="✓" tone={conformanceReady&&r.architectureConformance?.ok?'success':'warning'} />
+              <MetricCard
+                label={adaptiveProject?'프로젝트 유형':'Conformance'}
+                value={adaptiveProject?(r.projectProfile?.project_type_label||'Project'):(conformanceReady?`${Number(r.architectureConformance?.score||0).toFixed(0)}점`:'-')}
+                sub={adaptiveProject?'소스 기반 자동 분류':(conformanceReady?(r.architectureConformance?.ok?'PASS':'검증 필요'):'코드 생성 후 검증')}
+                icon={adaptiveProject?'◇':'✓'}
+                tone={adaptiveProject?'info':(conformanceReady&&r.architectureConformance?.ok?'success':'warning')}
+              />
             </div>
 
             {designArchitectureReady
@@ -14383,7 +14938,7 @@ function IDE() {
                 </div>
             }
 
-            {asBuiltArchitectureReady
+            {!adaptiveProject&&(asBuiltArchitectureReady
               ? <AsBuiltAgentArchitecturePanel report={r} />
               : <div className="architecture-lifecycle-empty secondary">
                   <span>⌁</span>
@@ -14393,9 +14948,9 @@ function IDE() {
                     <p>프로젝트 코드 생성 후 실제 파일·클래스·함수·Framework 증거를 정적 분석하여 As-Built Architecture를 만듭니다.</p>
                   </div>
                 </div>
-            }
+            )}
 
-            {conformanceReady
+            {!adaptiveProject&&(conformanceReady
               ? <ArchitectureConformancePanel report={r} />
               : <div className="architecture-lifecycle-empty secondary">
                   <span>✓</span>
@@ -14405,8 +14960,46 @@ function IDE() {
                     <p>As-Built 분석 후 설계와 실제 구현을 비교하고 85점 기준 및 Critical 누락 여부를 검증합니다.</p>
                   </div>
                 </div>
-            }
-            <AgentStudioArchitecturePanel />
+            )}
+          </div>
+        })()}
+
+        {workspaceTab==='DB_ERD'&&(()=>{
+          const summary=dbErdReport?.summary||{}
+          const r=getWorkflowReportState()
+          return <div className="analysis-report-dashboard db-erd-dashboard">
+            <div className="dashboard-hero report db-erd-hero">
+              <div>
+                <span className="dashboard-eyebrow">DATABASE MODEL VISUALIZATION</span>
+                <h2>DB ERD</h2>
+                <p>현재 Agent 또는 로드된 프로젝트에서 사용하는 PostgreSQL·SQL DB·pgvector·Redis·Document DB를 DB별로 분리하여 ERD / Data Model로 표시합니다.</p>
+              </div>
+              <div className="report-hero-actions">
+                <button
+                  type="button"
+                  className="workspace-ppt-export-button"
+                  onClick={()=>exportWorkspacePowerPoint('DB_ERD','AGENT')}
+                  disabled={!!pptExportBusy}
+                >
+                  {pptExportBusy==='AGENT:DB_ERD'?'PPT 생성 중...':'▣ PPT 다운로드'}
+                </button>
+                <button type="button" onClick={()=>setWorkspaceTab('ARCHITECTURE')}>↔ 아키텍처 보기</button>
+                <StatusBadge status={r.status} />
+              </div>
+            </div>
+            {pptExportError&&<div className="workspace-export-error">PPT 내보내기 오류: {pptExportError}</div>}
+            <div className="metric-grid report-metrics">
+              <MetricCard label="DB / Store" value={`${Number(summary.database_count||0)}개`} sub="DB별 개별 모델" icon="▣" tone="info" />
+              <MetricCard label="Tables" value={`${Number(summary.table_count||0)}개`} sub="관계형 + Vector" icon="▤" tone="default" />
+              <MetricCard label="Relations" value={`${Number(summary.relationship_count||0)}개`} sub="FK / Reference" icon="⇄" tone="warning" />
+              <MetricCard label="Redis / Collections" value={`${Number(summary.redis_key_count||0)} / ${Number(summary.collection_count||0)}`} sub="Key Pattern / Collection" icon="◇" tone="success" />
+            </div>
+            <DatabaseErdPanel
+              report={dbErdReport}
+              loading={dbErdBusy}
+              error={dbErdError}
+              onRefresh={refreshDbErd}
+            />
           </div>
         })()}
 
@@ -15236,14 +15829,28 @@ function IDE() {
             </div>
           </div>
 
+          <div className="project-file-search-box">
+            <span aria-hidden="true">⌕</span>
+            <input
+              value={projectFileSearch}
+              onChange={e=>setProjectFileSearch(e.target.value)}
+              placeholder="파일명 또는 경로 찾기"
+              aria-label="현재 프로젝트 파일 찾기"
+            />
+            {projectFileSearch&&<button type="button" onClick={()=>setProjectFileSearch('')} title="파일 검색 지우기">×</button>}
+          </div>
+          {projectFileSearchNeedle&&<div className="project-file-search-summary">
+            {projectFileSearchMatches.length}개 파일 찾음 · 전체 {files.length}개
+          </div>}
+
           <div className="project-tree-help">
             클릭: 파일 열기 · Ctrl/Shift: 멀티 선택 · DEL: 삭제 · 우클릭: 메뉴 · ✎: 이름 변경
           </div>
 
           <div className="project-tree-view">
-            {projectTree.sortedChildren?.length
-              ? projectTree.sortedChildren.map(node=>renderProjectTreeNode(node,0))
-              : <div className="empty-mini">프로젝트 파일이 없습니다.</div>}
+            {projectTreeForDisplay.sortedChildren?.length
+              ? projectTreeForDisplay.sortedChildren.map(node=>renderProjectTreeNode(node,0))
+              : <div className="empty-mini">{projectFileSearchNeedle?'검색 결과가 없습니다.':'프로젝트 파일이 없습니다.'}</div>}
           </div>
 
           {fileTreeContextMenu&&
@@ -15879,9 +16486,14 @@ function IDE() {
           setScreen('WORKSPACE')
 
           try{
+            const externalRoot=String(r.project_root||externalProjectPath||'').trim()
             const fileResult=await api(
-              `/files?root=${encodeURIComponent(r.project_root||externalProjectPath)}`
+              `/files?root=${encodeURIComponent(externalRoot)}`
             )
+            if(externalRoot){
+              workspaceRootRef.current=externalRoot
+              fileTreeRootRef.current=externalRoot
+            }
             setFiles(
               Array.isArray(fileResult)
                 ? fileResult
@@ -15980,7 +16592,10 @@ function IDE() {
     setExternalProjectMode(true)
 
     try{
-      const r=await api(`/files?root=${encodeURIComponent(externalProjectAnalysis.project_root)}`)
+      const externalRoot=String(externalProjectAnalysis.project_root||'').trim()
+      const r=await api(`/files?root=${encodeURIComponent(externalRoot)}`)
+      workspaceRootRef.current=externalRoot
+      fileTreeRootRef.current=externalRoot
       setFiles(Array.isArray(r)?r:(r.files||[]))
     }catch(e){
       try{ await loadFiles() }catch(_){}

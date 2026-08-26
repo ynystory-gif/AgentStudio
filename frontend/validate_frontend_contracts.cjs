@@ -267,16 +267,18 @@ if (!process.exitCode) {
   console.log('[frontend-contract] Agent interview + LLM code edit + Codex reference-file attachments: OK')
 }
 
-for (const [label, pattern] of [
-  ['authoritative workspace root ref', /const workspaceRootRef=useRef\(''\)/],
-  ['workspace root resolver includes last loaded root', /const resolveWorkspaceRoot=\(\)=>String\([\s\S]*workspaceRootRef\.current/],
-  ['file list stores successful root', /workspaceRootRef\.current=targetRoot[\s\S]*setFiles\(nextFiles\)/],
-  ['open file resolves root before read', /const openFile=async\(relativePath\)=>\{[\s\S]*const workspaceRoot=resolveWorkspaceRoot\(\)[\s\S]*root:workspaceRoot,[\s\S]*relative_path:requestedPath/],
-  ['external reload resolves root', /const reloadExternalEditorFile=async[\s\S]*const workspaceRoot=resolveWorkspaceRoot\(\)[\s\S]*root:workspaceRoot,relative_path:editorPath/],
-  ['editor write resolves root', /const writeEditorFile=async[\s\S]*const workspaceRoot=resolveWorkspaceRoot\(\)/],
-  ['new project clears stale workspace root', /setNewAgentProjectRoot\(''\)[\s\S]*setRoot\(''\)[\s\S]*workspaceRootRef\.current=''/],
+for (const [label, ok] of [
+  ['authoritative workspace root ref', source.includes("const workspaceRootRef=useRef('')")],
+  ['authoritative file-tree root ref', source.includes("const fileTreeRootRef=useRef('')")],
+  ['per-editor project root map', source.includes('const editorFileRootRef=useRef({})')],
+  ['workspace root resolver includes last loaded root', source.includes("const resolveWorkspaceRoot=(preferredRoot='')=>") && source.includes('||workspaceRootRef.current')],
+  ['file list stores successful root', source.includes('workspaceRootRef.current=targetRoot') && source.includes('fileTreeRootRef.current=targetRoot') && source.includes('setFiles(nextFiles)')],
+  ['open file resolves tree root before read', source.includes("const openFile=async(relativePath,rootOverride='')=>") && source.includes("resolveWorkspaceRoot(rootOverride||fileTreeRootRef.current||'')") && source.includes('root:workspaceRoot')],
+  ['external reload resolves root', source.includes('const reloadExternalEditorFile=async') && source.includes('fileTreeRootRef.current||editorFileRootRef.current?.[editorPath]')],
+  ['editor write resolves root', source.includes('const writeEditorFile=async') && source.includes('editorFileRootRef.current?.[relativePath]||fileTreeRootRef.current')],
+  ['new project clears stale workspace root', source.includes("workspaceRootRef.current=''") && source.includes("fileTreeRootRef.current=''") && source.includes('editorFileRootRef.current={}')],
 ]) {
-  if (!pattern.test(source)) {
+  if (!ok) {
     fail(`Project-root file load contract missing: ${label}`)
   }
 }

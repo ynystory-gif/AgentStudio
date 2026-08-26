@@ -9710,6 +9710,20 @@ display:none은 React DOM을 unmount하지 않습니다.
 .code-file-actions-fixed .powershell-run-button{
   flex:0 0 auto;
 }
+.code-file-actions-fixed .editor-find-toolbar-button{
+  margin-left:5px;
+  border-color:#31536d;
+  background:#102437;
+  color:#c6def1;
+}
+.code-file-actions-fixed .editor-find-toolbar-button:hover:not(:disabled){
+  background:#173854;
+  border-color:#4a7da4;
+}
+.code-file-actions-fixed .editor-find-toolbar-button:disabled{
+  opacity:.45;
+  cursor:default;
+}
 /* The entire code workspace must never grow to fit the tab strip. */
 .workspace-panel-layout,
 .workspace-panel-layout > *,
@@ -12082,3 +12096,296 @@ display:none은 React DOM을 unmount하지 않습니다.
 .development-live-log-row span{color:#71889a;font-variant-numeric:tabular-nums;}
 .development-live-log-row b{color:#8cc2e8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .development-live-log-row em{color:#b8c7d3;font-style:normal;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+/* v5.347 Project/File text search */
+.project-file-search-box{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  margin:8px 0 6px;
+  padding:0 9px;
+  min-height:34px;
+  border:1px solid #22364b;
+  border-radius:7px;
+  background:#0c1620;
+}
+.project-file-search-box>span{color:#7ea6c9;font-size:16px}
+.project-file-search-box input{
+  min-width:0;
+  flex:1;
+  border:0;
+  outline:0;
+  background:transparent;
+  color:#dce9f6;
+  font-size:12px;
+}
+.project-file-search-box button{
+  width:24px;
+  height:24px;
+  border:0;
+  border-radius:5px;
+  background:#16283a;
+  color:#adc4d9;
+  cursor:pointer;
+}
+.project-file-search-summary{
+  padding:0 2px 6px;
+  color:#78a6cc;
+  font-size:11px;
+}
+.editor-text-search-panel{
+  position:relative;
+  z-index:4;
+  flex:0 0 auto;
+  max-height:280px;
+  border-bottom:1px solid #29435a;
+  background:#0b151f;
+  box-shadow:0 10px 24px rgba(0,0,0,.22);
+}
+.editor-text-search-head{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:7px 9px;
+  border-bottom:1px solid #182a3a;
+}
+.editor-text-search-scope{display:flex;gap:3px;flex:0 0 auto}
+.editor-text-search-scope button{
+  border:1px solid #263c50;
+  border-radius:5px;
+  padding:6px 9px;
+  background:#0e1d2a;
+  color:#8eacc6;
+  font-size:11px;
+  cursor:pointer;
+}
+.editor-text-search-scope button.active{background:#173b5a;color:#e7f4ff;border-color:#3672a2}
+.editor-text-search-head form{display:flex;align-items:center;gap:5px;min-width:0;flex:1}
+.editor-text-search-head input{
+  min-width:100px;
+  flex:1;
+  height:30px;
+  border:1px solid #29445b;
+  border-radius:5px;
+  padding:0 9px;
+  background:#08111a;
+  color:#e0edf8;
+  outline:0;
+}
+.editor-text-search-head input:focus{border-color:#3f82b8}
+.editor-text-search-head form button{
+  height:30px;
+  border:1px solid #315976;
+  border-radius:5px;
+  padding:0 10px;
+  background:#14314a;
+  color:#dceeff;
+  cursor:pointer;
+}
+.editor-text-search-head form button.close{width:30px;padding:0;background:#17202a;color:#9eb2c4}
+.editor-text-search-head form button:disabled{opacity:.45;cursor:default}
+.editor-text-search-summary,.editor-text-search-error{
+  padding:5px 10px;
+  border-bottom:1px solid #162536;
+  font-size:11px;
+  color:#8eabc3;
+}
+.editor-text-search-error{color:#ff9999;background:#281416}
+.editor-text-search-results{max-height:190px;overflow:auto}
+.editor-text-search-result{
+  width:100%;
+  display:grid;
+  grid-template-columns:minmax(150px,1fr) auto;
+  gap:2px 10px;
+  padding:7px 10px;
+  border:0;
+  border-bottom:1px solid #132333;
+  text-align:left;
+  background:transparent;
+  color:#c9d9e8;
+  cursor:pointer;
+}
+.editor-text-search-result:hover{background:#10283b}
+.editor-text-search-result .path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#81b6de}
+.editor-text-search-result .location{font-size:10px;color:#718aa1}
+.editor-text-search-result code{grid-column:1 / -1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d7e3ee;font-size:11px}
+.editor-text-search-empty{padding:12px;color:#6f879d;font-size:11px;text-align:center}
+
+/* ===== v5.351 Editable PowerPoint export ===== */
+.workspace-tabs.workspace-tabs-with-panel-controls{
+  grid-template-columns:auto minmax(0,1fr) auto auto;
+}
+.workspace-tabs.workspace-tabs-with-panel-controls > .workspace-ppt-export-group{order:2;align-self:center;}
+.workspace-tabs.workspace-tabs-with-panel-controls > .workspace-panel-toggle-right{order:3;}
+.workspace-export-actions{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:8px;
+  flex-wrap:wrap;
+}
+
+.workspace-ppt-export-group{
+  display:inline-flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:6px;
+  min-width:max-content;
+}
+.workspace-ppt-export-button.studio{
+  border-color:#2d8e87 !important;
+  background:linear-gradient(180deg,#174946,#103532) !important;
+  color:#d7fff8 !important;
+}
+.workspace-ppt-export-button.studio:hover:not(:disabled){
+  border-color:#55c7bd !important;
+  background:linear-gradient(180deg,#1d5d58,#164440) !important;
+}
+.workspace-ppt-export-button{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-height:29px;
+  padding:0 11px;
+  border:1px solid #3f6591 !important;
+  border-radius:7px;
+  background:linear-gradient(180deg,#173655,#10263d) !important;
+  color:#d8ebff !important;
+  font-size:9px;
+  font-weight:800;
+  cursor:pointer;
+  white-space:nowrap;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+}
+.workspace-ppt-export-button:hover:not(:disabled){
+  border-color:#69a6e4 !important;
+  background:linear-gradient(180deg,#1d456e,#14304b) !important;
+  color:#fff !important;
+}
+.workspace-ppt-export-button.all{
+  margin-left:4px;
+  border-color:#6654a8 !important;
+  background:linear-gradient(180deg,#332b63,#241f49) !important;
+  color:#e9e3ff !important;
+}
+.workspace-ppt-export-button.all:hover:not(:disabled){
+  border-color:#8f7be0 !important;
+  background:linear-gradient(180deg,#41367c,#2e285a) !important;
+}
+.workspace-ppt-export-button:disabled{
+  opacity:.55;
+  cursor:wait;
+}
+.workspace-export-error{
+  margin:0 0 10px;
+  padding:8px 10px;
+  border:1px solid #6d3942;
+  border-radius:7px;
+  background:#25151a;
+  color:#f3a5ad;
+  font-size:9px;
+  white-space:pre-wrap;
+}
+@media(max-width:1180px){
+  .workspace-tabs.workspace-tabs-with-panel-controls{
+    grid-template-columns:auto minmax(0,1fr) auto auto;
+  }
+  .workspace-ppt-export-group{gap:4px;}
+  .workspace-ppt-export-button.all,
+  .workspace-ppt-export-button.studio{
+    min-width:32px;
+    max-width:82px;
+    padding:0 7px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+}
+
+/* ===== v5.356 Project / Studio DB ERD workspace ===== */
+.db-erd-dashboard{gap:14px;}
+.db-erd-hero{border-color:#2d6c80;background:linear-gradient(135deg,rgba(15,52,73,.94),rgba(25,25,66,.94));}
+.db-erd-panel-shell{
+  display:flex;
+  flex-direction:column;
+  gap:12px;
+  min-height:0;
+  padding:14px;
+  border:1px solid #243b52;
+  border-radius:12px;
+  background:#091521;
+}
+.db-erd-panel-toolbar{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:2px 2px 4px;
+}
+.db-erd-panel-toolbar>div{display:flex;flex-direction:column;gap:3px;min-width:0;}
+.db-erd-panel-toolbar strong{font-size:13px;color:#eaf4ff;}
+.db-erd-panel-toolbar span{font-size:10px;color:#8199af;}
+.db-erd-panel-toolbar button{
+  height:30px;padding:0 11px;border:1px solid #315b79;border-radius:7px;
+  background:#10283a;color:#cfe9ff;font-size:9px;font-weight:700;cursor:pointer;
+}
+.db-erd-panel-toolbar button:disabled{opacity:.55;cursor:wait;}
+.db-erd-panel-error,.db-erd-panel-empty,.db-erd-empty-inline{
+  padding:16px;border:1px solid #4b3945;border-radius:9px;background:#1c1319;color:#f0a7af;font-size:10px;
+}
+.db-erd-panel-empty{display:flex;flex-direction:column;gap:6px;border-color:#24394b;background:#0c1925;color:#8ea8be;text-align:center;}
+.db-erd-panel-empty strong{font-size:13px;color:#d8e8f7;}
+.db-erd-database-tabs{display:flex;align-items:stretch;gap:7px;overflow:auto;padding:2px 0 5px;}
+.db-erd-database-tabs button{
+  min-width:155px;display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #29445c;border-radius:9px;
+  background:#0d1d2b;color:#c8d8e6;text-align:left;cursor:pointer;
+}
+.db-erd-database-tabs button:hover{border-color:#3e6d91;background:#11283a;}
+.db-erd-database-tabs button.active{border-color:#5ca7e2;background:#15324a;box-shadow:inset 0 0 0 1px rgba(92,167,226,.22);}
+.db-erd-database-tabs button.vector.active{border-color:#8d72df;background:#2a2145;}
+.db-erd-database-tabs button.redis.active{border-color:#b45f92;background:#3a1f31;}
+.db-erd-database-tabs button.document.active{border-color:#42aaa9;background:#173737;}
+.db-erd-tab-icon{
+  width:31px;height:31px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 31px;border-radius:8px;
+  background:#163a56;color:#8ed2ff;font-size:9px;font-weight:900;border:1px solid #2c6185;
+}
+.db-erd-database-tabs button.vector .db-erd-tab-icon{background:#33265a;border-color:#7259bc;color:#d4c7ff;}
+.db-erd-database-tabs button.redis .db-erd-tab-icon{background:#46243a;border-color:#8e4b71;color:#ffc6e5;}
+.db-erd-database-tabs button.document .db-erd-tab-icon{background:#173f41;border-color:#337f82;color:#a6ffff;}
+.db-erd-database-tabs button>span:last-child{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.db-erd-database-tabs strong{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.db-erd-database-tabs small{font-size:8px;color:#7f96aa;}
+.db-erd-database-section{border:1px solid #284158;border-radius:11px;background:#07121c;overflow:hidden;min-height:420px;}
+.db-erd-database-section.vector{border-color:#493b72;}
+.db-erd-database-section.redis{border-color:#65394f;}
+.db-erd-database-section.document{border-color:#2c6265;}
+.db-erd-database-head{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-bottom:1px solid #1f3447;background:#0d1d2a;
+}
+.db-erd-database-head>div:first-child{display:flex;align-items:center;gap:10px;min-width:0;}
+.db-erd-engine-mark{
+  min-width:43px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:1px solid #32648a;border-radius:7px;background:#14324a;
+  color:#9bd5ff;font-size:8px;font-weight:900;
+}
+.db-erd-database-head>div:first-child>div{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.db-erd-database-head strong{font-size:12px;color:#edf7ff;}
+.db-erd-database-head small{font-size:8px;color:#7e96aa;}
+.db-erd-head-metrics{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.db-erd-head-metrics span{padding:5px 8px;border:1px solid #29455d;border-radius:6px;background:#0b1722;color:#8199ad;font-size:8px;}
+.db-erd-head-metrics b{color:#eaf5ff;font-size:10px;}
+.db-erd-database-message{margin:10px 12px 0;padding:9px 10px;border:1px solid #70542f;border-radius:7px;background:#2b2114;color:#e9c27c;font-size:9px;}
+.db-erd-diagram-host{min-height:400px;background:#f8fbff;}
+.db-erd-diagram-host .database-diagram-viewer{border:0;border-radius:0;}
+.db-erd-logical-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(245px,1fr));gap:10px;padding:14px;}
+.db-erd-logical-card{display:flex;align-items:center;gap:11px;min-height:92px;padding:11px;border:1px solid #60405a;border-radius:9px;background:linear-gradient(135deg,#241925,#15141f);}
+.db-erd-logical-grid.document .db-erd-logical-card{border-color:#2f686b;background:linear-gradient(135deg,#122a2c,#111b24);}
+.db-erd-logical-icon{width:48px;height:48px;display:flex;align-items:center;justify-content:center;flex:0 0 48px;border-radius:12px;border:1px solid #915b80;background:#4a2940;color:#ffd1ea;font-size:17px;font-weight:900;}
+.db-erd-logical-grid.document .db-erd-logical-icon{border-color:#3a8c8e;background:#1d4b4d;color:#c7ffff;}
+.db-erd-logical-copy{display:flex;flex-direction:column;gap:5px;min-width:0;}
+.db-erd-logical-copy strong{color:#f5edf3;font-size:10px;overflow-wrap:anywhere;}
+.db-erd-logical-copy span{color:#c6a8bc;font-size:9px;}
+.db-erd-logical-copy small{color:#8c7184;font-size:8px;}
+.db-erd-notes{display:flex;flex-direction:column;gap:5px;padding:9px 11px;border:1px solid #2e4254;border-radius:8px;background:#0b1721;color:#8198ac;font-size:8px;}
+@media(max-width:1100px){
+  .db-erd-database-head{align-items:flex-start;flex-direction:column;}
+  .db-erd-database-tabs button{min-width:138px;}
+}

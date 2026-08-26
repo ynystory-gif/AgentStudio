@@ -6,7 +6,7 @@ APP=(ROOT/'frontend/src/App.jsx').read_text(encoding='utf-8')
 CSS=(ROOT/'frontend/src/styles.css').read_text(encoding='utf-8')
 
 checks={
-    'frontend version 5.342': "AGENTSTUDIO_FRONTEND_VERSION='5.345'" in APP,
+    'frontend version 5.342': "AGENTSTUDIO_FRONTEND_VERSION='5.356'" in APP,
     'question quality gate function': 'def apply_question_quality_gate' in REQ,
     'technical delegation blocked': 'technical_design_delegation' in REQ and 'TECHNICAL_DELEGATION_PATTERNS' in REQ,
     'multiple questions blocked': 'multiple_questions' in REQ and '_question_count' in REQ,

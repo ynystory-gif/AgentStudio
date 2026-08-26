@@ -71,6 +71,39 @@ def _atomic_notebook_write(path: Path, payload: bytes) -> None:
             pass
 
 
+def _new_notebook_payload() -> bytes:
+    """Return a minimal, immediately editable Jupyter Notebook document.
+
+    A .ipynb file is JSON, so a zero-byte file is never a valid Notebook.
+    AgentStudio creates one empty Python code cell so a newly-created Notebook
+    can be opened and executed immediately without passing through the invalid
+    JSON fallback editor. nbformat_minor=4 deliberately avoids requiring the
+    cell ``id`` field introduced by nbformat 4.5.
+    """
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": [],
+            }
+        ],
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3",
+            },
+            "language_info": {"name": "python"},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 4,
+    }
+    return (json.dumps(notebook, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
+
+
 class ExternalFileChangedError(RuntimeError):
     """Raised when the file content changed on disk after the editor loaded it."""
 
@@ -280,6 +313,188 @@ async def list_directories(root: str):
             if len(rows) >= 10000:
                 break
         return rows
+
+    return await asyncio.to_thread(_scan)
+
+
+_PROJECT_TEXT_SEARCH_EXTENSIONS = {
+    "", ".txt", ".md", ".markdown", ".rst", ".csv", ".tsv",
+    ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".env", ".log", ".py", ".pyw", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs",
+    ".java", ".kt", ".kts", ".cs", ".c", ".h", ".cpp", ".hpp", ".go",
+    ".rs", ".php", ".rb", ".swift", ".dart", ".scala", ".sh", ".bash",
+    ".zsh", ".ps1", ".psm1", ".psd1", ".cmd", ".bat", ".sql", ".html", ".htm",
+    ".css", ".scss", ".sass", ".less", ".xml", ".svg", ".vue", ".svelte",
+    ".graphql", ".gql", ".proto", ".properties", ".gradle", ".prisma", ".jsonc", ".dockerfile",
+    ".ipynb",
+}
+
+_PROJECT_TEXT_SEARCH_MAX_FILE_BYTES = 4 * 1024 * 1024
+
+
+def _decode_search_text(payload: bytes) -> str | None:
+    if b"\x00" in payload[:8192]:
+        # UTF-16 text contains NUL bytes, so try it before treating the file as binary.
+        for encoding in ("utf-16", "utf-16-le", "utf-16-be"):
+            try:
+                return payload.decode(encoding)
+            except Exception:
+                continue
+        return None
+    for encoding in ("utf-8-sig", "utf-8", "cp949"):
+        try:
+            return payload.decode(encoding)
+        except Exception:
+            continue
+    return None
+
+
+def _search_line_matches(text: str, query: str, *, case_sensitive: bool, max_results: int) -> list[dict]:
+    source = str(text or "")
+    needle = str(query or "")
+    if not needle:
+        return []
+    compare_needle = needle if case_sensitive else needle.casefold()
+    results: list[dict] = []
+    for line_number, raw_line in enumerate(source.splitlines(), start=1):
+        compare_line = raw_line if case_sensitive else raw_line.casefold()
+        start = 0
+        while True:
+            column = compare_line.find(compare_needle, start)
+            if column < 0:
+                break
+            snippet = raw_line.strip()
+            if len(snippet) > 240:
+                left = max(0, column - 80)
+                snippet = raw_line[left:left + 220].strip()
+            results.append({
+                "line_number": line_number,
+                "column": column + 1,
+                "snippet": snippet,
+            })
+            if len(results) >= max_results:
+                return results
+            start = column + max(1, len(compare_needle))
+    return results
+
+
+def _search_notebook_source(text: str, query: str, *, case_sensitive: bool, max_results: int) -> list[dict]:
+    try:
+        notebook = json.loads(text)
+    except Exception:
+        return _search_line_matches(text, query, case_sensitive=case_sensitive, max_results=max_results)
+    cells = notebook.get("cells") if isinstance(notebook, dict) else None
+    if not isinstance(cells, list):
+        return []
+    results: list[dict] = []
+    for cell_index, cell in enumerate(cells):
+        if not isinstance(cell, dict):
+            continue
+        source = cell.get("source", "")
+        if isinstance(source, list):
+            source_text = "".join(str(item) for item in source)
+        else:
+            source_text = str(source or "")
+        remaining = max_results - len(results)
+        if remaining <= 0:
+            break
+        for row in _search_line_matches(source_text, query, case_sensitive=case_sensitive, max_results=remaining):
+            results.append({
+                **row,
+                "cell_index": cell_index,
+                "cell_number": cell_index + 1,
+                "cell_type": str(cell.get("cell_type") or ""),
+            })
+    return results
+
+
+async def search_project_text(
+    root: str,
+    query: str,
+    *,
+    relative_path: str = "",
+    case_sensitive: bool = False,
+    max_results: int = 300,
+    max_files: int = 5000,
+):
+    """Search project text on demand without introducing idle polling.
+
+    Dependency/virtualenv directories reuse the Project Explorer pruning rules.
+    Notebook files search only cell source content, not metadata/output blobs.
+    """
+    base = _allowed(root)
+    needle = str(query or "").strip()
+    if not needle:
+        return {"query": "", "results": [], "files_scanned": 0, "truncated": False}
+    max_results = max(1, min(int(max_results or 300), 1000))
+    max_files = max(1, min(int(max_files or 5000), 20000))
+
+    requested = str(relative_path or "").strip().replace("\\", "/")
+
+    def _scan():
+        candidates: list[tuple[Path, str]] = []
+        if requested:
+            target = _allowed(str(base / requested))
+            if not _is_within(target, base):
+                raise PermissionError(f"현재 프로젝트 root 밖의 파일은 검색할 수 없습니다: {requested}")
+            if not target.exists() or not target.is_file():
+                return {"query": needle, "results": [], "files_scanned": 0, "truncated": False}
+            candidates.append((target, target.relative_to(base).as_posix()))
+        else:
+            for kind, item, relative in _iter_project_tree(base):
+                if kind != "file":
+                    continue
+                candidates.append((item, relative))
+                if len(candidates) >= max_files:
+                    break
+
+        results: list[dict] = []
+        scanned = 0
+        skipped_large = 0
+        skipped_binary = 0
+        for path, relative in candidates:
+            if len(results) >= max_results:
+                break
+            suffix = path.suffix.casefold()
+            if path.name.casefold() == "dockerfile":
+                suffix = ".dockerfile"
+            if suffix not in _PROJECT_TEXT_SEARCH_EXTENSIONS:
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size > _PROJECT_TEXT_SEARCH_MAX_FILE_BYTES:
+                skipped_large += 1
+                continue
+            try:
+                payload = path.read_bytes()
+            except OSError:
+                continue
+            text = _decode_search_text(payload)
+            if text is None:
+                skipped_binary += 1
+                continue
+            scanned += 1
+            remaining = max_results - len(results)
+            matches = (
+                _search_notebook_source(text, needle, case_sensitive=case_sensitive, max_results=remaining)
+                if suffix == ".ipynb"
+                else _search_line_matches(text, needle, case_sensitive=case_sensitive, max_results=remaining)
+            )
+            for match in matches:
+                results.append({"path": relative, **match})
+                if len(results) >= max_results:
+                    break
+
+        return {
+            "query": needle,
+            "results": results,
+            "files_scanned": scanned,
+            "truncated": len(results) >= max_results or (not requested and len(candidates) >= max_files),
+            "skipped_large": skipped_large,
+            "skipped_binary": skipped_binary,
+        }
 
     return await asyncio.to_thread(_scan)
 
@@ -660,17 +875,26 @@ async def create_file(root: str, relative_path: str):
     Creation is intentionally idempotent for an existing *file*. This avoids
     a duplicate frontend request turning a successful first create into a 409
     error. A directory with the same name is still a real conflict.
+
+    v5.350: ``.ipynb`` is not a plain text file. Creating it as zero bytes
+    makes the Notebook editor fail immediately with ``Unexpected end of JSON
+    input``. New Notebooks are therefore initialized with a valid nbformat 4
+    JSON document containing one empty Python code cell. A zero-byte Notebook
+    left behind by an older AgentStudio build is repaired when the same create
+    request is made again; non-empty existing files are never overwritten.
     """
     base = _allowed(root)
     target = _allowed(str(base / relative_path))
     target.parent.mkdir(parents=True, exist_ok=True)
+    is_notebook = target.suffix.casefold() == ".ipynb"
+    initial_payload = _new_notebook_payload() if is_notebook else b""
 
     def _create_atomic():
-        # ``xb`` maps to O_CREAT|O_EXCL and therefore makes the disk the
-        # source of truth. It also avoids the check-then-create race of
-        # Path.exists() followed by write_bytes().
+        repaired_empty_notebook = False
         try:
             with target.open("xb") as handle:
+                if initial_payload:
+                    handle.write(initial_payload)
                 handle.flush()
                 try:
                     os.fsync(handle.fileno())
@@ -692,23 +916,41 @@ async def create_file(root: str, relative_path: str):
                 f"{target}"
             )
 
+        # v5.350 migration guard: v5.349 and older could leave a zero-byte
+        # .ipynb on disk. It is safe to repair because zero bytes cannot be a
+        # valid Jupyter Notebook. Never replace a non-empty existing Notebook.
+        if is_notebook and not created and target.stat().st_size == 0:
+            _atomic_notebook_write(target, initial_payload)
+            repaired_empty_notebook = True
+
+        # Validate newly-created/repaired Notebook bytes before returning a
+        # success response to the frontend.
+        if is_notebook and (created or repaired_empty_notebook):
+            _validate_notebook_save_payload(
+                target,
+                target.read_text(encoding="utf-8-sig"),
+            )
+
         stat = target.stat()
-        return created, {
+        return created, repaired_empty_notebook, {
             "mtime_ns": int(stat.st_mtime_ns),
             "size": int(stat.st_size),
+            "sha256": _file_sha256(target),
         }
 
-    created, meta = await asyncio.to_thread(_create_atomic)
+    created, repaired_empty_notebook, meta = await asyncio.to_thread(_create_atomic)
 
     return {
         "ok": True,
         "exists": True,
         "created": created,
         "already_exists": not created,
+        "repaired_empty_notebook": repaired_empty_notebook,
         "path": str(target),
         "relative_path": target.relative_to(base).as_posix(),
         "mtime_ns": meta["mtime_ns"],
         "size": meta["size"],
+        "sha256": meta["sha256"],
     }
 
 

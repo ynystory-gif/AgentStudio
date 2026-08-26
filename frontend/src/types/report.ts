@@ -37,6 +37,8 @@ export interface AgentArchitecture {
   persistence?: ArchitectureListItem[]
   security?: ArchitectureListItem[]
   state?: ArchitectureListItem[]
+  infrastructure?: ArchitectureListItem[]
+  source?: string
 }
 
 export interface AsBuiltArchitecture extends AgentArchitecture {
@@ -81,6 +83,13 @@ export interface GeneratedAgentArchitectureReport {
   architectureConformance?: ArchitectureConformance
   requirementSpec?: {
     goal?: string
+  }
+  projectProfile?: {
+    project_type?: string
+    project_type_label?: string
+    summary?: string
+    tech_stack?: string[]
+    source_file_count?: number
   }
 }
 

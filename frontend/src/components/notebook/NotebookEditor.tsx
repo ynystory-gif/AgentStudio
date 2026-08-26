@@ -36,6 +36,9 @@ interface NotebookMonacoEditorLike {
   getScrollTop?: () => number
   getScrollHeight?: () => number
   getLayoutInfo?: () => NotebookEditorLayoutInfoLike
+  revealLineInCenter?: (lineNumber: number) => void
+  setSelection?: (selection: NotebookSelection) => void
+  focus?: () => void
 }
 
 interface NotebookCursorSelectionEvent {
@@ -363,6 +366,26 @@ export function NotebookEditor({
     }
   }
 
+  const revealSearchMatch = (cellIndex: number, lineNumber = 1, column = 1, length = 1): void => {
+    const maxIndex = parsed.ok ? Math.max(0, parsed.notebook.cells.length - 1) : 0
+    const safeIndex = Math.max(0, Math.min(Number(cellIndex) || 0, maxIndex))
+    setActiveCellIndex(safeIndex)
+    const section = shellRef.current?.querySelector(`[data-notebook-cell-index="${safeIndex}"]`) as HTMLElement | null
+    section?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+    const editor = cellEditorsRef.current[safeIndex]
+    if (!editor) return
+    const safeLine = Math.max(1, Number(lineNumber) || 1)
+    const safeColumn = Math.max(1, Number(column) || 1)
+    editor.revealLineInCenter?.(safeLine)
+    editor.setSelection?.({
+      startLineNumber: safeLine,
+      startColumn: safeColumn,
+      endLineNumber: safeLine,
+      endColumn: safeColumn + Math.max(1, Number(length) || 1),
+    })
+    editor.focus?.()
+  }
+
   useEffect(() => {
     if (!controllerRef) return
     controllerRef.current = {
@@ -372,6 +395,7 @@ export function NotebookEditor({
       stopExecution,
       isRunning: () => runAllBusy || Object.values(runningCells).some(Boolean),
       getActiveCellIndex: () => activeCellIndex,
+      revealSearchMatch,
     }
     return () => {
       if (controllerRef.current?.runAll === runAll) controllerRef.current = null
@@ -497,6 +521,7 @@ export function NotebookEditor({
 
         return <section
           key={cell?.id || `cell-${index}`}
+          data-notebook-cell-index={index}
           className={`notebook-cell ${cellType} ${active ? 'active' : ''}`}
           onMouseDown={() => setActiveCellIndex(index)}
           onWheelCapture={(event: React.WheelEvent<HTMLElement>) => cellType === 'code' && handoffNotebookWheelAtBoundary(index, event)}

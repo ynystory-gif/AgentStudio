@@ -55,9 +55,43 @@ if (-not $IsAdministrator) {
     }
 }
 
-$ExpectedAgentStudioVersion = "5.345"
-
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# v5.356: SYSTEM_ADMIN must not carry a hand-maintained stale version literal.
+# Resolve the expected version from this checkout's backend source so the launcher
+# can still detect a genuinely old process on the selected port without failing
+# simply because SYSTEM_ADMIN.ps1 itself was not bumped during packaging.
+$FallbackAgentStudioVersion = "5.356"
+function Resolve-LocalAgentStudioVersion {
+    param(
+        [string]$ProjectRoot,
+        [string]$FallbackVersion
+    )
+
+    $MainPy = Join-Path $ProjectRoot "backend\app\main.py"
+    try {
+        if (Test-Path -LiteralPath $MainPy) {
+            $Source = [System.IO.File]::ReadAllText($MainPy, [System.Text.Encoding]::UTF8)
+            $Match = [System.Text.RegularExpressions.Regex]::Match(
+                $Source,
+                'FastAPI\s*\([\s\S]*?version\s*=\s*["''](?<version>\d+\.\d+)["'']',
+                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )
+            if ($Match.Success) {
+                return [string]$Match.Groups["version"].Value
+            }
+        }
+    }
+    catch {
+        Write-Host "[경고] 로컬 Backend 버전 자동 확인 실패: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    return $FallbackVersion
+}
+
+$ExpectedAgentStudioVersion = Resolve-LocalAgentStudioVersion `
+    -ProjectRoot $Root `
+    -FallbackVersion $FallbackAgentStudioVersion
 $BackendDir = Join-Path $Root "backend"
 $FrontendDir = Join-Path $Root "frontend"
 $LogDir = Join-Path $Root "logs"

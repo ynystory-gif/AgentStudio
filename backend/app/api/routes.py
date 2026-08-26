@@ -1,4 +1,5 @@
 from datetime import datetime
+from urllib.parse import quote
 from pathlib import Path
 from app.services.db_gateway import DatabaseGateway
 from app.services.folder_picker import pick_folder, pick_file, pick_files
@@ -10,6 +11,7 @@ from app.models.entities import Project, ProjectAnalysis
 from app.services.project_paths import resolve_project_paths
 from app.services.database_provisioning import provision_agentstudio_database
 from app.services.database_schema_design import build_database_plan, finalize_database_plan, materialize_database_plan
+from app.services.db_erd_service import build_project_db_erd, build_agentstudio_db_erd
 from app.core.config import get_settings
 from app.services.pgvector_installer import install_pgvector_windows18, latest_pg18_windows_release, detect_postgresql18_root, validate_postgresql18_root
 from app.services.settings_service import get_editable_settings, update_settings, migrate_env_settings_to_db, rename_current_machine, save_database_env_settings
@@ -34,6 +36,10 @@ from app.services.python_execution_service import python_execution_manager
 from app.services.presentation_preview_service import (
     PresentationPreviewError,
     prepare_presentation_preview,
+)
+from app.services.presentation_export_service import (
+    PPTX_MIME,
+    build_agentstudio_presentation,
 )
 from app.services.sql_workspace_service import (
     get_profile as get_sql_workspace_profile,
@@ -100,7 +106,7 @@ from app.services.ai_attachment_service import (
     prepare_attachment,
     redact_sensitive_text,
 )
-from app.services.local_control import list_files, list_directories, read_file, write_file, run_command, register_runtime_project_root, get_runtime_project_roots, create_folder, rename_path, create_file, delete_files, project_file_snapshot, get_file_meta, get_file_hash_states, validate_project_root, watch_project_changes, ExternalFileChangedError, InvalidNotebookContentError
+from app.services.local_control import list_files, list_directories, read_file, write_file, run_command, register_runtime_project_root, get_runtime_project_roots, create_folder, rename_path, create_file, delete_files, project_file_snapshot, get_file_meta, get_file_hash_states, validate_project_root, watch_project_changes, search_project_text, ExternalFileChangedError, InvalidNotebookContentError
 from app.services.tavily_service import web_search
 from app.services.requirements_agent import next_interview_message, summarize_attachment_requirements
 from app.services.llm_usage_service import usage_context, read_usage_summary, read_llm_history
@@ -111,6 +117,7 @@ from app.services.mcp_registry import mcp_registry_monitor
 from app.services.langgraph_runtime import agent_graph_runtime
 from app.services.git_service import git_status, git_diff, checkpoint
 from app.services.project_analyzer import scan_project, find_related_files, local_project_summary
+from app.services.project_adaptive_report import build_project_adaptive_report
 from app.services.memory_service import add_memory, search_memory
 from app.services.simple_question import answer_simple_question
 from app.services.tool_analyzer import analyze_tool_with_llm
@@ -480,6 +487,21 @@ class WorkflowResumeRequest(BaseModel):
     thread_id: str
     decision: str
 
+
+
+class PresentationExportRequest(BaseModel):
+    scope: str = "ALL"
+    deck_type: str = "AGENT"
+    project_name: str = "AgentStudio Project"
+    project_root: str = ""
+    generated_at: str = ""
+    workflow_request: str = ""
+    workflow_definition: dict = {}
+    report: dict = {}
+    coding_style_report: dict = {}
+    llm_usage_summary: dict = {}
+    db_erd: dict = {}
+
 class FolderCreateRequest(BaseModel):
     root: str
     relative_path: str
@@ -554,6 +576,14 @@ class DatabaseDesignPreviewRequest(BaseModel):
 
 class DatabaseDesignFinalizeRequest(BaseModel):
     database_plan: dict = {}
+
+
+class DatabaseErdRequest(BaseModel):
+    project_root: str = ""
+    database_plan: dict = {}
+    project_profile: dict = {}
+    workflow_request: str = ""
+    deck_type: str = "AGENT"
 
 
 class ProjectAnalyzeRequest(BaseModel):
@@ -2679,7 +2709,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.345", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.356", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -3152,6 +3182,135 @@ async def project_pdf_view(root: str = Query(...), relative_path: str = Query(..
     )
 
 
+@router.post("/db-erd/analyze")
+async def analyze_database_erd(payload: DatabaseErdRequest):
+    """현재 Agent/프로젝트 또는 AgentStudio 자체의 DB별 ERD 모델을 생성합니다."""
+    deck_type = str(payload.deck_type or "AGENT").strip().upper()
+    if deck_type == "STUDIO":
+        studio_root = str(Path(__file__).resolve().parents[3])
+        return await asyncio.to_thread(build_agentstudio_db_erd, studio_root)
+    project_root = str(payload.project_root or "").strip()
+    if project_root:
+        try:
+            project_root = register_runtime_project_root(project_root)
+        except Exception:
+            pass
+    return await asyncio.to_thread(
+        build_project_db_erd,
+        project_root,
+        database_plan=payload.database_plan or {},
+        project_profile=payload.project_profile or {},
+        workflow_request=str(payload.workflow_request or ""),
+    )
+
+
+@router.post("/presentation/export")
+async def export_agentstudio_presentation(payload: PresentationExportRequest):
+    """워크플로우/실행결과/분석리포트/아키텍처/DB ERD를 편집 가능한 PPTX로 내보냅니다.
+
+    화면 캡처를 그대로 넣는 방식이 아니라 python-pptx로 텍스트, 카드, 레이어,
+    연결 화살표 등을 PowerPoint 네이티브 객체로 생성합니다. 따라서 사용자는
+    다운로드한 PPTX에서 제목, 박스, 구조와 설명을 직접 수정할 수 있습니다.
+    """
+    scope = str(payload.scope or "ALL").strip().upper()
+    deck_type = str(payload.deck_type or "AGENT").strip().upper()
+    if scope not in {"ALL", "WORKFLOW", "RUN", "REPORT", "ARCHITECTURE", "DB_ERD"}:
+        raise HTTPException(status_code=400, detail="지원하지 않는 PPT 내보내기 범위입니다.")
+    if deck_type not in {"AGENT", "STUDIO"}:
+        raise HTTPException(status_code=400, detail="지원하지 않는 PPT 문서 유형입니다.")
+    if deck_type == "STUDIO" and scope != "ALL":
+        raise HTTPException(status_code=400, detail="Studio PPT는 상단 Studio PPT 버튼에서 전체 문서로만 다운로드할 수 있습니다.")
+
+    data = payload.model_dump()
+    data["scope"] = scope
+    data["deck_type"] = deck_type
+    if not data.get("generated_at"):
+        data["generated_at"] = datetime.now().isoformat(timespec="seconds")
+
+    # v5.356: Agent PPT만 현재 프로젝트를 재분석합니다. Studio PPT는 현재 프로젝트와 완전히 분리합니다.
+    # Agent PPT는 UI의 오래된 Snapshot만 신뢰하지 않습니다. 프로젝트 루트가 있으면
+    # 내보내기 직전에 실제 소스를 다시 분석하고, Agent Factory의 실제 실행/설계 결과가
+    # 없는 항목만 Project Adaptive Snapshot으로 채웁니다. 따라서 감지되지 않은 DB/LLM/MCP를
+    # 고정 템플릿 때문에 PPT에 표시하지 않습니다.
+    project_root = str(data.get("project_root") or "").strip()
+    if deck_type == "AGENT" and project_root:
+        try:
+            adaptive = await build_project_adaptive_report(
+                register_runtime_project_root(project_root),
+                str(data.get("workflow_request") or ""),
+            )
+            report = dict(data.get("report") or {})
+            fallback_map = {
+                "targetWorkflow": adaptive.get("workflow") or {},
+                "requirementSpec": adaptive.get("requirement_spec") or {},
+                "capabilityPlan": adaptive.get("capability_plan") or {},
+                "toolMcpPlan": adaptive.get("tool_mcp_plan") or {},
+                "architecture": adaptive.get("architecture") or {},
+            }
+            for key, value in fallback_map.items():
+                current = report.get(key)
+                if not current or (isinstance(current, dict) and not any(current.values())):
+                    report[key] = value
+            report["projectProfile"] = adaptive
+            report["analysisReport"] = adaptive.get("analysis_report") or {}
+            baseline = adaptive.get("execution_baseline") or {}
+            if not report.get("status") or report.get("status") == "NOT_STARTED":
+                report["status"] = baseline.get("status") or report.get("status") or "PROJECT_LOADED"
+            if not report.get("testCommand"):
+                report["testCommand"] = baseline.get("test_command") or ""
+            data["report"] = report
+        except Exception:
+            # Adaptive 분석 실패가 PPT 다운로드 자체를 막지는 않습니다. 기존 Snapshot으로 계속 생성합니다.
+            pass
+
+    # v5.356: DB ERD는 PPT 생성 직전 서버에서 다시 구성해 UI Snapshot과 분리합니다.
+    try:
+        if deck_type == "STUDIO":
+            studio_root = str(Path(__file__).resolve().parents[3])
+            data["db_erd"] = await asyncio.to_thread(build_agentstudio_db_erd, studio_root)
+        else:
+            report = data.get("report") or {}
+            data["db_erd"] = await asyncio.to_thread(
+                build_project_db_erd,
+                project_root,
+                database_plan=report.get("databasePlan") or data.get("db_erd", {}).get("database_plan") or {},
+                project_profile=report.get("projectProfile") or {},
+                workflow_request=str(data.get("workflow_request") or ""),
+            )
+    except Exception:
+        # ERD 분석 실패는 PPT 전체 다운로드를 막지 않고 전달된 Snapshot을 사용합니다.
+        pass
+
+    try:
+        content, filename = await asyncio.to_thread(
+            build_agentstudio_presentation,
+            data,
+            "5.356",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PRESENTATION_EXPORT_FAILED",
+                "message": f"PPT 문서를 생성하지 못했습니다: {exc}",
+            },
+        ) from exc
+
+    ascii_filename = "AgentStudio_Report.pptx"
+    encoded = quote(filename)
+    return Response(
+        content=content,
+        media_type=PPTX_MIME,
+        headers={
+            "Content-Disposition": f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{encoded}",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-AgentStudio-Export-Scope": scope,
+            "X-AgentStudio-Export-Deck-Type": deck_type,
+            "X-AgentStudio-Export-Editable": "native-powerpoint-shapes",
+        },
+    )
+
+
 @router.post("/files/presentation/prepare")
 async def project_presentation_prepare(payload: dict):
     """PPT/PPTX 원본은 수정하지 않고 임시 PDF 미리보기를 준비합니다.
@@ -3282,6 +3441,40 @@ async def project_presentation_pdf_view(
             "X-AgentStudio-Presentation-Converter": result.converter,
         },
     )
+
+
+
+
+@router.post("/files/search-text")
+async def project_text_search(payload: dict):
+    root = str(payload.get("root") or "").strip()
+    query = str(payload.get("query") or "").strip()
+    relative_path = str(payload.get("relative_path") or "").strip()
+    if not root:
+        raise HTTPException(status_code=400, detail="root가 필요합니다.")
+    if not query:
+        return {"query": "", "results": [], "files_scanned": 0, "truncated": False}
+    try:
+        return await search_project_text(
+            root,
+            query,
+            relative_path=relative_path,
+            case_sensitive=bool(payload.get("case_sensitive", False)),
+            max_results=int(payload.get("max_results") or 300),
+            max_files=int(payload.get("max_files") or 5000),
+        )
+    except PermissionError as exc:
+        restored = await ensure_persisted_project_root(root)
+        if restored.get("registered"):
+            return await search_project_text(
+                root,
+                query,
+                relative_path=relative_path,
+                case_sensitive=bool(payload.get("case_sensitive", False)),
+                max_results=int(payload.get("max_results") or 300),
+                max_files=int(payload.get("max_files") or 5000),
+            )
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.post("/files/read")
@@ -4791,6 +4984,17 @@ async def project_analyze(req: ProjectAnalyzeRequest):
     root = register_runtime_project_root(req.project_root)
     return await local_project_summary(root, req.request)
 
+
+@router.post("/project/adaptive-report")
+async def project_adaptive_report(req: ProjectAnalyzeRequest):
+    """프로젝트 소스에서 Workflow/Report/Architecture/PPT용 동적 Snapshot을 생성합니다.
+
+    LLM 추측이 아니라 현재 프로젝트 파일에서 실제로 감지한 Framework/DB/Agent/MCP/Infra만
+    사용합니다. 프로젝트 로드 직후와 PPT Export 전에 같은 Snapshot을 재사용할 수 있습니다.
+    """
+    root = register_runtime_project_root(req.project_root)
+    return await build_project_adaptive_report(root, req.request)
+
 @router.post("/tool/analyze")
 async def tool_analyze(req: ToolAnalyzeRequest):
     return analyze_tool(req.name, req.description).__dict__
@@ -5505,7 +5709,7 @@ def _workflow_initial_state(req: WorkflowStartRequest, thread_id: str) -> dict:
     }
 
 
-# v5.345: Actual LangGraph node-boundary progress. This replaces synthetic-only
+# v5.349: Actual LangGraph node-boundary progress. This replaces synthetic-only
 # progress with a small observable trace without any additional LLM request.
 _AGENT_BUILD_NODE_PROGRESS = {
     "requirement_analysis": (6, "요구사항 설계 상태 확인"),
