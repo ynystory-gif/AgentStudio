@@ -23,7 +23,7 @@ function windowLabel(window: { windowDurationMins?: number | null } | null | und
   const minutes = Number(window?.windowDurationMins || 0)
   if (!minutes) return fallback
   if (minutes === 300) return '5시간 한도 남음'
-  if (minutes === 10080) return '7일 한도 남음'
+  if (minutes === 10080) return '1주 한도 남음'
   if (minutes % 1440 === 0) return `${Math.round(minutes / 1440)}일 한도 남음`
   if (minutes % 60 === 0) return `${Math.round(minutes / 60)}시간 한도 남음`
   return `${minutes}분 한도 남음`

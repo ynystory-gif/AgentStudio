@@ -83,6 +83,38 @@ export interface DatabaseRuntimeResult {
   [key: string]: unknown
 }
 
+export interface GpuRuntimeDevice {
+  index?: number | string
+  name?: string
+  memory_total_mb?: number
+  memory_used_mb?: number
+  utilization_percent?: number
+  driver_version?: string
+  [key: string]: unknown
+}
+
+export interface GpuRuntimeInfo {
+  ok?: boolean
+  available?: boolean
+  enabled?: boolean
+  mode?: 'gpu' | 'cpu' | string
+  vendor?: string
+  devices?: GpuRuntimeDevice[]
+  device_count?: number
+  nvidia_smi?: string
+  state_file?: string
+  updated_at?: string
+  message?: string
+  note?: string
+  ollama?: {
+    ok?: boolean
+    message?: string
+    restarted?: boolean
+    [key: string]: unknown
+  }
+  [key: string]: unknown
+}
+
 export interface OllamaRuntimeInfo {
   ok?: boolean
   message?: string

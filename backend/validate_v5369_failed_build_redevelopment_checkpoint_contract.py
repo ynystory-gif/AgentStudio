@@ -8,9 +8,9 @@ MAIN = (ROOT / 'backend' / 'app' / 'main.py').read_text(encoding='utf-8')
 PS1 = (ROOT / 'SYSTEM_ADMIN.ps1').read_text(encoding='utf-8')
 
 checks = {
-    'frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP,
-    'backend version': 'version="5.369"' in MAIN,
-    'launcher version': '$FallbackAgentStudioVersion = "5.369"' in PS1,
+    'frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.371'" in APP,
+    'backend version': 'version="5.371"' in MAIN,
+    'launcher version': '$FallbackAgentStudioVersion = "5.371"' in PS1,
     'redevelopment endpoint': '@router.post("/workflow/redevelop-start-job")' in ROUTES,
     'redevelopment descriptor': 'def _redevelopment_descriptor(' in ROUTES,
     'failure status detector': 'def _is_failed_agent_build_status(' in ROUTES,
@@ -26,5 +26,5 @@ checks = {
 }
 failed = [name for name, ok in checks.items() if not ok]
 if failed:
-    raise SystemExit('FAIL v5.369: ' + ', '.join(failed))
-print('PASS v5.369 Failed Build Redevelopment Checkpoint contract')
+    raise SystemExit('FAIL v5.371: ' + ', '.join(failed))
+print('PASS v5.371 Failed Build Redevelopment Checkpoint contract')

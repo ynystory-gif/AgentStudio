@@ -240,6 +240,11 @@ for (const [label, pattern, target] of [
   ['request user input answer payload', /answers\[id\]\s*=\s*\{\s*answers:\s*value\s*\?\s*\[value\]\s*:\s*\[\]\s*\}/, codexPanelSource],
   ['stable Codex status callback', /const refreshStatus = useCallback\([\s\S]*?\}, \[projectRoot\]\)/, codexPanelSource],
   ['safe Codex default-model fallback', /return preferred \? modelId\(preferred\) : current/, codexPanelSource],
+  ['Codex usage settings popover', /codex-usage-popover/, codexPanelSource],
+  ['Codex force refresh usage', /\/codex\/rate-limits\?force=\$\{force \? 'true' : 'false'\}/, codexPanelSource],
+  ['Codex five-hour usage label', /minutes === 300[^\n]*'5시간'/, codexPanelSource],
+  ['Codex weekly usage label', /minutes === 10080[^\n]*'1주'/, codexPanelSource],
+  ['Codex remaining usage title', /남은 사용량/, codexPanelSource],
 ]) {
   if (!pattern.test(target)) fail(`Codex panel contract missing: ${label}`)
 }

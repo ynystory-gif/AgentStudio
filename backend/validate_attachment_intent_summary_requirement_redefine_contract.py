@@ -7,7 +7,7 @@ REQ = (ROOT / 'backend' / 'app' / 'services' / 'requirements_agent.py').read_tex
 STYLE = (ROOT / 'frontend' / 'src' / 'styles.css').read_text(encoding='utf-8')
 
 checks = {
-    'frontend version 5.338': "AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP,
+    'frontend version 5.338': "AGENTSTUDIO_FRONTEND_VERSION='5.371'" in APP,
     'automatic attachment intent summary endpoint': '/chat/interview/attachments/summary' in ROUTES,
     'summary uses requirements provider router': 'summarize_attachment_requirements' in ROUTES and 'LLMTask.REQUIREMENTS_ANALYSIS' in REQ,
     'summary output contract': all(x in REQ for x in ['만들고자 하는 내용','핵심 기능','입력 / 데이터','기술 / 연동','추가 확인이 필요한 항목']),

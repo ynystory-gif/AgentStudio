@@ -4,7 +4,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / 'frontend' / 'src' / 'App.jsx').read_text(encoding='utf-8')
 
 required = {
-    'version': "const AGENTSTUDIO_FRONTEND_VERSION='5.369'",
+    'version': "const AGENTSTUDIO_FRONTEND_VERSION='5.371'",
     'normalizer': 'const normalizeDatabaseValues=(values=[])=>{',
     'split composite database summary': ".split(/\\s*[·,+/]\\s*/g)",
     'postgres canonical': "if(lower.includes('postgresql')) label='PostgreSQL'",
@@ -15,12 +15,12 @@ required = {
 
 missing = [name for name, needle in required.items() if needle not in APP]
 if missing:
-    raise SystemExit('FAIL v5.369 database summary dedup contract: ' + ', '.join(missing))
+    raise SystemExit('FAIL v5.371 database summary dedup contract: ' + ', '.join(missing))
 
 # Regression guard: the old exact-array dedup implementation treats the composite
 # string as a different value from each technology and therefore duplicates it.
 old = "const databaseValues=uniqueValues([\n      byId.database?.value,"
 if old in APP:
-    raise SystemExit('FAIL v5.369: legacy composite DB summary dedup still active')
+    raise SystemExit('FAIL v5.371: legacy composite DB summary dedup still active')
 
-print('PASS v5.369 Database Summary Dedup contract')
+print('PASS v5.371 Database Summary Dedup contract')

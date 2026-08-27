@@ -7,7 +7,7 @@ PROGRESS = (ROOT / 'frontend' / 'src' / 'components' / 'ai' / 'AgentActivityProg
 ROUTES = (ROOT / 'backend' / 'app' / 'api' / 'routes.py').read_text(encoding='utf-8')
 
 checks = {
-    'v5.369 frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP,
+    'v5.371 frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.371'" in APP,
     'manual attachment deep analysis gate': '첨부만 먼저 분석' in APP and '파일 첨부만으로 DB·Workflow·Architecture 심층 분석을 자동 시작하지 않습니다.' in APP,
     'no automatic summary effect': 'const summarizeInterviewAttachments=async()=>{' in APP,
     'progress panel': '<AgentActivityProgress' in APP and 'AgentActivityProgress' in APP,
@@ -16,12 +16,12 @@ checks = {
     'cancel and retry': 'AbortController' in APP and 'cancelInterviewActivity' in APP and 'retryInterviewActivity' in APP,
     'detail progress log': '상세 진행 로그' in PROGRESS,
     'explicit deep analysis wait label': 'AI 심층 분석 대기' in PICKER,
-    'backend version': '"version": "5.369"' in ROUTES,
+    'backend version': '"version": "5.371"' in ROUTES,
 }
 
 failed = [name for name, ok in checks.items() if not ok]
 for name, ok in checks.items():
     print(('PASS' if ok else 'FAIL'), name)
 if failed:
-    raise SystemExit('v5.369 contract failed: ' + ', '.join(failed))
-print('PASS v5.369 Agent Progress Heartbeat UX contract')
+    raise SystemExit('v5.371 contract failed: ' + ', '.join(failed))
+print('PASS v5.371 Agent Progress Heartbeat UX contract')

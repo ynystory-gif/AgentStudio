@@ -8,9 +8,9 @@ REQ = (ROOT / 'backend' / 'app' / 'services' / 'requirements_agent.py').read_tex
 MAIN = (ROOT / 'backend' / 'app' / 'main.py').read_text(encoding='utf-8')
 
 checks = {
-    'frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP,
-    'backend version': 'version="5.369"' in MAIN or "version='5.369'" in MAIN,
-    'health version': '"version": "5.369"' in ROUTES,
+    'frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.371'" in APP,
+    'backend version': 'version="5.371"' in MAIN or "version='5.371'" in MAIN,
+    'health version': '"version": "5.371"' in ROUTES,
     'summary component': 'function AttachmentAnalysisSummaryCard' in APP,
     'summary parser': 'parseAttachmentSummarySections' in APP,
     'sidebar summary': 'compact={true}' in APP,
@@ -23,5 +23,5 @@ checks = {
 }
 failed = [name for name, ok in checks.items() if not ok]
 if failed:
-    raise SystemExit('v5.369 contract failed: ' + ', '.join(failed))
-print('PASS v5.369 Attachment Analysis Summary Visibility contract')
+    raise SystemExit('v5.371 contract failed: ' + ', '.join(failed))
+print('PASS v5.371 Attachment Analysis Summary Visibility contract')

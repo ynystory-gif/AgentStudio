@@ -25,7 +25,7 @@ for name, text in {
     ast.parse(text, filename=name)
 
 checks = {
-    'frontend version 5.341': "AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP,
+    'frontend version 5.341': "AGENTSTUDIO_FRONTEND_VERSION='5.371'" in APP,
     'high performance task enum': all(x in MODEL for x in (
         'WORKFLOW_DESIGN = "workflow_design"',
         'DATABASE_SCHEMA_DESIGN = "database_schema_design"',

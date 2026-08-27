@@ -49,6 +49,7 @@ export interface NotebookDependencyDiagnostic {
 export interface NotebookExecutionRequest {
   pythonCode: string
   filePath: string
+  projectRoot?: string
   cellIndex: number
   mode: 'full' | 'selection'
   selectionOnly: boolean

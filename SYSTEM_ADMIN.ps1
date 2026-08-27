@@ -61,7 +61,7 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 # Resolve the expected version from this checkout's backend source so the launcher
 # can still detect a genuinely old process on the selected port without failing
 # simply because SYSTEM_ADMIN.ps1 itself was not bumped during packaging.
-$FallbackAgentStudioVersion = "5.369"
+$FallbackAgentStudioVersion = "5.379"
 function Resolve-LocalAgentStudioVersion {
     param(
         [string]$ProjectRoot,

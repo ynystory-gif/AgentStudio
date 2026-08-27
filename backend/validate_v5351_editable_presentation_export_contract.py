@@ -18,8 +18,8 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-require("AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP, "frontend version must be 5.369")
-require('version="5.369"' in MAIN or "version='5.369'" in MAIN, "FastAPI version must be 5.369")
+require("AGENTSTUDIO_FRONTEND_VERSION='5.371'" in APP, "frontend version must be 5.371")
+require('version="5.371"' in MAIN or "version='5.371'" in MAIN, "FastAPI version must be 5.371")
 require('@router.post("/presentation/export")' in ROUTES, "presentation export endpoint missing")
 require("build_agentstudio_presentation" in ROUTES, "presentation export service not wired")
 require("python-pptx" in (ROOT / "backend" / "requirements.txt").read_text(encoding="utf-8"), "python-pptx dependency missing")
@@ -96,7 +96,7 @@ payload = {
     },
 }
 
-content, filename = build_agentstudio_presentation(payload, "5.369")
+content, filename = build_agentstudio_presentation(payload, "5.371")
 require(content[:2] == b"PK", "generated pptx is not a zip/OOXML package")
 require(filename.endswith(".pptx"), "generated filename must be pptx")
 prs = Presentation(BytesIO(content))
@@ -107,4 +107,4 @@ for expected in ("상담 Workflow", "실행 결과", "분석 리포트", "Target
     require(expected in texts, f"missing slide content: {expected}")
 require("AgentStudio 제작 Workflow" not in texts, "Studio factory workflow must not leak into Agent deck")
 
-print("PASS v5.369 Editable PowerPoint Export contract")
+print("PASS v5.371 Editable PowerPoint Export contract")

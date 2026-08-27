@@ -14,6 +14,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.services.ollama_installer import detect_ollama_exe
+from app.services.gpu_runtime_manager import gpu_runtime_enabled, gpu_runtime_environment
 
 
 RUNTIME_DIR = Path(__file__).resolve().parents[2] / "logs" / "ollama_server"
@@ -153,6 +154,7 @@ async def get_ollama_runtime_status() -> dict:
             else "Ollama가 설치되어 있지 않습니다."
         ),
         "last_error": api["error"],
+        "gpu_acceleration_enabled": gpu_runtime_enabled(),
     }
 
 
@@ -185,7 +187,7 @@ async def start_ollama_server() -> dict:
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     log_handle = LOG_FILE.open("ab", buffering=0)
-    env = os.environ.copy()
+    env = gpu_runtime_environment(os.environ.copy())
     env["OLLAMA_HOST"] = f"{host}:{port}"
 
     kwargs: dict = {
@@ -299,3 +301,26 @@ async def stop_ollama_server() -> dict:
         "ok": not status.get("running"),
         "message": "Ollama 서버 종료 상태를 확인했습니다." if not status.get("running") else "Ollama 서버가 계속 응답하고 있습니다.",
     }
+
+
+async def restart_managed_ollama_for_gpu_mode() -> dict:
+    """Restart only an AgentStudio-owned Ollama process after GPU mode changes.
+
+    External/user-started Ollama instances are never terminated automatically.
+    """
+    status = await get_ollama_runtime_status()
+    if not status.get("running"):
+        return {**status, "ok": True, "restarted": False, "message": "Ollama 서버가 중지 상태라 GPU 모드만 저장했습니다."}
+    if not status.get("managed_by_agentstudio"):
+        return {
+            **status,
+            "ok": True,
+            "restarted": False,
+            "external_ollama": True,
+            "message": "외부에서 실행한 Ollama는 안전을 위해 재시작하지 않았습니다. AgentStudio GPU 설정은 다른 관리 작업에 즉시 적용됩니다.",
+        }
+    stopped = await stop_ollama_server()
+    if not stopped.get("ok"):
+        return {**stopped, "restarted": False}
+    started = await start_ollama_server()
+    return {**started, "restarted": bool(started.get("ok"))}

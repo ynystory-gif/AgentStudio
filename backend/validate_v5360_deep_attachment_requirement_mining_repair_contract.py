@@ -31,9 +31,9 @@ patch_text = PATCH.read_text(encoding='utf-8')
 workflow_text = WORKFLOW.read_text(encoding='utf-8')
 main_text = MAIN.read_text(encoding='utf-8')
 
-must("AGENTSTUDIO_FRONTEND_VERSION='5.369'" in app_text, 'Frontend version must be 5.369')
-must('version="5.369"' in main_text, 'Backend FastAPI version must be 5.369')
-must('"version": "5.369"' in routes_text, 'Health/export version must be 5.369')
+must("AGENTSTUDIO_FRONTEND_VERSION='5.371'" in app_text, 'Frontend version must be 5.371')
+must('version="5.371"' in main_text, 'Backend FastAPI version must be 5.371')
+must('"version": "5.371"' in routes_text, 'Health/export version must be 5.371')
 
 # Deep attachment requirement mining contracts.
 must('_requirement_candidate_lines' in attach_text, 'Requirement candidate extractor missing')
@@ -125,4 +125,4 @@ must(repaired.strip() == "print('ok')", 'Fence repair must preserve raw Python s
 unchanged, changed_md = strip_fence(Path('README.md'), '```python\nprint(1)\n```\n')
 must(not changed_md and unchanged.startswith('```python'), 'Markdown documents must not be source-fence repaired')
 
-print('PASS v5.369 Deep Attachment Requirement Mining + Root Source Fence Repair contract')
+print('PASS v5.371 Deep Attachment Requirement Mining + Root Source Fence Repair contract')

@@ -566,14 +566,40 @@ class PythonExecutionManager:
             process=process,
         )
 
+    @staticmethod
+    def _same_interpreter(left: str, right: str) -> bool:
+        try:
+            left_path = str(Path(left).expanduser().resolve())
+            right_path = str(Path(right).expanduser().resolve())
+        except Exception:
+            left_path = str(left or '')
+            right_path = str(right or '')
+        if sys.platform == 'win32':
+            return left_path.casefold() == right_path.casefold()
+        return left_path == right_path
+
     def _get_or_create(self, root: str, session_id: str | None) -> PythonExecutionSession:
         key = self._session_key(root, session_id)
+        expected_interpreter = self.resolve_interpreter(root)
+        stale_session: PythonExecutionSession | None = None
         with self._sessions_lock:
             session = self._sessions.get(key)
-            if session and session.process.poll() is None:
+            if session and session.process.poll() is None and self._same_interpreter(session.interpreter, expected_interpreter):
                 return session
             if session:
-                self._sessions.pop(key, None)
+                stale_session = self._sessions.pop(key, None)
+
+        # A project venv can be created/replaced while AgentStudio stays open.
+        # Do not keep executing the Notebook in the worker that was bound to the
+        # old interpreter; this was the main cause of search/tab-switch followed
+        # by intermittent ModuleNotFoundError until the file was closed/reopened.
+        if stale_session:
+            self._stop_session_process(stale_session, timeout=1.0)
+
+        with self._sessions_lock:
+            session = self._sessions.get(key)
+            if session and session.process.poll() is None and self._same_interpreter(session.interpreter, expected_interpreter):
+                return session
             session = self._start(root, session_id)
             self._sessions[key] = session
             return session
@@ -797,12 +823,22 @@ class PythonExecutionManager:
     def status(self, root: str, session_id: str | None = None) -> dict[str, Any]:
         key = self._session_key(root, session_id)
         session = self._sessions.get(key)
-        interpreter = self.resolve_interpreter(root)
+        resolved_interpreter = self.resolve_interpreter(root)
+        active = bool(session and session.process.poll() is None)
+        bound_interpreter = session.interpreter if active and session else ''
+        stale_interpreter = bool(
+            active
+            and bound_interpreter
+            and not self._same_interpreter(bound_interpreter, resolved_interpreter)
+        )
         return {
             "ok": True,
-            "active": bool(session and session.process.poll() is None),
+            "active": active,
             "persistent": True,
-            "interpreter": interpreter,
+            "interpreter": bound_interpreter or resolved_interpreter,
+            "bound_interpreter": bound_interpreter,
+            "resolved_interpreter": resolved_interpreter,
+            "stale_interpreter": stale_interpreter,
             "session_id": session_id or "default",
         }
 

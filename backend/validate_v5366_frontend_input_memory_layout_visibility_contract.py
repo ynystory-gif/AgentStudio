@@ -3,9 +3,9 @@ APP=Path('frontend/src/App.jsx').read_text(encoding='utf-8')
 ROUTES=Path('backend/app/api/routes.py').read_text(encoding='utf-8')
 MAIN=Path('backend/app/main.py').read_text(encoding='utf-8')
 checks={
- 'frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP,
- 'backend version': 'version="5.369"' in MAIN,
- 'health version': '"version": "5.369"' in ROUTES,
+ 'frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.371'" in APP,
+ 'backend version': 'version="5.371"' in MAIN,
+ 'health version': '"version": "5.371"' in ROUTES,
  'isolated search component': 'DebouncedProjectSearchInput' in APP and 'setLocalValue' in APP,
  'deferred project search': 'useDeferredValue(projectSearch)' in APP,
  'memoized project filtering': 'useMemo(()=>projectList' in APP,
@@ -17,5 +17,5 @@ checks={
  'workspace UI layout gallery': "workspaceTab==='DESIGN'&&<UILayoutTemplateGallery" in APP,
 }
 failed=[k for k,v in checks.items() if not v]
-if failed: raise SystemExit('FAIL v5.369: '+', '.join(failed))
-print('PASS v5.369 Frontend Input / Memory / Layout Visibility contract')
+if failed: raise SystemExit('FAIL v5.371: '+', '.join(failed))
+print('PASS v5.371 Frontend Input / Memory / Layout Visibility contract')

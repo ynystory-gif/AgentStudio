@@ -4,7 +4,8 @@ from pathlib import Path
 from app.services.db_gateway import DatabaseGateway
 from app.services.folder_picker import pick_folder, pick_file, pick_files
 from app.services.ollama_installer import install_ollama_windows
-from app.services.ollama_runtime_manager import get_ollama_runtime_status, start_ollama_server, stop_ollama_server
+from app.services.ollama_runtime_manager import get_ollama_runtime_status, start_ollama_server, stop_ollama_server, restart_managed_ollama_for_gpu_mode
+from app.services.gpu_runtime_manager import get_gpu_runtime_status, set_gpu_runtime_enabled, gpu_recommendation
 import asyncio
 import json
 from app.models.entities import Project, ProjectAnalysis
@@ -483,7 +484,7 @@ class WorkflowStartRequest(BaseModel):
     provider: str | None = None
     thread_id: str | None = None
     design_bundle: dict = {}
-    # v5.369: failed Agent builds can restart from a persisted checkpoint
+    # v5.371: failed Agent builds can restart from a persisted checkpoint
     # instead of replaying requirement/design nodes from START.
     resume_mode: bool = False
     resume_from_node: str = ""
@@ -591,6 +592,12 @@ class WorkflowPreviewRequest(BaseModel):
 class DatabaseDesignPreviewRequest(BaseModel):
     request: str
     confirmed_requirements: dict = {}
+
+class GpuRecommendationRequest(BaseModel):
+    request: str = ""
+    confirmed_requirements: dict = {}
+    ai_mode: str = ""
+    phase: str = ""
 
 
 class DatabaseDesignFinalizeRequest(BaseModel):
@@ -1296,6 +1303,38 @@ async def pgvector_windows18_install(req: PgvectorInstallRequest):
 
     job = job_manager.create("PGVECTOR_INSTALL", runner)
     return vars(job)
+
+@router.get("/settings/gpu/runtime/status")
+async def gpu_runtime_status():
+    return await asyncio.to_thread(get_gpu_runtime_status)
+
+
+@router.post("/settings/gpu/runtime/start")
+async def gpu_runtime_start():
+    result = await asyncio.to_thread(set_gpu_runtime_enabled, True)
+    if not result.get("ok"):
+        return result
+    ollama = await restart_managed_ollama_for_gpu_mode()
+    return {**result, "ollama": ollama}
+
+
+@router.post("/settings/gpu/runtime/stop")
+async def gpu_runtime_stop():
+    result = await asyncio.to_thread(set_gpu_runtime_enabled, False)
+    ollama = await restart_managed_ollama_for_gpu_mode()
+    return {**result, "ollama": ollama}
+
+
+@router.post("/settings/gpu/recommendation")
+async def gpu_runtime_recommendation(req: GpuRecommendationRequest):
+    return await asyncio.to_thread(
+        gpu_recommendation,
+        request=req.request,
+        confirmed_requirements=req.confirmed_requirements,
+        ai_mode=req.ai_mode,
+        phase=req.phase,
+    )
+
 
 @router.get("/settings/ollama/runtime/status")
 async def ollama_runtime_status():
@@ -2728,7 +2767,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.369", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.382", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -3324,7 +3363,7 @@ async def export_agentstudio_presentation(payload: PresentationExportRequest):
         content, filename = await asyncio.to_thread(
             build_agentstudio_presentation,
             data,
-            "5.369",
+            "5.382",
         )
     except Exception as exc:
         raise HTTPException(
@@ -5635,7 +5674,7 @@ def _read_json_dict(path: Path) -> dict:
         return {}
 
 
-# v5.369 Failed Build Redevelopment
+# v5.371 Failed Build Redevelopment
 _FAILURE_RESUME_PREVIOUS_NODE = {
     "requirement_analysis": "requirement_analysis",
     "analyze_project": "requirement_analysis",
@@ -5807,7 +5846,7 @@ async def load_workflow_design_checkpoint(project_root: str):
         "requirements_snapshot": _safe_resume_value(requirements_snapshot),
     }
 
-    # Legacy v5.369-and-earlier projects may have failure diagnostics but no
+    # Legacy v5.371-and-earlier projects may have failure diagnostics but no
     # persisted UI checkpoint. Build a conservative fallback so the user can
     # still continue from the failed project's design instead of starting over.
     legacy_snapshot = {}
@@ -6042,7 +6081,7 @@ def _workflow_initial_state(req: WorkflowStartRequest, thread_id: str) -> dict:
         "debug_history": [],
     }
 
-    # v5.369: for redevelopment, carry forward the last persisted build state
+    # v5.371: for redevelopment, carry forward the last persisted build state
     # and jump into the node immediately before the recorded failure. Completed
     # requirement/design/code-plan work is reused; only the failure suffix runs.
     if req.resume_mode:

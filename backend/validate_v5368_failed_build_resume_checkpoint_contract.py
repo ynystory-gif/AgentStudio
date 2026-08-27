@@ -8,12 +8,12 @@ PS1=(ROOT/'SYSTEM_ADMIN.ps1').read_text(encoding='utf-8')
 
 def require(ok,msg):
     if not ok:
-        raise SystemExit('FAIL v5.369: '+msg)
+        raise SystemExit('FAIL v5.371: '+msg)
 
-require("AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP,'frontend version')
-require('version="5.369"' in MAIN or "version='5.369'" in MAIN,'backend version')
-require('"version": "5.369"' in ROUTES,'health version')
-require('$FallbackAgentStudioVersion = "5.369"' in PS1,'launcher version')
+require("AGENTSTUDIO_FRONTEND_VERSION='5.371'" in APP,'frontend version')
+require('version="5.371"' in MAIN or "version='5.371'" in MAIN,'backend version')
+require('"version": "5.371"' in ROUTES,'health version')
+require('$FallbackAgentStudioVersion = "5.371"' in PS1,'launcher version')
 require('/workflow/design-checkpoint' in ROUTES,'persistent design checkpoint endpoints')
 require('agentstudio_design_checkpoint.json' in ROUTES,'project-folder checkpoint file')
 require('PROJECT_DIAGNOSTICS' in ROUTES,'legacy diagnostics fallback')
@@ -23,4 +23,4 @@ require('resume_context:restoredBuildResume' in APP,'resume context passed to Ag
 require('이전 설계/개발 기록 이어서 불러오기' in APP,'resume UX')
 require('saveRequirementDraft(completedResume)' in APP,'completed/failure build persistence')
 require('saveRequirementDraft(failedResume)' in APP,'exception failure persistence')
-print('PASS v5.369 Failed Build Resume Checkpoint contract')
+print('PASS v5.371 Failed Build Resume Checkpoint contract')

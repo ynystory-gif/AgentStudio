@@ -87,7 +87,7 @@ class AgentState(TypedDict, total=False):
     status: str
     error: str
 
-    # v5.369 failed-build redevelopment checkpoint routing
+    # v5.370 failed-build redevelopment checkpoint routing
     resume_mode: bool
     resume_from_node: str
     resume_run_id: str
@@ -1788,9 +1788,23 @@ def _deterministic_support_file_change(
                 rows += [
                     "# DATABASE_URL 입력 방법 (PostgreSQL)",
                     "# 형식: postgresql://사용자:비밀번호@호스트:포트/데이터베이스명",
-                    "# 로컬 예시: postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/postgres",
-                    "# 예시의 YOUR_PASSWORD와 DB 이름은 실제 환경에 맞게 변경하세요.",
+                    "# 로컬 예시: postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/YOUR_DATABASE",
+                    "# 실제 값은 사용자가 관리하는 .env 또는 OS 환경변수에 설정하세요.",
                 ]
+                value = value or "postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/YOUR_DATABASE"
+            elif env_key == "REDIS_URL":
+                rows += [
+                    "# REDIS_URL 입력 방법",
+                    "# 형식: redis://호스트:포트/DB번호",
+                    "# 로컬 예시: redis://127.0.0.1:6379/0",
+                ]
+                value = value or "redis://127.0.0.1:6379/0"
+            elif env_key == "OPENAI_API_KEY":
+                rows += [
+                    "# OpenAI를 사용할 때만 실제 Key를 .env 또는 OS 환경변수에 설정하세요.",
+                    "# 예시: OPENAI_API_KEY=YOUR_OPENAI_API_KEY",
+                ]
+                value = value or "YOUR_OPENAI_API_KEY"
             rows.append(f"{env_key}={value}")
 
         if not seen:
@@ -3601,7 +3615,7 @@ def _looks_like_placeholder(content: str, suffix: str = "") -> bool:
 
 
 async def build_artifact_validation_node(state: AgentState):
-    # v5.369: React + TypeScript 계약에서는 App.jsx/main.jsx/api.js가 내용이 비어 있어도
+    # v5.370: React + TypeScript 계약에서는 App.jsx/main.jsx/api.js가 내용이 비어 있어도
     # 존재 자체가 Architecture 오류입니다. LLM Repair가 빈 파일로 만드는 우회 대신
     # 검증 전에 legacy entry를 결정적으로 삭제합니다.
     react_ts_cleanup = _cleanup_react_typescript_legacy_sources(state)
@@ -4211,7 +4225,7 @@ def route_after_debug(
 
 
 def _generated_system_admin_cmd() -> str:
-    return '@echo off\nsetlocal EnableExtensions\nchcp 65001 >nul\ntitle THEANOVA Generated Agent - System Manager\n\ncd /d "%~dp0"\n\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0SYSTEM_ADMIN.ps1"\nset "EXITCODE=%ERRORLEVEL%"\n\necho.\necho ============================================================\nif "%EXITCODE%"=="0" (\n    echo [COMPLETED] Agent program started successfully.\n) else if "%EXITCODE%"=="2" (\n    echo [SETUP_REQUIRED] Initial settings are not complete.\n    echo Edit the opened .env file, save it, then run SYSTEM_ADMIN.cmd again.\n) else (\n    echo [FAILED] SYSTEM_ADMIN failed. ExitCode=%EXITCODE%\n)\necho ============================================================\necho.\necho This window will remain open.\necho.\npause\n\nendlocal\nexit /b %EXITCODE%\n'
+    return '@echo off\nsetlocal EnableExtensions\nchcp 65001 >nul\ntitle THEANOVA Generated Agent - System Manager\n\ncd /d "%~dp0"\n\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0SYSTEM_ADMIN.ps1"\nset "EXITCODE=%ERRORLEVEL%"\n\necho.\necho ============================================================\nif "%EXITCODE%"=="0" (\n    echo [COMPLETED] Agent program started successfully.\n) else if "%EXITCODE%"=="2" (\n    echo [SETUP_REQUIRED] Initial settings are not complete.\n    echo Review the opened .env.example guide. AgentStudio does not create or modify .env.\n    echo Put real values in your existing .env or environment variables, then run SYSTEM_ADMIN.cmd again.\n) else (\n    echo [FAILED] SYSTEM_ADMIN failed. ExitCode=%EXITCODE%\n)\necho ============================================================\necho.\necho This window will remain open.\necho.\npause\n\nendlocal\nexit /b %EXITCODE%\n'
 
 
 def _generated_system_admin_ps1() -> str:
@@ -4294,13 +4308,85 @@ function Test-SetupValueReady {
     ))
 }
 
+function Get-EnvExampleValue {
+    param([string]$Key)
+    $upper = ([string]$Key).ToUpperInvariant()
+    switch -Regex ($upper) {
+        '^DATABASE_URL$' { return 'postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/YOUR_DATABASE' }
+        '^POSTGRES_URL$' { return 'postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/YOUR_DATABASE' }
+        '^REDIS_URL$' { return 'redis://127.0.0.1:6379/0' }
+        '^OLLAMA_BASE_URL$' { return 'http://127.0.0.1:11434' }
+        '^OPENAI_API_KEY$' { return 'YOUR_OPENAI_API_KEY' }
+        'API_KEY$' { return 'YOUR_API_KEY' }
+        'PASSWORD$' { return 'YOUR_PASSWORD' }
+        'TOKEN$' { return 'YOUR_TOKEN' }
+        '^APP_HOST$' { return '127.0.0.1' }
+        '^APP_PORT$' { return '8000' }
+        default { return '<REQUIRED_VALUE>' }
+    }
+}
+
+function Ensure-EnvExampleRequirements {
+    param([string]$Path, [object[]]$Required)
+    if (-not (Test-Path $Path)) {
+        $initial = @(
+            '# THEANOVA Generated Agent environment guide',
+            '# 이 파일은 예시/설명용입니다. 실제 비밀번호/API Key를 저장하지 마세요.',
+            '# 실제 값은 사용자가 직접 만든 .env 또는 OS 환경변수에 설정하세요.',
+            '# SYSTEM_ADMIN.cmd는 .env 파일을 생성하거나 수정하지 않습니다.',
+            ''
+        )
+        [System.IO.File]::WriteAllLines($Path, $initial, $Utf8NoBom)
+    }
+
+    $lines = @(Get-Content $Path -ErrorAction SilentlyContinue)
+    $known = @{}
+    foreach ($line in $lines) {
+        if ([string]$line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=') {
+            $known[$matches[1].ToUpperInvariant()] = $true
+        }
+    }
+
+    $result = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $lines) { $result.Add([string]$line) }
+    if ($result.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$result[$result.Count - 1])) { $result.Add('') }
+
+    foreach ($item in $Required) {
+        $key = ([string]$item.key).Trim()
+        if (-not $key) { continue }
+        $upper = $key.ToUpperInvariant()
+        if ($known.ContainsKey($upper)) { continue }
+        $label = [string]$item.label
+        $reason = [string]$item.reason
+        if (-not $label) { $label = $key }
+        $example = Get-EnvExampleValue $upper
+        $result.Add(('# {0} ({1})' -f $label, $key))
+        if ($reason) { $result.Add(('# 용도: {0}' -f $reason)) }
+        if ($upper -eq 'DATABASE_URL' -or $upper -eq 'POSTGRES_URL') {
+            $result.Add('# 형식: postgresql://사용자:비밀번호@호스트:포트/데이터베이스명')
+            $result.Add('# 로컬 예시: postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/YOUR_DATABASE')
+        }
+        elseif ($upper -eq 'REDIS_URL') {
+            $result.Add('# 형식: redis://호스트:포트/DB번호')
+            $result.Add('# 로컬 예시: redis://127.0.0.1:6379/0')
+        }
+        elseif ($upper -eq 'OPENAI_API_KEY') {
+            $result.Add('# 예시: OPENAI_API_KEY=YOUR_OPENAI_API_KEY')
+        }
+        $result.Add(('{0}={1}' -f $key, $example))
+        $result.Add('')
+        $known[$upper] = $true
+    }
+    [System.IO.File]::WriteAllLines($Path, $result, $Utf8NoBom)
+}
+
 function Ensure-EnvSetupGuides {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return }
     $lines = @(Get-Content $Path -ErrorAction SilentlyContinue)
     if ($lines.Count -eq 0) { return }
 
-    $dbGuideMarker = "# DATABASE_URL 입력 방법 (PostgreSQL)"
+    $dbGuideMarker = '# DATABASE_URL 입력 방법 (PostgreSQL)'
     if (($lines -contains $dbGuideMarker) -or -not ($lines -match '^\s*DATABASE_URL\s*=')) {
         return
     }
@@ -4310,9 +4396,9 @@ function Ensure-EnvSetupGuides {
     foreach ($line in $lines) {
         if (-not $inserted -and ([string]$line -match '^\s*DATABASE_URL\s*=')) {
             $result.Add($dbGuideMarker)
-            $result.Add("# 형식: postgresql://사용자:비밀번호@호스트:포트/데이터베이스명")
-            $result.Add("# 로컬 예시: postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/postgres")
-            $result.Add("# YOUR_PASSWORD와 마지막 DB 이름을 실제 PostgreSQL 환경에 맞게 변경하세요.")
+            $result.Add('# 형식: postgresql://사용자:비밀번호@호스트:포트/데이터베이스명')
+            $result.Add('# 로컬 예시: postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/YOUR_DATABASE')
+            $result.Add('# 실제 값은 .env.example이 아니라 사용자가 관리하는 .env 또는 OS 환경변수에 설정하세요.')
             $inserted = $true
         }
         $result.Add([string]$line)
@@ -4339,25 +4425,11 @@ function Test-InitialConfiguration {
         return $true
     }
 
-    if (-not (Test-Path $EnvFile)) {
-        if (Test-Path $EnvExample) {
-            Copy-Item $EnvExample $EnvFile -Force
-        }
-        else {
-            New-Item -ItemType File -Path $EnvFile -Force | Out-Null
-        }
-    }
-
-    $envText = Get-Content $EnvFile -Raw -ErrorAction SilentlyContinue
-    foreach ($item in $required) {
-        $key = [string]$item.key
-        if (-not $key) { continue }
-        if ($envText -notmatch "(?m)^\s*$([regex]::Escape($key))\s*=") {
-            Add-Content -Path $EnvFile -Value ("{0}=" -f $key) -Encoding UTF8
-            $envText += "`n$key="
-        }
-    }
-    Ensure-EnvSetupGuides $EnvFile
+    # v5.377: 사용자의 .env는 AgentStudio가 절대 생성/수정하지 않습니다.
+    # 필요한 Key와 입력 예시는 .env.example에만 보강하고, 실제 값은 기존 .env,
+    # backend/.env 또는 OS 환경변수에서 읽습니다.
+    Ensure-EnvExampleRequirements $EnvExample $required
+    Ensure-EnvSetupGuides $EnvExample
 
     $values = Read-EnvValues @($EnvFile, $BackendEnvFile)
     $missing = @()
@@ -4403,11 +4475,13 @@ function Test-InitialConfiguration {
         Write-Host " - YOUR_PASSWORD와 DB 이름을 실제 PostgreSQL 환경에 맞게 변경하세요."
     }
     Write-Host ""
-    Write-Host "설정 파일: $EnvFile" -ForegroundColor Cyan
-    Write-Host "값을 입력하고 저장한 후 SYSTEM_ADMIN.cmd를 다시 실행하세요."
+    Write-Host "설정 가이드: $EnvExample" -ForegroundColor Cyan
+    Write-Host "실제 설정: 사용자가 관리하는 .env / backend\.env / OS 환경변수" -ForegroundColor Cyan
+    Write-Host "AgentStudio는 .env 파일을 생성하거나 수정하지 않습니다." -ForegroundColor Yellow
+    Write-Host ".env.example의 예시를 참고해 실제 값을 설정한 후 SYSTEM_ADMIN.cmd를 다시 실행하세요."
     Write-Log ("SETUP_REQUIRED: " + (($missing | ForEach-Object { $_.key }) -join ", "))
 
-    try { Start-Process notepad.exe -ArgumentList @($EnvFile) | Out-Null } catch { }
+    try { Start-Process notepad.exe -ArgumentList @($EnvExample) | Out-Null } catch { }
     return $false
 }
 
@@ -4791,7 +4865,7 @@ def _build_generated_setup_manifest(
         "database_enabled": bool(database_plan.get("enabled")),
         "instructions": [
             "SYSTEM_ADMIN.cmd는 이 필수값이 준비되기 전 FastAPI app.main을 import/start하지 않습니다.",
-            ".env 값을 저장한 후 SYSTEM_ADMIN.cmd를 다시 실행합니다.",
+            "AgentStudio는 .env를 생성/수정하지 않으며, .env.example의 가이드를 참고해 사용자가 직접 .env 또는 OS 환경변수에 값을 설정합니다.",
         ],
     }
 
@@ -5070,7 +5144,7 @@ def route_workflow_entry(state: AgentState) -> str:
 def build_workflow(checkpointer=None):
     graph = StateGraph(AgentState)
 
-    # v5.369: fresh builds and failed-build redevelopment share one graph.
+    # v5.370: fresh builds and failed-build redevelopment share one graph.
     # A resumed build skips already-completed requirement/design nodes.
     graph.add_node("resume_entry_router", resume_entry_router_node)
 

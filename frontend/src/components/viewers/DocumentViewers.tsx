@@ -5,6 +5,10 @@ export interface BinaryViewerProps {
   filePath?: string
   projectRoot?: string
   revision?: number | string
+  page?: number
+  searchQuery?: string
+  navigationToken?: number | string
+  matchSnippet?: string
 }
 
 interface PresentationAttempt {
@@ -46,9 +50,27 @@ const initialPresentationPreviewState = (): PresentationPreviewState => ({
   attempts: [],
 })
 
-export function PdfViewer({ filePath = '', projectRoot = '', revision = 0 }: BinaryViewerProps) {
+export function PdfViewer({
+  filePath = '',
+  projectRoot = '',
+  revision = 0,
+  page = 0,
+  searchQuery = '',
+  navigationToken = 0,
+  matchSnippet = '',
+}: BinaryViewerProps) {
   const apiBase = runtimeInfo().apiBase
-  const src = `${apiBase}/files/pdf?root=${encodeURIComponent(projectRoot)}&relative_path=${encodeURIComponent(filePath)}&v=${encodeURIComponent(String(revision))}`
+  const baseSrc = `${apiBase}/files/pdf?root=${encodeURIComponent(projectRoot)}&relative_path=${encodeURIComponent(filePath)}&v=${encodeURIComponent(String(revision))}`
+  // When a Unified Find result is clicked, the page number is authoritative.
+  // Passing #search together with #page lets Chromium's native PDF viewer run a
+  // document-wide search and it can override the requested page, making every
+  // result appear to jump to the same occurrence. Keep navigation page-only.
+  const targetPage = Number(page) > 0 ? Math.max(1, Math.trunc(Number(page))) : 0
+  const fragment = targetPage > 0
+    ? `page=${targetPage}`
+    : (String(searchQuery || '').trim() ? `search=${encodeURIComponent(String(searchQuery || '').trim())}` : '')
+  const src = fragment ? `${baseSrc}#${fragment}` : baseSrc
+  const displayMatchSnippet = String(matchSnippet || '').replace(/\s+/g, ' ').trim().slice(0, 180)
 
   return (
     <div className="pdf-viewer-shell">
@@ -57,10 +79,14 @@ export function PdfViewer({ filePath = '', projectRoot = '', revision = 0 }: Bin
           <strong>PDF 미리보기</strong>
           <span>{filePath}</span>
         </div>
-        <small>PDF는 바이너리 파일이므로 코드 편집기 대신 브라우저 PDF Viewer로 표시됩니다.</small>
+        <small>
+          {targetPage > 0
+            ? `통합 찾기 결과 · 페이지 ${targetPage}${displayMatchSnippet ? ` · ${displayMatchSnippet}` : ''}`
+            : 'PDF는 바이너리 파일이므로 코드 편집기 대신 브라우저 PDF Viewer로 표시됩니다.'}
+        </small>
       </div>
       <iframe
-        key={`${filePath}:${revision}`}
+        key={`${filePath}:${revision}:${page}:${searchQuery}:${navigationToken}`}
         className="pdf-viewer-frame"
         src={src}
         title={`PDF 미리보기 - ${filePath || '문서'}`}

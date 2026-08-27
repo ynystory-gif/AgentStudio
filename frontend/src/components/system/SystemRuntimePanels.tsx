@@ -2,6 +2,7 @@ import type { ChangeEvent, ReactNode } from 'react'
 import { StatusDot } from '../common/CommonUi'
 import type {
   DatabaseRuntimeInfo,
+  GpuRuntimeInfo,
   DatabaseRuntimeResult,
   OllamaRuntimeInfo,
   PortRecommendationInfo,
@@ -197,6 +198,47 @@ export function RuntimeDatabasePanel({
         {schemaResult?.langgraph?.ok === false && <details><summary>LangGraph migration/검증 실패</summary><pre>{schemaResult.langgraph.message || '-'}</pre></details>}
       </div>}
     </div>
+  )
+}
+
+interface GpuSettingsPanelProps {
+  busy: boolean
+  runtime: GpuRuntimeInfo | null
+  onStart: () => void
+  onStop: () => void
+  onRefresh: () => void
+}
+
+export function GpuSettingsPanel({ busy, runtime, onStart, onStop, onRefresh }: GpuSettingsPanelProps) {
+  const device = runtime?.devices?.[0]
+  return (
+    <section className="settings-panel gpu-runtime-panel">
+      <h2>GPU 가속</h2>
+      <div className="hint-box">
+        <b>GPU 시작/정지</b>는 그래픽카드 전원을 켜고 끄는 기능이 아닙니다. AgentStudio가 관리하는 Ollama, 로컬 Embedding,
+        생성 Agent 테스트에서 GPU 가속을 사용할지 제어합니다. GPU 정지 시 가능한 작업은 CPU 모드로 실행됩니다.
+      </div>
+      {runtime && <div className={`ollama-runtime-card ${runtime.enabled ? 'running' : runtime.available ? 'stopped' : 'missing'}`}>
+        <div className="ollama-runtime-head">
+          <strong>GPU Runtime</strong>
+          <span>{runtime.enabled ? '● GPU 가속 사용' : runtime.available ? '○ GPU 가속 정지' : '○ GPU 확인 필요'}</span>
+        </div>
+        <div><b>감지:</b> {runtime.available ? `${runtime.vendor || 'GPU'} ${runtime.device_count || 1}개` : '지원 GPU를 찾지 못함'}</div>
+        {device?.name && <div><b>장치:</b> {device.name}</div>}
+        {device?.memory_total_mb !== undefined && <div><b>VRAM:</b> {device.memory_used_mb || 0} / {device.memory_total_mb} MB</div>}
+        {device?.utilization_percent !== undefined && <div><b>GPU 사용률:</b> {device.utilization_percent}%</div>}
+        {device?.driver_version && <div><b>Driver:</b> {device.driver_version}</div>}
+        {runtime.message && <div><b>상태:</b> {runtime.message}</div>}
+        {runtime.ollama?.message && <div><b>Ollama:</b> {runtime.ollama.message}</div>}
+      </div>}
+      <div className="panel-actions">
+        <button className="primary-install" disabled={busy || !runtime?.available || runtime?.enabled} onClick={onStart}>
+          {busy ? 'GPU 시작 중...' : 'GPU 시작'}
+        </button>
+        <button disabled={busy || !runtime?.available || !runtime?.enabled} onClick={onStop}>GPU 정지</button>
+        <button disabled={busy} onClick={onRefresh}>상태 새로고침</button>
+      </div>
+    </section>
   )
 }
 

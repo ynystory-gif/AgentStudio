@@ -9,7 +9,7 @@ ROUTES = (ROOT / "backend" / "app" / "api" / "routes.py").read_text(encoding="ut
 DESIGN = (ROOT / "backend" / "app" / "services" / "agent_factory_workflow_design.py").read_text(encoding="utf-8")
 
 checks: dict[str, bool] = {
-    "frontend version 5.345": "AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP,
+    "frontend version 5.345": "AGENTSTUDIO_FRONTEND_VERSION='5.371'" in APP,
     "right action renamed design review": "◇ 설계 검토" in APP,
     "project create simplified": "＋ 프로젝트 생성" in APP and "프로젝트 생성 (Workflow/DB 자동)" not in APP,
     "workspace duplicate workflow button removed": APP.count('className="requirement-collection-actions"') == 0,

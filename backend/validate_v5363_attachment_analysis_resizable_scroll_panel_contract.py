@@ -11,13 +11,13 @@ DOC = (ROOT / 'docs' / 'ATTACHMENT_ANALYSIS_RESIZABLE_SCROLL_PANEL_V5363.md').re
 
 def require(condition: bool, message: str) -> None:
     if not condition:
-        raise SystemExit('v5.369 contract failed: ' + message)
+        raise SystemExit('v5.371 contract failed: ' + message)
 
 
-require("AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP, 'frontend version')
-require('version="5.369"' in MAIN or "version='5.369'" in MAIN, 'backend version')
-require('"version": "5.369"' in ROUTES, 'health version')
-require('$FallbackAgentStudioVersion = "5.369"' in PS1, 'SYSTEM_ADMIN fallback version')
+require("AGENTSTUDIO_FRONTEND_VERSION='5.371'" in APP, 'frontend version')
+require('version="5.371"' in MAIN or "version='5.371'" in MAIN, 'backend version')
+require('"version": "5.371"' in ROUTES, 'health version')
+require('$FallbackAgentStudioVersion = "5.371"' in PS1, 'SYSTEM_ADMIN fallback version')
 require('ResizableAttachmentAnalysisPanel' in ROUTES, 'health build marker')
 
 require('attachment-ai-summary-scroll' in APP, 'single internal scroll surface missing')
@@ -38,4 +38,4 @@ require('cursor:ns-resize' in CSS, 'resize cursor missing')
 require('.attachment-ai-summary-card.resizable .attachment-requirement-list' in CSS and 'max-height:none' in CSS, 'nested requirement scroll removal missing')
 require('Compact Sidebar Summary' in DOC, 'documentation incomplete')
 
-print('PASS v5.369 Attachment Analysis Resizable Scroll Panel contract')
+print('PASS v5.371 Attachment Analysis Resizable Scroll Panel contract')

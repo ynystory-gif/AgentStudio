@@ -152,7 +152,7 @@ base = {
     "db_erd": erd,
 }
 
-erd_blob, erd_name = build_agentstudio_presentation(dict(base, scope="DB_ERD", deck_type="AGENT"), "5.369")
+erd_blob, erd_name = build_agentstudio_presentation(dict(base, scope="DB_ERD", deck_type="AGENT"), "5.371")
 erd_text = "\n".join(slide_texts(erd_blob))
 require(erd_blob[:2] == b"PK", "DB ERD page PPTX signature missing")
 require("DB ERD" in erd_text, "DB ERD page PPT has no ERD title")
@@ -160,13 +160,13 @@ require("PostgreSQL" in erd_text, "DB ERD page PPT missing PostgreSQL")
 require("Redis" in erd_text, "DB ERD page PPT missing Redis")
 require("_DB_ERD_" in erd_name, "DB ERD page filename missing scope")
 
-agent_blob, _ = build_agentstudio_presentation(dict(base, scope="ALL", deck_type="AGENT"), "5.369")
+agent_blob, _ = build_agentstudio_presentation(dict(base, scope="ALL", deck_type="AGENT"), "5.371")
 agent_text = "\n".join(slide_texts(agent_blob))
 require("DB ERD" in agent_text and "PostgreSQL" in agent_text, "Agent PPT must include project DB ERD")
 require("AgentStudio PostgreSQL / Supabase" not in agent_text, "Studio DB ERD leaked into Agent PPT")
 
 studio_payload = dict(base, scope="ALL", deck_type="STUDIO", db_erd=studio_erd)
-studio_blob, _ = build_agentstudio_presentation(studio_payload, "5.369")
+studio_blob, _ = build_agentstudio_presentation(studio_payload, "5.371")
 studio_text = "\n".join(slide_texts(studio_blob))
 require("AgentStudio PostgreSQL / Supabase" in studio_text, "Studio PPT must include AgentStudio DB ERD")
 require("db_erd_demo" not in studio_text, "current project leaked into Studio PPT")
@@ -185,6 +185,6 @@ require('"DB_ERD"' in routes, "DB ERD presentation scope missing")
 require("build_agentstudio_db_erd" in routes, "Studio ERD generation missing")
 require("build_project_db_erd" in routes, "Agent/project ERD generation missing")
 require("_extract_redis_keys" in service and "_vector_diagram" in service, "Redis/pgvector model inference missing")
-require("AGENTSTUDIO_FRONTEND_VERSION='5.369'" in app, "frontend version must be 5.369")
+require("AGENTSTUDIO_FRONTEND_VERSION='5.371'" in app, "frontend version must be 5.371")
 
-print("PASS v5.369 Database ERD Workspace + PPT contract")
+print("PASS v5.371 Database ERD Workspace + PPT contract")

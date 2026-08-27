@@ -24,7 +24,13 @@ const TABLE_GAP = 34
 const LEFT_X = 36
 const ROOT_X = 382
 const RIGHT_X = 728
-const PADDING_Y = 38
+// v5.377: ERD 관계선 전용 상/하단 routing corridor를 확보합니다.
+// 테이블이 캔버스 맨 위부터 시작하면 먼 컬럼 간 관계선이 테이블을 관통할 수 있어
+// routing lane을 위한 충분한 여백을 먼저 확보합니다.
+const RELATION_ROUTE_MARGIN = 118
+const PADDING_Y = RELATION_ROUTE_MARGIN + 24
+const BOTTOM_ROUTE_MARGIN = 118
+const RELATION_LANE_GAP = 9
 
 function parseDiagram(value: string): DatabaseDiagramDocument {
   const parsed = JSON.parse(String(value || '{}')) as DatabaseDiagramDocument
@@ -69,7 +75,7 @@ function buildSchemaLayout(document: DatabaseDiagramDocument) {
     columnHeights[columnIndex] = y + height + TABLE_GAP
   }
   const width = paddingX * 2 + columnCount * TABLE_WIDTH + Math.max(0, columnCount - 1) * columnGap
-  const height = Math.max(420, ...columnHeights) + PADDING_Y
+  const height = Math.max(420, ...columnHeights) + BOTTOM_ROUTE_MARGIN
   return { tables: positioned, width, height }
 }
 
@@ -101,7 +107,7 @@ function buildLayout(document: DatabaseDiagramDocument) {
   const rootPositioned: PositionedTable = { ...root, x: ROOT_X, y: rootY, width: TABLE_WIDTH, height: rootHeight }
   const tables = [...leftPositioned, rootPositioned, ...rightPositioned]
   const maxBottom = Math.max(...tables.map(table => table.y + table.height), 320)
-  return { tables, width: 1044, height: maxBottom + PADDING_Y }
+  return { tables, width: 1044, height: maxBottom + BOTTOM_ROUTE_MARGIN }
 }
 
 function columnAnchor(table: PositionedTable, columnName: string | undefined, side: 'left' | 'right') {
@@ -114,31 +120,46 @@ function columnAnchor(table: PositionedTable, columnName: string | undefined, si
 function relationshipPath(
   relationship: DatabaseDiagramRelationship,
   tableMap: Map<string, PositionedTable>,
+  relationshipIndex: number,
+  relationshipCount: number,
+  layoutHeight: number,
 ): { d: string; labelX: number; labelY: number } | null {
   const source = tableMap.get(relationship.from_table)
   const target = tableMap.get(relationship.to_table)
   if (!source || !target) return null
 
+  const laneSlot = relationshipIndex % 9
+  const sideOffset = 14 + (relationshipIndex % 5) * 6
+
   if (source.id === target.id) {
     const start = columnAnchor(source, relationship.from_columns?.[0], 'right')
     const end = columnAnchor(target, relationship.to_columns?.[0], 'right')
-    const loopX = source.x + source.width + 56
+    const loopX = source.x + source.width + sideOffset + 34
+    const loopBottom = Math.max(start.y, end.y) + 26 + laneSlot * 3
     return {
-      d: `M ${start.x} ${start.y} L ${loopX} ${start.y} L ${loopX} ${end.y + 24} L ${end.x} ${end.y + 24} L ${end.x} ${end.y}`,
-      labelX: loopX + 4,
+      d: `M ${start.x} ${start.y} L ${loopX} ${start.y} L ${loopX} ${loopBottom} L ${end.x + 12} ${loopBottom} L ${end.x + 12} ${end.y} L ${end.x} ${end.y}`,
+      labelX: loopX + 5,
       labelY: Math.min(start.y, end.y) + 18,
     }
   }
 
-  if (source.x === target.x) {
-    const useRight = source.y <= target.y
-    const side = useRight ? 'right' : 'left'
+  const uniqueXs = [...new Set([...tableMap.values()].map(table => table.x))].sort((a, b) => a - b)
+  const sourceColumn = Math.max(0, uniqueXs.indexOf(source.x))
+  const targetColumn = Math.max(0, uniqueXs.indexOf(target.x))
+  const columnDistance = Math.abs(sourceColumn - targetColumn)
+
+  // 같은 컬럼은 테이블 바깥쪽 corridor를 이용해 수직으로 우회합니다.
+  if (sourceColumn === targetColumn) {
+    const routeRight = relationshipIndex % 2 === 0
+    const side: 'left' | 'right' = routeRight ? 'right' : 'left'
     const start = columnAnchor(source, relationship.from_columns?.[0], side)
     const end = columnAnchor(target, relationship.to_columns?.[0], side)
-    const routeX = useRight ? source.x + source.width + 24 : source.x - 24
+    const routeX = routeRight
+      ? source.x + source.width + sideOffset
+      : Math.max(8, source.x - sideOffset)
     return {
       d: `M ${start.x} ${start.y} L ${routeX} ${start.y} L ${routeX} ${end.y} L ${end.x} ${end.y}`,
-      labelX: useRight ? routeX + 4 : routeX - 4,
+      labelX: routeRight ? routeX + 5 : routeX - 5,
       labelY: Math.round((start.y + end.y) / 2) - 5,
     }
   }
@@ -146,11 +167,45 @@ function relationshipPath(
   const sourceOnLeft = source.x < target.x
   const start = columnAnchor(source, relationship.from_columns?.[0], sourceOnLeft ? 'right' : 'left')
   const end = columnAnchor(target, relationship.to_columns?.[0], sourceOnLeft ? 'left' : 'right')
-  const midX = Math.round((start.x + end.x) / 2)
+
+  // 인접 컬럼끼리는 테이블 사이 빈 공간에 전용 세로 lane을 배정합니다.
+  // 같은 중앙선에 모든 FK를 몰지 않고 관계 index별로 x를 분산합니다.
+  if (columnDistance === 1) {
+    const gapLeft = sourceOnLeft ? source.x + source.width : target.x + target.width
+    const gapRight = sourceOnLeft ? target.x : source.x
+    const gapWidth = Math.max(18, gapRight - gapLeft)
+    const usableStart = gapLeft + 10
+    const usableEnd = gapRight - 10
+    const slots = 5
+    const slot = relationshipIndex % slots
+    const routeX = usableEnd > usableStart
+      ? usableStart + ((usableEnd - usableStart) * (slot + 1)) / (slots + 1)
+      : gapLeft + gapWidth / 2
+    return {
+      d: `M ${start.x} ${start.y} L ${routeX} ${start.y} L ${routeX} ${end.y} L ${end.x} ${end.y}`,
+      labelX: routeX + 5,
+      labelY: Math.round((start.y + end.y) / 2) - 5,
+    }
+  }
+
+  // 두 컬럼 이상 떨어진 관계는 중간 테이블을 가로지르지 않도록
+  // 캔버스 상단/하단의 전용 routing lane으로 완전히 우회합니다.
+  const useTop = relationshipIndex % 2 === 0
+  const laneNumber = Math.floor(relationshipIndex / 2) % Math.max(1, Math.ceil(relationshipCount / 2))
+  const routeY = useTop
+    ? 18 + laneNumber * RELATION_LANE_GAP
+    : Math.max(layoutHeight - 18 - laneNumber * RELATION_LANE_GAP, layoutHeight - BOTTOM_ROUTE_MARGIN + 8)
+  const sourceCorridorX = sourceOnLeft
+    ? source.x + source.width + sideOffset
+    : Math.max(8, source.x - sideOffset)
+  const targetCorridorX = sourceOnLeft
+    ? Math.max(8, target.x - sideOffset)
+    : target.x + target.width + sideOffset
+
   return {
-    d: `M ${start.x} ${start.y} L ${midX} ${start.y} L ${midX} ${end.y} L ${end.x} ${end.y}`,
-    labelX: midX + 5,
-    labelY: Math.round((start.y + end.y) / 2) - 5,
+    d: `M ${start.x} ${start.y} L ${sourceCorridorX} ${start.y} L ${sourceCorridorX} ${routeY} L ${targetCorridorX} ${routeY} L ${targetCorridorX} ${end.y} L ${end.x} ${end.y}`,
+    labelX: Math.round((sourceCorridorX + targetCorridorX) / 2),
+    labelY: useTop ? routeY - 4 : routeY + 14,
   }
 }
 
@@ -301,32 +356,35 @@ export function DatabaseDiagramViewer({ value, filePath = '' }: DatabaseDiagramV
             <path d="M 0 0 L 8 4 L 0 8 z" fill="#6b8194" />
           </marker>
         </defs>
-        {(diagram.relationships || []).map((relationship, index) => {
-          const route = relationshipPath(relationship, tableMap)
-          if (!route) return null
-          return <g key={`${relationship.name || 'fk'}-${index}`}>
-            <path d={route.d} fill="none" stroke="#6b8194" strokeWidth="1.5" markerEnd="url(#agentstudio-diagram-arrow)" />
-            {relationship.name && <text x={route.labelX} y={route.labelY} fontSize="10" fill="#647583">{relationship.name}</text>}
-          </g>
-        })}
         {layout.tables.map(table => {
           const root = !isSchemaDiagram && table.id === diagram.root_table
           return <g key={table.id}>
             <rect x={table.x} y={table.y} width={table.width} height={table.height} rx="2" fill="#ffffff" stroke={root ? '#2679b8' : '#8ba5b8'} strokeWidth={root ? 2 : 1.2} />
             <rect x={table.x} y={table.y} width={table.width} height={HEADER_HEIGHT} rx="2" fill={root ? '#dceefb' : '#edf4f8'} stroke={root ? '#2679b8' : '#8ba5b8'} strokeWidth={root ? 2 : 1.2} />
             <text x={table.x + 12} y={table.y + 24} fontSize="14" fontWeight="700" fill="#102535">{table.name}</text>
-            <text x={table.x + table.width - 10} y={table.y + 24} textAnchor="end" fontSize="9" fill="#60798c">{table.schema}</text>
+            <text x={table.x + table.width - 10} y={table.y + 24} textAnchor="end" fontSize="13" fill="#60798c">{table.schema}</text>
             {(table.columns || []).map((column, index) => {
               const rowY = table.y + HEADER_HEIGHT + index * ROW_HEIGHT
               const badges = [column.primary_key ? 'PK' : '', column.foreign_key ? 'FK' : ''].filter(Boolean).join('/')
               return <g key={`${table.id}:${column.name}:${index}`}>
                 {index > 0 && <line x1={table.x} y1={rowY} x2={table.x + table.width} y2={rowY} stroke="#d7e0e6" strokeWidth="1" />}
-                <text x={table.x + 10} y={rowY + 16} fontSize="11" fontWeight={column.primary_key ? '700' : '400'} fill="#173144">{column.name}</text>
-                {badges && <text x={table.x + 155} y={rowY + 16} fontSize="9" fontWeight="700" fill={column.primary_key ? '#bd5f1d' : '#356f9d'}>{badges}</text>}
-                <text x={table.x + table.width - 10} y={rowY + 16} textAnchor="end" fontSize="9.5" fill="#5f7180">{column.data_type || ''}{column.nullable ? ' ?' : ''}</text>
+                <text x={table.x + 10} y={rowY + 16} fontSize="13" fontWeight={column.primary_key ? '700' : '400'} fill="#173144">{column.name}</text>
+                {badges && <text x={table.x + 155} y={rowY + 16} fontSize="13" fontWeight="700" fill={column.primary_key ? '#bd5f1d' : '#356f9d'}>{badges}</text>}
+                <text x={table.x + table.width - 10} y={rowY + 16} textAnchor="end" fontSize="13" fill="#5f7180">{column.data_type || ''}{column.nullable ? ' ?' : ''}</text>
               </g>
             })}
-            {(!table.columns || table.columns.length === 0) && <text x={table.x + 10} y={table.y + HEADER_HEIGHT + 16} fontSize="10" fill="#778895">컬럼 메타데이터 없음</text>}
+            {(!table.columns || table.columns.length === 0) && <text x={table.x + 10} y={table.y + HEADER_HEIGHT + 16} fontSize="13" fill="#778895">컬럼 메타데이터 없음</text>}
+          </g>
+        })}
+        {(diagram.relationships || []).map((relationship, index) => {
+          const route = relationshipPath(relationship, tableMap, index, diagram.relationships.length, layout.height)
+          if (!route) return null
+          const showLabel = Boolean(relationship.name) && diagram.relationships.length <= 12
+          return <g key={`${relationship.name || 'fk'}-${index}`}>
+            <title>{relationship.name || `FK ${relationship.from_table} → ${relationship.to_table}`}</title>
+            <path d={route.d} fill="none" stroke="#ffffff" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
+            <path d={route.d} fill="none" stroke="#5d7890" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" markerEnd="url(#agentstudio-diagram-arrow)" />
+            {showLabel && <text x={route.labelX} y={route.labelY} fontSize="13" fill="#526878" paintOrder="stroke" stroke="#ffffff" strokeWidth="4">{relationship.name}</text>}
           </g>
         })}
       </svg>

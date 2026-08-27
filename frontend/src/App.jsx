@@ -15,7 +15,7 @@ import { DatabaseDiagramViewer } from './components/database/DatabaseDiagramView
 import { DatabaseErdPanel } from './components/database/DatabaseErdPanel'
 import { SqlResultsPane } from './components/database/SqlResultsPane'
 import { TerminalPanel } from './components/terminal/TerminalPanel'
-import { OllamaSettingsPanel, RuntimeDatabasePanel, ServicePortSettingsPanel, SystemStatusSummary } from './components/system/SystemRuntimePanels'
+import { GpuSettingsPanel, OllamaSettingsPanel, RuntimeDatabasePanel, ServicePortSettingsPanel, SystemStatusSummary } from './components/system/SystemRuntimePanels'
 import { WebBrowserWorkspace } from './components/browser/WebBrowserWorkspace'
 import { CodexPanel } from './components/codex/CodexPanel'
 import { CodexSettingsPanel } from './components/codex/CodexSettingsPanel'
@@ -25,8 +25,9 @@ import { parseTerminalServerMessage, serializeTerminalClientMessage, terminalCel
 import { getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isDatabaseDiagramFile, isNotebookFile, isPdfFile, isPresentationFile } from './utils/editor'
 import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSqlCode } from './utils/notebook'
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
+import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.369'
+const AGENTSTUDIO_FRONTEND_VERSION='5.382'
 
 const DebouncedProjectSearchInput=memo(function DebouncedProjectSearchInput({value,onCommit,placeholder='프로젝트 검색...'}){
   const [localValue,setLocalValue]=useState(value||'')
@@ -56,6 +57,45 @@ const localIsoDate = () => {
 }
 const localIsoMonth = () => localIsoDate().slice(0,7)
 const normalizeProjectRelativePath=(value='')=>String(value||'').replace(/\\/g,'/').replace(/^\/+/, '')
+const TEXT_EDITOR_BOOKMARK_STORAGE_PREFIX='theanova.agentstudio.text-editor.line-bookmarks::'
+const TEXT_EDITOR_BOOKMARK_CACHE=new Map()
+const normalizeTextEditorLineBookmarks=(value)=>Array.from(new Set((Array.isArray(value)?value:[])
+  .map(item=>Number(item))
+  .filter(item=>Number.isInteger(item)&&item>=1)))
+  .sort((a,b)=>a-b)
+const textEditorBookmarkStorageKey=(projectRoot='',filePath='')=>{
+  const path=normalizeProjectRelativePath(filePath)
+  if(!path) return ''
+  const normalizedRoot=String(projectRoot||'').trim().replace(/\\/g,'/').replace(/\/+$/,'')
+  return `${normalizedRoot}::${path}`
+}
+const loadTextEditorLineBookmarks=(key='')=>{
+  if(!key) return []
+  if(TEXT_EDITOR_BOOKMARK_CACHE.has(key)) return TEXT_EDITOR_BOOKMARK_CACHE.get(key)
+  let value=[]
+  try{
+    const raw=window.localStorage.getItem(`${TEXT_EDITOR_BOOKMARK_STORAGE_PREFIX}${key}`)
+    if(raw) value=normalizeTextEditorLineBookmarks(JSON.parse(raw))
+  }catch{}
+  TEXT_EDITOR_BOOKMARK_CACHE.set(key,value)
+  return value
+}
+const storeTextEditorLineBookmarks=(key='',bookmarks=[])=>{
+  const value=normalizeTextEditorLineBookmarks(bookmarks)
+  if(!key) return value
+  TEXT_EDITOR_BOOKMARK_CACHE.set(key,value)
+  try{window.localStorage.setItem(`${TEXT_EDITOR_BOOKMARK_STORAGE_PREFIX}${key}`,JSON.stringify(value))}catch{}
+  return value
+}
+const isBookmarkableTextEditorFile=(filePath='')=>{
+  const path=String(filePath||'').trim()
+  return !!path
+    &&!isNotebookFile(path)
+    &&!isPdfFile(path)
+    &&!isPresentationFile(path)
+    &&!isDatabaseDiagramFile(path)
+    &&!isBinaryPreviewFile(path)
+}
 const sanitizeInterviewDisplayText=(value='')=>{
   let text=String(value||'')
   // v5.334 and older stored attachment labels in every user message. They are
@@ -412,6 +452,8 @@ function SystemPage() {
   const [ollamaInstall,setOllamaInstall]=useState(null)
   const [ollamaRuntime,setOllamaRuntime]=useState(null)
   const [ollamaRuntimeBusy,setOllamaRuntimeBusy]=useState(false)
+  const [gpuRuntime,setGpuRuntime]=useState(null)
+  const [gpuRuntimeBusy,setGpuRuntimeBusy]=useState(false)
   const [portInfo,setPortInfo]=useState(null)
   const [portCheckBusy,setPortCheckBusy]=useState(false)
   const [machineName,setMachineName]=useState('')
@@ -439,6 +481,12 @@ function SystemPage() {
         setOllamaRuntime(await api('/settings/ollama/runtime/status'))
       }catch{
         setOllamaRuntime(null)
+      }
+
+      try{
+        setGpuRuntime(await api('/settings/gpu/runtime/status'))
+      }catch{
+        setGpuRuntime(null)
       }
 
       try{
@@ -897,6 +945,58 @@ function SystemPage() {
     }
   }
 
+
+  const refreshGpuRuntime=async()=>{
+    try{
+      const runtime=await api('/settings/gpu/runtime/status')
+      setGpuRuntime(runtime)
+      return runtime
+    }catch(e){
+      setGpuRuntime({ok:false,available:false,enabled:false,message:String(e)})
+      return null
+    }
+  }
+
+  const startGpuRuntime=async()=>{
+    setGpuRuntimeBusy(true)
+    setMessage('')
+    setError('')
+    try{
+      const result=await api('/settings/gpu/runtime/start',{method:'POST'})
+      setGpuRuntime(result)
+      if(result?.ok){
+        setMessage(result.message||'GPU 가속을 시작했습니다.')
+        setTimeout(()=>{ refreshGpuRuntime(); refreshOllamaRuntime() },300)
+      }else{
+        setError(result?.message||'GPU 가속 시작에 실패했습니다.')
+      }
+    }catch(e){
+      setError('GPU 가속 시작 실패: '+String(e))
+    }finally{
+      setGpuRuntimeBusy(false)
+    }
+  }
+
+  const stopGpuRuntime=async()=>{
+    if(!window.confirm('AgentStudio GPU 가속을 정지하시겠습니까?\n\nAgentStudio 관리 Ollama와 생성 Agent 테스트는 가능한 경우 CPU 모드로 실행됩니다.')) return
+    setGpuRuntimeBusy(true)
+    setMessage('')
+    setError('')
+    try{
+      const result=await api('/settings/gpu/runtime/stop',{method:'POST'})
+      setGpuRuntime(result)
+      if(result?.ok){
+        setMessage(result.message||'GPU 가속을 정지했습니다.')
+        setTimeout(()=>{ refreshGpuRuntime(); refreshOllamaRuntime() },300)
+      }else{
+        setError(result?.message||'GPU 가속 정지에 실패했습니다.')
+      }
+    }catch(e){
+      setError('GPU 가속 정지 실패: '+String(e))
+    }finally{
+      setGpuRuntimeBusy(false)
+    }
+  }
 
   const refreshOllamaRuntime=async()=>{
     try{
@@ -1409,6 +1509,14 @@ function SystemPage() {
         busy={busy}
         onEnabledChange={enabled=>setValue('CODEX_ENABLED',enabled?'true':'false')}
         onSave={()=>saveGroup(['CODEX_ENABLED'])}
+      />
+
+      <GpuSettingsPanel
+        busy={gpuRuntimeBusy}
+        runtime={gpuRuntime}
+        onStart={startGpuRuntime}
+        onStop={stopGpuRuntime}
+        onRefresh={refreshGpuRuntime}
       />
 
       <OllamaSettingsPanel
@@ -2128,6 +2236,8 @@ function IDE() {
   const weatherRequestTokenRef=useRef(0)
   const [showPathSettings,setShowPathSettings]=useState(false)
   const [usageOpen,setUsageOpen]=useState(false)
+  const [commandPaletteOpen,setCommandPaletteOpen]=useState(false)
+  const [agentWorkCenterOpen,setAgentWorkCenterOpen]=useState(false)
   const [builderStarted,setBuilderStarted]=useState(false)
   const [defaultPaths,setDefaultPaths]=useState({})
 
@@ -2247,6 +2357,7 @@ function IDE() {
   const [selected,setSelected]=useState('')
   const [openEditorFiles,setOpenEditorFiles]=useState([])
   const [editorFileContents,setEditorFileContents]=useState({})
+  const editorFileContentsRef=useRef({})
   const [editorFileDirty,setEditorFileDirty]=useState({})
   const [editorFileDiskMeta,setEditorFileDiskMeta]=useState({})
   const editorFileDiskMetaRef=useRef({})
@@ -2292,6 +2403,8 @@ function IDE() {
   const [focusOwner,setFocusOwner]=useState('editor')
   const focusOwnerRef=useRef('editor')
   const editorInstanceRef=useRef(null)
+  const editorBookmarkDecorationIdsRef=useRef([])
+  const [editorBookmarkRevision,setEditorBookmarkRevision]=useState(0)
   const notebookEditorControllerRef=useRef(null)
   const editorTabsScrollRef=useRef(null)
   const [editorTextSearchOpen,setEditorTextSearchOpen]=useState(false)
@@ -2302,6 +2415,8 @@ function IDE() {
   const [editorTextSearchError,setEditorTextSearchError]=useState('')
   const [editorTextSearchMeta,setEditorTextSearchMeta]=useState(null)
   const editorTextSearchInputRef=useRef(null)
+  const editorTextSearchRequestRef=useRef(0)
+  const [pdfSearchNavigation,setPdfSearchNavigation]=useState({})
 
   const setFocusOwnerSafe=(owner)=>{
     focusOwnerRef.current=owner
@@ -2938,7 +3053,25 @@ function IDE() {
     }
   });return()=>ws.close()},[])
 
-  // v5.369: release browser-side long-lived resources when the SPA unloads.
+
+  // v5.371 Global Command Palette: keep typing inside the palette local to the
+  // overlay component while Ctrl+K only toggles the lightweight parent flag.
+  useEffect(()=>{
+    const handleGlobalCommandShortcut=(event)=>{
+      if((event.ctrlKey||event.metaKey)&&String(event.key||'').toLowerCase()==='k'){
+        event.preventDefault()
+        setCommandPaletteOpen(true)
+      }
+      if(event.key==='Escape'){
+        setCommandPaletteOpen(false)
+        setAgentWorkCenterOpen(false)
+      }
+    }
+    window.addEventListener('keydown',handleGlobalCommandShortcut)
+    return()=>window.removeEventListener('keydown',handleGlobalCommandShortcut)
+  },[])
+
+  // v5.370: release browser-side long-lived resources when the SPA unloads.
   useEffect(()=>()=>{
     for(const socket of Object.values(terminalSocketsRef.current||{})){
       try{ socket?.close?.(1000,'app_unmount') }catch{}
@@ -3012,7 +3145,7 @@ function IDE() {
   ])
 
   useEffect(()=>{
-    // v5.369: Resume candidates come from both browser localStorage and the
+    // v5.370: Resume candidates come from both browser localStorage and the
     // project folder. A failed build must be recoverable after a browser restart,
     // another PC session, or localStorage cleanup.
     const projectPath=String(newAgentProjectRoot||'').trim()
@@ -3276,6 +3409,93 @@ function IDE() {
       workspaceRootRef.current=nextRoot
     }
   },[activeWorkspaceRoot])
+
+  const editorBookmarkKeyForPath=(filePath='')=>{
+    const path=normalizeProjectRelativePath(filePath)
+    if(!path) return ''
+    const projectRoot=String(
+      editorFileRootRef.current?.[filePath]
+      ||editorFileRootRef.current?.[path]
+      ||fileTreeRootRef.current
+      ||workspaceRootRef.current
+      ||activeWorkspaceRoot
+      ||root
+      ||newAgentProjectRoot
+      ||''
+    ).trim()
+    return textEditorBookmarkStorageKey(projectRoot,path)
+  }
+  const getEditorBookmarksForPath=(filePath='')=>{
+    if(!isBookmarkableTextEditorFile(filePath)) return []
+    return loadTextEditorLineBookmarks(editorBookmarkKeyForPath(filePath))
+  }
+  const applyEditorBookmarkDecorations=(editor=editorInstanceRef.current,filePath=selectedEditorFileRef.current||selected||'')=>{
+    if(!editor?.deltaDecorations) return
+    const path=normalizeProjectRelativePath(filePath)
+    const model=editor.getModel?.()
+    const maxLine=Math.max(1,Number(model?.getLineCount?.()||1))
+    const bookmarks=isBookmarkableTextEditorFile(path)?getEditorBookmarksForPath(path):[]
+    const decorations=bookmarks
+      .filter(line=>line<=maxLine)
+      .map(line=>({
+        range:{startLineNumber:line,startColumn:1,endLineNumber:line,endColumn:1},
+        options:{
+          isWholeLine:true,
+          glyphMarginClassName:'editor-line-bookmark-glyph',
+          glyphMarginHoverMessage:{value:`북마크 · Line ${line}`},
+        },
+      }))
+    editorBookmarkDecorationIdsRef.current=editor.deltaDecorations(editorBookmarkDecorationIdsRef.current||[],decorations)
+  }
+  const toggleEditorLineBookmark=(filePath=selectedEditorFileRef.current||selected||'',lineNumber=null,editor=editorInstanceRef.current)=>{
+    const path=normalizeProjectRelativePath(filePath)
+    if(!isBookmarkableTextEditorFile(path)) return
+    const positionLine=Number(lineNumber||editor?.getPosition?.()?.lineNumber||1)
+    if(!Number.isInteger(positionLine)||positionLine<1) return
+    const key=editorBookmarkKeyForPath(path)
+    const current=loadTextEditorLineBookmarks(key)
+    const exists=current.includes(positionLine)
+    storeTextEditorLineBookmarks(key,exists?current.filter(line=>line!==positionLine):[...current,positionLine])
+    setEditorBookmarkRevision(value=>value+1)
+    window.requestAnimationFrame(()=>applyEditorBookmarkDecorations(editor,path))
+    editor?.setPosition?.({lineNumber:positionLine,column:1})
+    editor?.revealLineInCenter?.(positionLine)
+    editor?.focus?.()
+  }
+  const moveToEditorBookmark=(direction=1)=>{
+    const editor=editorInstanceRef.current
+    const path=normalizeProjectRelativePath(selectedEditorFileRef.current||selected||'')
+    const bookmarks=getEditorBookmarksForPath(path)
+    if(!editor||!bookmarks.length) return
+    const currentLine=Math.max(0,Number(editor.getPosition?.()?.lineNumber||0))
+    let target
+    if(direction>0){
+      target=bookmarks.find(line=>line>currentLine)??bookmarks[0]
+    }else{
+      target=[...bookmarks].reverse().find(line=>line<currentLine)??bookmarks[bookmarks.length-1]
+    }
+    editor.revealLineInCenter?.(target)
+    editor.setPosition?.({lineNumber:target,column:1})
+    editor.focus?.()
+  }
+  const clearEditorBookmarks=()=>{
+    const path=normalizeProjectRelativePath(selectedEditorFileRef.current||selected||'')
+    const key=editorBookmarkKeyForPath(path)
+    const current=loadTextEditorLineBookmarks(key)
+    if(!current.length) return
+    if(!window.confirm(`현재 파일의 북마크 ${current.length}개를 모두 해제하시겠습니까?`)) return
+    storeTextEditorLineBookmarks(key,[])
+    setEditorBookmarkRevision(value=>value+1)
+    window.requestAnimationFrame(()=>applyEditorBookmarkDecorations(editorInstanceRef.current,path))
+  }
+  const activeTextEditorBookmarks=isBookmarkableTextEditorFile(selected)?getEditorBookmarksForPath(selected):[]
+
+  useEffect(()=>{
+    if(!editorInstanceRef.current) return
+    const timer=window.setTimeout(()=>applyEditorBookmarkDecorations(editorInstanceRef.current,selected),0)
+    return()=>window.clearTimeout(timer)
+  },[selected,editorBookmarkRevision])
+
   const workspaceSummary = loadedProjectAnalysis?.summary || currentProject?.description || '프로젝트 분석 정보가 아직 없습니다.'
   const isSqlFile=!!selected?.toLowerCase?.().endsWith('.sql')
 
@@ -7105,6 +7325,7 @@ function IDE() {
   }
 
   useEffect(()=>{ openEditorFilesRef.current=openEditorFiles },[openEditorFiles])
+  useEffect(()=>{ editorFileContentsRef.current=editorFileContents },[editorFileContents])
   useEffect(()=>{ editorFileDirtyRef.current=editorFileDirty },[editorFileDirty])
   useEffect(()=>{ editorFileDiskMetaRef.current=editorFileDiskMeta },[editorFileDiskMeta])
   useEffect(()=>{ selectedEditorFileRef.current=selected },[selected])
@@ -7202,41 +7423,64 @@ function IDE() {
   }
 
   const saveFile=async()=>{
-    if(selected&&(fileLoadingPath===selected||(!isBinaryPreviewFile(selected)&&!Object.prototype.hasOwnProperty.call(editorFileContents,selected)))){
+    // v5.372: Ctrl+S saves the actual active editor file even when the top
+    // project selector is empty. Notebook/file-tree tabs retain their own root.
+    const selectedPath=normalizeProjectRelativePath(
+      selectedEditorFileRef.current||selected||''
+    )
+
+    const hasKnownContent=
+      Object.prototype.hasOwnProperty.call(editorFileContentsRef.current||{},selectedPath)
+      ||Object.prototype.hasOwnProperty.call(editorFileContents,selectedPath)
+    if(selectedPath&&(fileLoadingPath===selectedPath||(!isBinaryPreviewFile(selectedPath)&&!hasKnownContent))){
       setFileSaveStatus('저장 대기 · 파일 로딩 중')
       setTerminal(prev=>(prev||'')+'\n[저장 대기] 파일 내용을 디스크에서 불러오는 중에는 저장하지 않습니다. 로드 완료 후 다시 저장하세요.\n')
       return
     }
-    if(editorLoadErrors[selected]){
+    if(editorLoadErrors[selectedPath]){
       setFileSaveStatus('저장 차단 · 파일 로드 실패')
       setTerminal(prev=>(prev||'')+'\n[저장 차단] 파일 로드가 실패한 탭은 디스크에 저장하지 않습니다. 먼저 다시 불러오세요.\n')
       return
     }
-    if(isBinaryPreviewFile(selected)){
-      const presentation=isPresentationFile(selected)
+    if(isBinaryPreviewFile(selectedPath)){
+      const presentation=isPresentationFile(selectedPath)
       setFileSaveStatus(presentation?'PowerPoint 읽기 전용':'PDF 읽기 전용')
       setTerminal(prev=>(prev||'')+`\n[${presentation?'PowerPoint':'PDF'}] 바이너리 문서는 미리보기 전용이며 텍스트 저장을 수행하지 않습니다.\n`)
       return
     }
     setFileSaveStatus('저장 중')
-    if(!resolveWorkspaceRoot(editorFileRootRef.current?.[selected]||fileTreeRootRef.current||'') || !selected){
+    const saveRoot=resolveWorkspaceRoot(
+      editorFileRootRef.current?.[selectedPath]
+      ||fileTreeRootRef.current
+      ||workspaceRootRef.current
+      ||''
+    )
+    if(!saveRoot || !selectedPath){
       setFileSaveStatus('저장 실패')
-      setTerminal(prev=>(prev||'')+'\n[저장 실패] 프로젝트와 파일을 먼저 선택하세요.\n')
+      setTerminal(prev=>(prev||'')+'\n[저장 실패] 현재 편집 파일의 프로젝트 경로를 확인할 수 없습니다. 프로젝트 파일 트리에서 파일을 다시 열어 주세요.\n')
       return
     }
 
     try{
       const currentContent=
-        editorFileContents[selected] ?? code ?? ''
+        editorFileContentsRef.current?.[selectedPath]
+        ?? editorFileContents[selectedPath]
+        ?? (selectedPath===selected?code:'')
+        ?? ''
 
       const result=await writeEditorFile(
-        selected,
+        selectedPath,
         currentContent
       )
 
+      editorFileContentsRef.current={
+        ...editorFileContentsRef.current,
+        [selectedPath]:currentContent
+      }
+
       setTerminal(prev=>
         (prev||'')
-        + `\n[저장 완료] ${result?.path||result.fullPath}`
+        + `\n[저장 완료 · Ctrl+S] ${result?.path||result.fullPath}`
         + (result?.bytes!=null?` (${result.bytes} bytes)`:'')
         + '\n'
       )
@@ -7275,9 +7519,10 @@ function IDE() {
 
     for(const path of dirtyPaths){
       const content=
-        path===selected
+        editorFileContentsRef.current?.[path]
+        ?? (path===selected
           ? (editorFileContents[path] ?? code ?? '')
-          : (editorFileContents[path] ?? '')
+          : (editorFileContents[path] ?? ''))
 
       try{
         const result=await writeEditorFile(path,content)
@@ -7309,7 +7554,7 @@ function IDE() {
   }
 
   const saveAllDirtyFiles=async()=>{
-    if(!resolveWorkspaceRoot(fileTreeRootRef.current||'')){
+    if(!resolveWorkspaceRoot(fileTreeRootRef.current||workspaceRootRef.current||'')){
       setFileSaveStatus('저장 실패')
       setTerminal(prev=>(prev||'')+'\n[모두 저장 실패] 프로젝트를 먼저 선택하세요.\n')
       return
@@ -7353,25 +7598,26 @@ function IDE() {
       if(e.repeat) return
 
       // Ctrl+Shift+S: 코드 작업공간에서 수정된 모든 열린 파일 저장.
+      // 상단 Project selector의 root 값에 의존하지 않습니다.
       if(e.shiftKey){
         if(
           screen==='WORKSPACE'
           && workspaceTab==='CODE'
-          && root
         ){
           saveAllDirtyFiles()
         }
         return
       }
 
-      // Ctrl+S: 코드 작업공간에서 현재 열린 파일을 저장합니다.
-      // focusOwner에 의존하지 않으므로 .ipynb Notebook Cell에 포커스가
-      // 있어도 현재 직렬화된 Notebook 문서가 정상 저장됩니다.
+      // Ctrl+S: 현재 열린 파일 저장. 상단 프로젝트 선택이 비어 있어도
+      // editor/file-tree root가 있으면 Notebook/Source/SQL을 저장합니다.
+      const shortcutPath=normalizeProjectRelativePath(
+        selectedEditorFileRef.current||selected||''
+      )
       if(
         screen==='WORKSPACE'
         && workspaceTab==='CODE'
-        && root
-        && selected
+        && shortcutPath
       ){
         saveFile()
       }
@@ -7956,14 +8202,27 @@ function IDE() {
 
     setCode(next)
 
-    queueMicrotask(()=>{
-      if(focusOwnerRef.current==='editor'){
-        try{ editorInstanceRef.current?.focus() }catch{}
-      }
-    })
+    // Notebook cells own independent Monaco models. Refocusing the global
+    // source-editor instance after every serialized .ipynb change can steal
+    // focus/caret from the active cell and make the caret jump to the end.
+    // Keep the historical refocus behavior only for the single-file editor.
+    if(!isNotebookFile(selected)){
+      queueMicrotask(()=>{
+        if(focusOwnerRef.current==='editor'){
+          try{ editorInstanceRef.current?.focus() }catch{}
+        }
+      })
+    }
     setFileSaveStatus('')
 
     if(selected){
+      // Keep an immediate mirror for Ctrl+S. React state may still be queued
+      // when Ctrl+S is pressed immediately after the last Notebook keystroke.
+      editorFileContentsRef.current={
+        ...editorFileContentsRef.current,
+        [selected]:next
+      }
+
       setEditorFileContents(prev=>({
         ...prev,
         [selected]:next
@@ -9567,6 +9826,60 @@ function IDE() {
     }
   }
 
+  const ensureGpuAccelerationForPhase=async({request='',phase='development',actionLabel='작업'}={})=>{
+    let recommendation=null
+    try{
+      recommendation=await api('/settings/gpu/recommendation',{
+        method:'POST',
+        body:JSON.stringify({
+          request:String(request||''),
+          confirmed_requirements:confirmedInterviewRequirements||{},
+          ai_mode:String(aiRuntimeStatus?.mode||''),
+          phase
+        })
+      })
+    }catch(_){
+      // GPU 상태 확인 실패 때문에 일반 CPU 작업까지 차단하지 않습니다.
+      return true
+    }
+
+    if(!recommendation?.recommended) return true
+    const gpu=recommendation?.gpu||{}
+    if(gpu?.enabled) return true
+
+    const reasons=(recommendation?.reasons||[]).filter(Boolean)
+    const reasonText=reasons.length?`\n\n권장 사유\n- ${reasons.join('\n- ')}`:''
+
+    if(!gpu?.available){
+      return window.confirm(
+        `${actionLabel}은 GPU 가속 사용을 권장하는 작업입니다.${reasonText}\n\n`+
+        '현재 지원되는 NVIDIA GPU를 감지하지 못했습니다.\nCPU 모드로 계속 진행하시겠습니까?'
+      )
+    }
+
+    const accepted=window.confirm(
+      `${actionLabel}은 GPU 가속 사용을 권장하는 작업입니다.${reasonText}\n\n`+
+      '[확인]을 누르면 AgentStudio GPU 가속을 시작한 뒤 계속 진행합니다.\n'+
+      '[취소]를 누르면 현재 작업을 시작하지 않습니다.'
+    )
+    if(!accepted) return false
+
+    setAgentBuildMessage('GPU 가속을 시작하고 실행 환경을 준비하고 있습니다...')
+    try{
+      const started=await api('/settings/gpu/runtime/start',{method:'POST'})
+      if(!started?.ok){
+        window.alert(`GPU 가속을 시작하지 못했습니다.\n${started?.message||'GPU 상태를 확인해 주세요.'}`)
+        return false
+      }
+      const ollamaMessage=started?.ollama?.message?` · ${started.ollama.message}`:''
+      setAgentBuildMessage(`GPU 가속 준비 완료${ollamaMessage}`)
+      return true
+    }catch(e){
+      window.alert(`GPU 가속 시작 실패: ${String(e)}`)
+      return false
+    }
+  }
+
   const cancelAgentDevelopment=async()=>{
     const jobId=activeWorkflowJobId
     if(!jobId) return
@@ -9624,6 +9937,15 @@ function IDE() {
 
     if(!projectRoot){
       setAgentBuildMessage('프로젝트 경로가 없습니다.')
+      return
+    }
+
+    if(!(await ensureGpuAccelerationForPhase({
+      request:request||buildRequirementRequestFromCollectedInfo(),
+      phase:'development',
+      actionLabel:redevelopment?'재개발 시작':'개발 시작'
+    }))){
+      setAgentBuildMessage('GPU 권장 안내에서 작업이 취소되었습니다.')
       return
     }
 
@@ -10185,6 +10507,11 @@ function IDE() {
       setScreen('WORKSPACE')
       setWorkspaceTab('RUN')
     }finally{
+      // v5.377: Agent Factory가 성공/실패/취소로 종료되면 전역 실행 정지 버튼의
+      // 원인이 되는 activeWorkflowJobId도 반드시 해제합니다. 완료된 Job ID를
+      // 남겨두면 hasActiveExecution이 true로 유지되어 작업이 끝난 뒤에도
+      // 상단 '실행 정지' 버튼이 계속 표시될 수 있습니다.
+      setActiveWorkflowJobId('')
       setAgentBuildBusy(false)
     }
   }
@@ -10199,6 +10526,11 @@ function IDE() {
 
     if(!request){
       setTargetWorkflowError('에이전트 개발 요청 내용을 입력하세요.')
+      return false
+    }
+
+    if(!(await ensureGpuAccelerationForPhase({request,phase:'design',actionLabel:'설계 검토'}))){
+      setTargetWorkflowError('GPU 권장 안내에서 설계 검토가 취소되었습니다.')
       return false
     }
 
@@ -11355,6 +11687,8 @@ function IDE() {
   const stopPythonExecution=async()=>{
     const state=pythonExecutionState||{}
     if(!state.busy||!state.root||!state.sessionId) return null
+    const runtimeSessionId=state.runtimeSessionId||state.sessionId
+    const outputTerminalId=state.terminalSessionId||state.sessionId
     pythonStopRequestedRef.current=true
     try{
       if(state.kind==='sql'){
@@ -11363,15 +11697,15 @@ function IDE() {
           method:'POST',
           body:JSON.stringify({root:state.root,connection_id:sqlProfile.connection_id||''})
         })
-        const term=xtermInstancesRef.current[state.sessionId]
+        const term=xtermInstancesRef.current[outputTerminalId]
         term?.write?.('\r\n\x1b[33m[실행 정지] Notebook SQL 실행 중지 요청을 보냈습니다.\x1b[0m\r\n')
         return result
       }
       const result=await api('/python/stop',{
         method:'POST',
-        body:JSON.stringify({root:state.root,session_id:state.sessionId})
+        body:JSON.stringify({root:state.root,session_id:runtimeSessionId})
       })
-      const term=xtermInstancesRef.current[state.sessionId]
+      const term=xtermInstancesRef.current[outputTerminalId]
       term?.write?.('\r\n\x1b[33m[실행 정지] Python/Notebook 실행 중지 요청을 보냈습니다. 다음 실행은 새 Python 세션에서 시작됩니다.\x1b[0m\r\n')
       return result
     }catch(e){
@@ -11384,9 +11718,15 @@ function IDE() {
     const filePath=normalizeProjectRelativePath(selectedEditorFileRef.current||selected||'')
     if(!filePath.toLowerCase().endsWith('.py')) return
 
-    const workspaceRoot=activeWorkspaceRoot
+    const workspaceRoot=resolveWorkspaceRoot(
+      editorFileRootRef.current?.[filePath]
+      ||editorFileRootRef.current?.[selectedEditorFileRef.current]
+      ||fileTreeRootRef.current
+      ||''
+    )
     if(!workspaceRoot){
-      window.alert('Python 파일을 실행할 프로젝트 경로가 없습니다.')
+      setProjectSwitcherOpen(true)
+      window.alert('Python 파일을 실행할 프로젝트 경로를 확인하지 못했습니다. 상단 프로젝트 선택에서 프로젝트를 지정해 주세요.')
       return
     }
 
@@ -11514,11 +11854,18 @@ function IDE() {
   }
 
 
-  const executeNotebookPythonCode=async({pythonCode,filePath,cellIndex=0,mode='selection',selectionOnly=false}={})=>{
+  const executeNotebookPythonCode=async({pythonCode,filePath,projectRoot='',cellIndex=0,mode='selection',selectionOnly=false}={})=>{
     const normalizedPath=normalizeProjectRelativePath(filePath||selectedEditorFileRef.current||selected||'')
-    const workspaceRoot=activeWorkspaceRoot
+    const workspaceRoot=resolveWorkspaceRoot(
+      projectRoot
+      ||editorFileRootRef.current?.[normalizedPath]
+      ||editorFileRootRef.current?.[selectedEditorFileRef.current]
+      ||fileTreeRootRef.current
+      ||''
+    )
     if(!workspaceRoot){
-      window.alert('Notebook을 실행할 프로젝트 경로가 없습니다.')
+      setProjectSwitcherOpen(true)
+      window.alert('Notebook이 열린 프로젝트 경로를 확인하지 못했습니다. 상단 프로젝트 선택에서 프로젝트를 지정하거나 프로젝트 파일 트리에서 Notebook을 다시 열어 주세요.')
       return null
     }
     if(!String(pythonCode||'').trim()){
@@ -11544,9 +11891,18 @@ function IDE() {
     }
 
     const terminalSessionId=targetId||'python-default'
+    const runtimeSessionId=`notebook::${normalizedPath.toLocaleLowerCase()}`
     const sourceLabel=`Notebook ${sqlMode?'SQL':(selectionOnly?'선택':'셀')} 실행 · ${normalizedPath} · Cell ${Number(cellIndex)+1}`
     pythonStopRequestedRef.current=false
-    setPythonExecutionState({busy:true,root:workspaceRoot,sessionId:terminalSessionId,label:sourceLabel,kind:sqlMode?'sql':'python'})
+    setPythonExecutionState({
+      busy:true,
+      root:workspaceRoot,
+      sessionId:runtimeSessionId,
+      runtimeSessionId,
+      terminalSessionId,
+      label:sourceLabel,
+      kind:sqlMode?'sql':'python'
+    })
 
     try{
       term.write(`\r\n\x1b[36m[${sourceLabel}]\x1b[0m\r\n`)
@@ -11602,7 +11958,7 @@ function IDE() {
           relative_path:normalizedPath,
           code:executableCode,
           mode:mode==='full'?'full':'selection',
-          session_id:terminalSessionId,
+          session_id:runtimeSessionId,
           capture_last_expression:true,
           notebook_mode:true,
           cell_index:Number(cellIndex),
@@ -11640,7 +11996,7 @@ function IDE() {
         term.write('\x1b[90m(출력 없음)\x1b[0m\r\n')
       }
 
-      term.write(`\x1b[90mPython: ${String(result?.interpreter||'').replace(/\x1b/g,'')} · Notebook 세션: 유지\x1b[0m\r\n`)
+      term.write(`\x1b[90mPython: ${String(result?.interpreter||'').replace(/\x1b/g,'')} · Notebook 세션: ${runtimeSessionId} · Root: ${workspaceRoot}\x1b[0m\r\n`)
       term.scrollToBottom()
       setActiveTerminalId(targetId)
       setTerminal(prev=>(prev||'')+`\n[${sourceLabel}] ${result?.ok?'완료':'실패'}\n`)
@@ -11655,7 +12011,7 @@ function IDE() {
       term.scrollToBottom()
       throw e
     }finally{
-      setPythonExecutionState(prev=>prev.sessionId===terminalSessionId?{busy:false,root:'',sessionId:'',label:'',kind:''}:prev)
+      setPythonExecutionState(prev=>(prev.runtimeSessionId===runtimeSessionId||prev.sessionId===runtimeSessionId)?{busy:false,root:'',sessionId:'',runtimeSessionId:'',terminalSessionId:'',label:'',kind:''}:prev)
       pythonStopRequestedRef.current=false
     }
   }
@@ -11677,9 +12033,15 @@ function IDE() {
     const filePath=normalizeProjectRelativePath(selectedEditorFileRef.current||selected||'')
     if(!filePath.toLowerCase().endsWith('.cmd')||cmdExecution?.busy) return
 
-    const workspaceRoot=activeWorkspaceRoot
+    const workspaceRoot=resolveWorkspaceRoot(
+      editorFileRootRef.current?.[filePath]
+      ||editorFileRootRef.current?.[selectedEditorFileRef.current]
+      ||fileTreeRootRef.current
+      ||''
+    )
     if(!workspaceRoot){
-      window.alert('CMD 파일을 실행할 프로젝트 경로가 없습니다.')
+      setProjectSwitcherOpen(true)
+      window.alert('CMD 파일을 실행할 프로젝트 경로를 확인하지 못했습니다. 상단 프로젝트 선택에서 프로젝트를 지정해 주세요.')
       return
     }
 
@@ -12263,6 +12625,7 @@ function IDE() {
   }
 
   const runEditorTextSearch=async()=>{
+    const requestId=++editorTextSearchRequestRef.current
     const query=String(editorTextSearchQuery||'').trim()
     if(!query){
       setEditorTextSearchResults([])
@@ -12279,7 +12642,40 @@ function IDE() {
           setEditorTextSearchError('현재 열린 파일이 없습니다.')
           return
         }
-        if(isBinaryPreviewFile(selected)||isPdfFile(selected)||isPresentationFile(selected)||isDatabaseDiagramFile(selected)){
+        if(isPdfFile(selected)){
+          const pdfKey=normalizeProjectRelativePath(selected)
+          setPdfSearchNavigation(prev=>{
+            if(!prev?.[pdfKey]) return prev
+            const next={...prev}
+            delete next[pdfKey]
+            return next
+          })
+          const workspaceRoot=resolveWorkspaceRoot(editorFileRootRef.current?.[selected]||fileTreeRootRef.current||'')
+          if(!workspaceRoot){
+            setEditorTextSearchResults([])
+            setEditorTextSearchError('PDF를 검색할 프로젝트 root를 확인할 수 없습니다.')
+            return
+          }
+          const response=await api('/files/search-text',{
+            method:'POST',
+            body:JSON.stringify({
+              root:workspaceRoot,
+              relative_path:normalizeProjectRelativePath(selected),
+              query,
+              max_results:300,
+              max_files:1
+            })
+          })
+          if(requestId!==editorTextSearchRequestRef.current) return
+          const results=Array.isArray(response?.results)?response.results:[]
+          setEditorTextSearchResults(results)
+          setEditorTextSearchMeta(response||null)
+          if(response?.document_type==='pdf' && Number(response?.pdf_text_pages||0)===0){
+            setEditorTextSearchError('이 PDF에서 검색 가능한 텍스트를 추출하지 못했습니다. 이미지로만 된 PDF는 OCR이 필요할 수 있습니다.')
+          }
+          return
+        }
+        if(isBinaryPreviewFile(selected)||isPresentationFile(selected)||isDatabaseDiagramFile(selected)){
           setEditorTextSearchResults([])
           setEditorTextSearchError('현재 파일 형식은 텍스트 찾기를 지원하지 않습니다.')
           return
@@ -12305,14 +12701,17 @@ function IDE() {
           max_files:10000
         })
       })
+      if(requestId!==editorTextSearchRequestRef.current) return
       setEditorTextSearchResults(Array.isArray(response?.results)?response.results:[])
       setEditorTextSearchMeta(response||null)
     }catch(e){
-      setEditorTextSearchResults([])
-      setEditorTextSearchMeta(null)
-      setEditorTextSearchError(String(e?.message||e))
+      if(requestId===editorTextSearchRequestRef.current){
+        setEditorTextSearchResults([])
+        setEditorTextSearchMeta(null)
+        setEditorTextSearchError(String(e?.message||e))
+      }
     }finally{
-      setEditorTextSearchBusy(false)
+      if(requestId===editorTextSearchRequestRef.current) setEditorTextSearchBusy(false)
     }
   }
 
@@ -12324,6 +12723,20 @@ function IDE() {
       try{ await openFile(path,workspaceRoot) }catch{return}
     }
     const reveal=()=>{
+      if(isPdfFile(path) && Number(result?.page_number||0)>0){
+        const key=normalizeProjectRelativePath(path)
+        setPdfSearchNavigation(prev=>({
+          ...prev,
+          [key]:{
+            page:Number(result.page_number),
+            query:String(editorTextSearchQuery||''),
+            snippet:String(result?.match_line||result?.snippet||''),
+            matchId:String(result?.match_id||''),
+            nonce:Date.now()
+          }
+        }))
+        return true
+      }
       if(Number.isInteger(result?.cell_index) && notebookEditorControllerRef.current?.revealSearchMatch){
         notebookEditorControllerRef.current.revealSearchMatch(
           Number(result.cell_index),
@@ -14948,6 +15361,22 @@ function IDE() {
               >
                 ⌕ 찾기
               </button>
+              {isBookmarkableTextEditorFile(selected)&&!editorLoadErrors[selected]&&
+                <div className="editor-bookmark-toolbar" aria-label="현재 텍스트 파일 북마크">
+                  <button
+                    type="button"
+                    className="powershell-run-button editor-bookmark-toggle-button"
+                    title="현재 커서 줄에 북마크 추가/해제 · 코드 왼쪽 파란 북마크 여백을 클릭해도 됩니다."
+                    onClick={()=>toggleEditorLineBookmark()}
+                  >
+                    🔖 현재 줄
+                  </button>
+                  <button type="button" disabled={!activeTextEditorBookmarks.length} title="이전 북마크로 이동" onClick={()=>moveToEditorBookmark(-1)}>◀</button>
+                  <span className="editor-bookmark-count" title="현재 파일에 저장된 줄 북마크 수"><i aria-hidden="true" />{activeTextEditorBookmarks.length}</span>
+                  <button type="button" disabled={!activeTextEditorBookmarks.length} title="다음 북마크로 이동" onClick={()=>moveToEditorBookmark(1)}>▶</button>
+                  {activeTextEditorBookmarks.length>0&&<button type="button" className="editor-bookmark-clear-button" title="현재 파일의 북마크 모두 해제" onClick={clearEditorBookmarks}>해제</button>}
+                </div>
+              }
               {selected?.toLowerCase?.().endsWith('.ps1')&&
                 <div className="powershell-editor-actions">
                   <button
@@ -15084,6 +15513,9 @@ function IDE() {
               <strong>{editorTextSearchResults.length}개 결과</strong>
               {editorTextSearchScope==='PROJECT'&&<span> · 파일 {Number(editorTextSearchMeta?.files_scanned||0)}개 검색</span>}
               {editorTextSearchMeta?.live_buffer&&<span> · 저장 전 편집 내용 포함</span>}
+              {editorTextSearchMeta?.document_type==='pdf'&&<span> · PDF {Number(editorTextSearchMeta?.pdf_pages_scanned||0)}쪽 검색</span>}
+              {editorTextSearchMeta?.document_type==='pdf'&&<span> · 텍스트 {Number(editorTextSearchMeta?.pdf_text_pages||0)}쪽 추출</span>}
+              {editorTextSearchMeta?.document_type==='pdf'&&Number(editorTextSearchMeta?.pdf_duplicate_matches_removed||0)>0&&<span> · 중복 {Number(editorTextSearchMeta.pdf_duplicate_matches_removed)}개 정리</span>}
               {Number(editorTextSearchMeta?.skipped_large||0)>0&&<span> · 큰 파일 {Number(editorTextSearchMeta.skipped_large)}개 제외</span>}
               {Number(editorTextSearchMeta?.skipped_binary||0)>0&&<span> · 바이너리 {Number(editorTextSearchMeta.skipped_binary)}개 제외</span>}
               {editorTextSearchMeta?.truncated&&<span> · 결과 상한에 도달</span>}
@@ -15096,7 +15528,7 @@ function IDE() {
                 onClick={()=>revealEditorTextSearchResult(row)}
               >
                 <span className="path">{row.path}</span>
-                <span className="location">{Number.isInteger(row.cell_index)?`셀 ${Number(row.cell_index)+1} · `:''}L{row.line_number}:C{row.column}</span>
+                <span className="location">{Number(row?.page_number||0)>0?`페이지 ${Number(row.page_number)}${Number(row?.page_match_index||0)>1?` · 페이지 내 결과 ${Number(row.page_match_index)}`:''}`:`${Number.isInteger(row.cell_index)?`셀 ${Number(row.cell_index)+1} · `:''}L${row.line_number}:C${row.column}`}</span>
                 <code>{row.snippet||'(빈 줄)'}</code>
               </button>)}
               {editorTextSearchMeta&&!editorTextSearchBusy&&!editorTextSearchResults.length&&!editorTextSearchError&&<div className="editor-text-search-empty">검색 결과가 없습니다.</div>}
@@ -15236,8 +15668,12 @@ function IDE() {
             : isPdfFile(selected)
               ? <PdfViewer
                   filePath={selected}
-                  projectRoot={resolveWorkspaceRoot()}
+                  projectRoot={resolveWorkspaceRoot(editorFileRootRef.current?.[selected]||fileTreeRootRef.current||'')}
                   revision={pdfPreviewRevision[normalizeProjectRelativePath(selected)]||0}
+                  page={pdfSearchNavigation[normalizeProjectRelativePath(selected)]?.page||0}
+                  searchQuery={pdfSearchNavigation[normalizeProjectRelativePath(selected)]?.query||''}
+                  navigationToken={pdfSearchNavigation[normalizeProjectRelativePath(selected)]?.nonce||0}
+                  matchSnippet={pdfSearchNavigation[normalizeProjectRelativePath(selected)]?.snippet||''}
                 />
               : isPresentationFile(selected)
               ? <PresentationViewer
@@ -15304,6 +15740,22 @@ function IDE() {
                   focusOwnerRef.current='editor'
                 }
               })
+
+              // v5.382: Source/text editors use the same Visual Studio-style
+              // bookmark gutter as Notebook cells. The explicit toolbar button
+              // removes ambiguity, while glyph/line-number gutter clicks remain
+              // available for fast mouse navigation.
+              editor.onMouseDown?.((event)=>{
+                const targetType=Number(event?.target?.type)
+                if(![2,3,4].includes(targetType)) return
+                const lineNumber=Number(event?.target?.position?.lineNumber)
+                if(!Number.isInteger(lineNumber)||lineNumber<1) return
+                toggleEditorLineBookmark(selectedEditorFileRef.current||selected||'',lineNumber,editor)
+              })
+              editor.onDidChangeModel?.(()=>{
+                window.setTimeout(()=>applyEditorBookmarkDecorations(editor,selectedEditorFileRef.current||selected||''),0)
+              })
+              applyEditorBookmarkDecorations(editor,selectedEditorFileRef.current||selected||'')
             }}
             className="main-monaco-editor"
             height="100%"
@@ -15314,12 +15766,21 @@ function IDE() {
             theme="vs-dark"
             options={{
               minimap:{enabled:false},
+              glyphMargin:true,
+              lineNumbers:'on',
+              lineNumbersMinChars:3,
+              lineDecorationsWidth:14,
               fontSize:13,
               automaticLayout:true,
               tabSize:2,
               insertSpaces:true,
               detectIndentation:true,
               formatOnPaste:true,
+              autoClosingBrackets:'never',
+              autoClosingQuotes:'never',
+              autoClosingDelete:'never',
+              autoClosingOvertype:'never',
+              autoSurround:'never',
               bracketPairColorization:{enabled:true},
               guides:{bracketPairs:true},
               suggestOnTriggerCharacters:true,
@@ -17577,6 +18038,37 @@ function IDE() {
   }
 
 
+  const openWorkspaceCommand=(tabName)=>{
+    setScreen('WORKSPACE')
+    setWorkspaceTab(tabName)
+  }
+
+  const commandPaletteCommands=[
+    {id:'new-agent',icon:'✦',category:'프로젝트',title:'신규 Agent 만들기',description:'새 Agent 설계 인터뷰를 시작합니다.',keywords:['새 프로젝트','에이전트 생성'],run:()=>startNewProject()},
+    {id:'projects',icon:'⌘',category:'프로젝트',title:'프로젝트 열기',description:'등록된 프로젝트 목록을 엽니다.',keywords:['불러오기','프로젝트 전환'],run:()=>openProjectList()},
+    {id:'design',icon:'AI',category:'워크스페이스',title:'에이전트 설계 열기',description:'현재 Agent의 요구사항 인터뷰 화면으로 이동합니다.',run:()=>openWorkspaceCommand('DESIGN')},
+    {id:'workflow',icon:'◇',category:'워크스페이스',title:'워크플로우 열기',description:'현재 Agent/프로젝트 Workflow를 엽니다.',run:()=>openWorkspaceCommand('WORKFLOW')},
+    {id:'code',icon:'</>',category:'워크스페이스',title:'코드 편집 열기',description:'프로젝트 코드 편집 Workspace로 이동합니다.',run:()=>openWorkspaceCommand('CODE')},
+    {id:'run',icon:'▶',category:'워크스페이스',title:'실행 결과 열기',description:'Agent 개발/테스트 실행 결과를 확인합니다.',run:()=>openWorkspaceCommand('RUN')},
+    {id:'report',icon:'▤',category:'워크스페이스',title:'분석 리포트 열기',description:'현재 Agent/프로젝트 분석 리포트를 확인합니다.',run:()=>openWorkspaceCommand('REPORT')},
+    {id:'architecture',icon:'▱',category:'워크스페이스',title:'아키텍처 열기',description:'프로젝트 적응형 Architecture를 확인합니다.',run:()=>openWorkspaceCommand('ARCHITECTURE')},
+    {id:'erd',icon:'DB',category:'데이터베이스',title:'DB ERD 열기',description:'현재 Agent/프로젝트 DB ERD를 확인합니다.',keywords:['erd','database'],run:()=>openWorkspaceCommand('DB_ERD')},
+    {id:'llm',icon:'LLM',category:'워크스페이스',title:'LLM 리스트 열기',description:'LLM 사용/호출 목록 화면으로 이동합니다.',run:()=>openWorkspaceCommand('LLM')},
+    {id:'browser',icon:'◎',category:'워크스페이스',title:'웹브라우저 열기',description:'AgentStudio 웹브라우저 Workspace를 엽니다.',run:()=>openWorkspaceCommand('BROWSER')},
+    {id:'find-current',icon:'⌕',category:'찾기',title:'현재 파일에서 텍스트 찾기',description:'현재 편집 파일에서 문자열을 검색합니다.',keywords:['찾기','검색'],run:()=>{openWorkspaceCommand('CODE');openEditorTextSearch('CURRENT')}},
+    {id:'find-project',icon:'⌕',category:'찾기',title:'프로젝트 전체 텍스트 찾기',description:'현재 프로젝트 전체 파일에서 문자열을 검색합니다.',keywords:['프로젝트 검색','전체 찾기'],run:()=>{openWorkspaceCommand('CODE');openEditorTextSearch('PROJECT')}},
+    {id:'agent-ppt',icon:'PPT',category:'리포트',title:'Agent PPT 다운로드',description:'현재 Agent/로드 프로젝트 전체 PPT를 생성합니다.',disabled:!!pptExportBusy,run:()=>exportWorkspacePowerPoint('ALL','AGENT')},
+    {id:'studio-ppt',icon:'PPT',category:'리포트',title:'Studio PPT 다운로드',description:'THEANOVA AgentStudio 전체 PPT를 생성합니다.',disabled:!!pptExportBusy,run:()=>exportWorkspacePowerPoint('ALL','STUDIO')},
+    {id:'ui-layout',icon:'▦',category:'설계',title:'UI Layout 템플릿 선택',description:'신규 Agent의 웹/웹앱 화면 Layout Gallery를 엽니다.',run:()=>{openWorkspaceCommand('DESIGN');setUiLayoutGalleryOpen(true)}},
+    {id:'redevelop',icon:'↻',category:'개발',title:'재개발 시작',description:redevelopmentInfo?.available?`실패 단계 ${redevelopmentInfo?.failure_stage||'-'} 직전부터 재개합니다.`:'재개 가능한 실패 Checkpoint가 없습니다.',disabled:!redevelopmentInfo?.available||agentBuildBusy,run:()=>startAgentDevelopment({redevelopment:true})},
+    {id:'work-center',icon:'♢',category:'AgentStudio',title:'Agent 작업 센터',description:'현재/최근/실패 Agent 작업을 한 곳에서 확인합니다.',run:()=>setAgentWorkCenterOpen(true)},
+    {id:'mcp',icon:'◉',category:'AgentStudio',title:'MCP 관리 열기',description:'등록된 MCP Server와 Tool을 관리합니다.',run:()=>{refreshMcp();setScreen('MCP')}},
+    {id:'tools',icon:'◫',category:'AgentStudio',title:'Tool 관리 열기',description:'AgentStudio Tool 화면으로 이동합니다.',run:()=>setScreen('TOOLS')},
+    {id:'help',icon:'?',category:'AgentStudio',title:'AgentStudio 사용 방법',description:'탭별 사용 방법, 단축키, 실패 복구 가이드를 엽니다.',run:()=>setUsageOpen(true)},
+    {id:'system',icon:'⚙',category:'AgentStudio',title:'시스템 설정 열기',description:'AgentStudio 시스템 관리/설정 화면으로 이동합니다.',run:()=>{location.href='/system'}},
+  ]
+
+
   return <div className="app studio-app ux-app">
     <header className="ux-topbar">
       <div className="brand-block" onClick={()=>setScreen('HOME')} title="THEANOVA AgentStudio 홈">
@@ -17667,7 +18159,13 @@ function IDE() {
           </div>
         }
       </div>
-      <div className="global-search">⌕ 명령어 검색... <kbd>Ctrl + K</kbd></div>
+      <button
+        type="button"
+        className="global-search"
+        onClick={()=>setCommandPaletteOpen(true)}
+        title="전역 명령 팔레트 열기 (Ctrl + K)"
+        aria-label="전역 명령 팔레트 열기"
+      ><span>⌕ 명령어 검색...</span> <kbd>Ctrl + K</kbd></button>
       <div className="topbar-spacer"/>
       <div className="ai-mode-control">
         <button
@@ -17830,8 +18328,8 @@ function IDE() {
           </div>
         }
       </div>
-      <button className="icon-btn">?</button>
-      <button className="icon-btn">♢</button>
+      <button className="icon-btn" onClick={()=>setUsageOpen(true)} title="AgentStudio 사용 방법" aria-label="AgentStudio 사용 방법 열기">?</button>
+      <button className="icon-btn" onClick={()=>setAgentWorkCenterOpen(true)} title="Agent 작업 센터" aria-label="Agent 작업 센터 열기">♢</button>
       <button className="icon-btn" onClick={()=>location.href='/system'}>⚙</button>
       <div className="profile-block"><span className="avatar">A</span><div><strong>admin</strong><small>시스템 관리자</small></div></div>
     </header>
@@ -17880,6 +18378,7 @@ function IDE() {
         <StudioIcon
           active={false}
           onClick={()=>setUsageOpen(true)}
+          title="AgentStudio 사용 방법"
         >?</StudioIcon>
       </aside>
 
@@ -18266,19 +18765,31 @@ function IDE() {
       </div>
     </div>}
 
-    {usageOpen&&<div className="project-list-overlay" onClick={()=>setUsageOpen(false)}>
-      <div className="usage-dialog" onClick={e=>e.stopPropagation()}>
-        <div className="project-list-head"><div><span className="eyebrow">QUICK GUIDE</span><h2>AgentStudio 사용 방법</h2></div><button onClick={()=>setUsageOpen(false)}>✕</button></div>
-        <div className="usage-steps">
-          <div><b>1</b><section><strong>신규 생성</strong><p>만들고 싶은 Agent의 목적부터 설명합니다. AI가 다음 질문을 하나씩 이어갑니다.</p></section></div>
-          <div><b>2</b><section><strong>프로젝트 구성</strong><p>이름과 프로젝트 경로를 정합니다. Cache/Temp/Output/Venv/Models는 필요할 때만 별도 경로를 지정합니다.</p></section></div>
-          <div><b>3</b><section><strong>프로젝트 생성</strong><p>FastAPI가 경로를 만들고 PostgreSQL projects 테이블에 저장합니다.</p></section></div>
-          <div><b>4</b><section><strong>코딩 작업공간</strong><p>파일 편집, AI 코드 수정, Terminal, MCP, LangGraph Workflow, Memory를 사용합니다.</p></section></div>
-          <div><b>5</b><section><strong>불러오기</strong><p>다음 실행에서는 불러오기에서 프로젝트를 선택해 이어서 작업합니다.</p></section></div>
-        </div>
-        <button className="hero-primary full" onClick={()=>{setUsageOpen(false);startNewProject()}}>신규 프로젝트 시작</button>
-      </div>
-    </div>}
+    <GlobalCommandPalette
+      open={commandPaletteOpen}
+      onClose={()=>setCommandPaletteOpen(false)}
+      commands={commandPaletteCommands}
+    />
+
+    <AgentWorkCenterPanel
+      open={agentWorkCenterOpen}
+      onClose={()=>setAgentWorkCenterOpen(false)}
+      jobs={jobs}
+      developmentProgress={developmentProgress}
+      workflowProgress={workflowProgress}
+      redevelopmentInfo={redevelopmentInfo}
+      onOpenRun={()=>{setAgentWorkCenterOpen(false);openWorkspaceCommand('RUN')}}
+      onRedevelop={()=>{setAgentWorkCenterOpen(false);startAgentDevelopment({redevelopment:true})}}
+      onCancelJob={(jobId)=>api(`/jobs/${encodeURIComponent(jobId)}/cancel`,{method:'POST'}).catch(()=>null)}
+    />
+
+    <HelpCenterPanel
+      open={usageOpen}
+      onClose={()=>setUsageOpen(false)}
+      onStartNewAgent={()=>{setUsageOpen(false);startNewProject()}}
+      onOpenCommandPalette={()=>{setUsageOpen(false);setCommandPaletteOpen(true)}}
+    />
+
   </div>
 }
 export default function App(){return location.pathname.startsWith('/system')?<SystemPage/>:<IDE/>}

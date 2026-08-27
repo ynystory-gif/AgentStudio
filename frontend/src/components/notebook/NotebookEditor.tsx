@@ -22,6 +22,33 @@ interface NotebookSelection {
 
 interface NotebookEditorModelLike {
   getValueInRange: (selection: NotebookSelection) => string
+  getLineCount?: () => number
+}
+
+interface NotebookEditorPositionLike {
+  lineNumber?: number
+  column?: number
+}
+
+interface NotebookEditorMouseDownEventLike {
+  target?: {
+    type?: number
+    position?: NotebookEditorPositionLike | null
+  } | null
+}
+
+interface NotebookEditorDecorationLike {
+  range: {
+    startLineNumber: number
+    startColumn: number
+    endLineNumber: number
+    endColumn: number
+  }
+  options: {
+    isWholeLine?: boolean
+    glyphMarginClassName?: string
+    glyphMarginHoverMessage?: { value: string }
+  }
 }
 
 interface NotebookEditorLayoutInfoLike {
@@ -30,14 +57,20 @@ interface NotebookEditorLayoutInfoLike {
 
 interface NotebookMonacoEditorLike {
   getValue?: () => string
+  setValue?: (value: string) => void
   getModel?: () => NotebookEditorModelLike | null
   getSelection?: () => NotebookSelection | null
+  getPosition?: () => NotebookEditorPositionLike | null
+  hasTextFocus?: () => boolean
   getDomNode?: () => HTMLElement | null
   getScrollTop?: () => number
   getScrollHeight?: () => number
   getLayoutInfo?: () => NotebookEditorLayoutInfoLike
   revealLineInCenter?: (lineNumber: number) => void
   setSelection?: (selection: NotebookSelection) => void
+  setPosition?: (position: { lineNumber: number; column: number }) => void
+  deltaDecorations?: (oldDecorations: string[], newDecorations: NotebookEditorDecorationLike[]) => string[]
+  onMouseDown?: (listener: (event: NotebookEditorMouseDownEventLike) => void) => { dispose?: () => void }
   focus?: () => void
 }
 
@@ -48,6 +81,54 @@ interface NotebookCursorSelectionEvent {
 interface RememberedCellSelection {
   selection: NotebookSelection
   text: string
+}
+
+interface NotebookLineBookmark {
+  cellIndex: number
+  lineNumber: number
+}
+
+const NOTEBOOK_LINE_BOOKMARKS = new Map<string, NotebookLineBookmark[]>()
+const NOTEBOOK_BOOKMARK_STORAGE_PREFIX = 'theanova.agentstudio.notebook.line-bookmarks::'
+
+function normalizeNotebookLineBookmarks(value: unknown): NotebookLineBookmark[] {
+  if (!Array.isArray(value)) return []
+  const unique = new Map<string, NotebookLineBookmark>()
+  value.forEach(item => {
+    const raw = item as Partial<NotebookLineBookmark>
+    const cellIndex = Number(raw?.cellIndex)
+    const lineNumber = Number(raw?.lineNumber)
+    if (!Number.isInteger(cellIndex) || cellIndex < 0 || !Number.isInteger(lineNumber) || lineNumber < 1) return
+    unique.set(`${cellIndex}:${lineNumber}`, { cellIndex, lineNumber })
+  })
+  return Array.from(unique.values()).sort((a, b) => a.cellIndex - b.cellIndex || a.lineNumber - b.lineNumber)
+}
+
+function getNotebookLineBookmarks(key: string): NotebookLineBookmark[] {
+  if (!key) return []
+  const cached = NOTEBOOK_LINE_BOOKMARKS.get(key)
+  if (cached) return cached
+  let loaded: NotebookLineBookmark[] = []
+  try {
+    const raw = window.localStorage.getItem(`${NOTEBOOK_BOOKMARK_STORAGE_PREFIX}${key}`)
+    if (raw) loaded = normalizeNotebookLineBookmarks(JSON.parse(raw))
+  } catch {
+    loaded = []
+  }
+  NOTEBOOK_LINE_BOOKMARKS.set(key, loaded)
+  return loaded
+}
+
+function storeNotebookLineBookmarks(key: string, bookmarks: NotebookLineBookmark[]): NotebookLineBookmark[] {
+  const normalized = normalizeNotebookLineBookmarks(bookmarks)
+  if (!key) return normalized
+  NOTEBOOK_LINE_BOOKMARKS.set(key, normalized)
+  try {
+    window.localStorage.setItem(`${NOTEBOOK_BOOKMARK_STORAGE_PREFIX}${key}`, JSON.stringify(normalized))
+  } catch {
+    // localStorage가 비활성화된 환경에서도 현재 세션 Map으로 북마크 기능은 유지합니다.
+  }
+  return normalized
 }
 
 // NotebookEditor is conditionally mounted by App.jsx. Switching from an .ipynb
@@ -109,15 +190,29 @@ export function NotebookEditor({
   const parsed = React.useMemo(() => parseNotebookDocument(value), [value])
   const shellRef = useRef<HTMLDivElement | null>(null)
   const scrollKey = React.useMemo(() => notebookScrollKey(projectRoot, filePath), [projectRoot, filePath])
+  const scrollKeyRef = useRef(scrollKey)
   const cellEditorsRef = useRef<Record<number, NotebookMonacoEditorLike | undefined>>({})
+  const cellBookmarkDecorationsRef = useRef<Record<number, string[] | undefined>>({})
   const cellSelectionsRef = useRef<Record<number, RememberedCellSelection | undefined>>({})
+  // Monaco cell models must remain the source of truth while the user is typing.
+  // Serializing the whole .ipynb on every keystroke and feeding the resulting
+  // source back through the controlled `value` prop can make Monaco replace the
+  // model and move the caret to the end of the cell. Keep cell editors
+  // uncontrolled after mount and mirror the latest text here for external sync.
+  const latestCellSourcesRef = useRef<Record<number, string>>({})
   const [editingMarkdown, setEditingMarkdown] = useState<Record<number, boolean>>({})
   const [activeCellIndex, setActiveCellIndex] = useState(0)
+  const [bookmarkRevision, setBookmarkRevision] = useState(0)
   const [runningCells, setRunningCells] = useState<Record<number, boolean>>({})
   const [runAllBusy, setRunAllBusy] = useState(false)
   const [stopBusy, setStopBusy] = useState(false)
   const cancelRequestedRef = useRef(false)
   const executionCounterRef = useRef(0)
+  const bookmarks = React.useMemo(() => getNotebookLineBookmarks(scrollKey), [scrollKey, bookmarkRevision])
+
+  useEffect(() => {
+    scrollKeyRef.current = scrollKey
+  }, [scrollKey])
 
   useEffect(() => {
     if (!parsed.ok) return
@@ -130,7 +225,35 @@ export function NotebookEditor({
 
   useEffect(() => {
     cellSelectionsRef.current = {}
+    latestCellSourcesRef.current = {}
+    cellBookmarkDecorationsRef.current = {}
   }, [filePath])
+
+  useEffect(() => {
+    if (!parsed.ok) return
+    parsed.notebook.cells.forEach((cell, index) => {
+      const source = notebookSourceToText(cell?.source)
+      const previous = latestCellSourcesRef.current[index]
+      const editor = cellEditorsRef.current[index]
+      const current = editor?.getValue?.()
+
+      if (previous === undefined) {
+        latestCellSourcesRef.current[index] = source
+        return
+      }
+
+      // Local typing updates latestCellSourcesRef synchronously before the
+      // serialized notebook prop comes back, so source===previous here. A
+      // mismatch means an external reload/Agent edit changed the cell. Do not
+      // overwrite a focused Monaco model; defer the external value until blur.
+      if (source !== previous) {
+        latestCellSourcesRef.current[index] = source
+        if (editor && current === previous && !editor.hasTextFocus?.()) {
+          editor.setValue?.(source)
+        }
+      }
+    })
+  }, [parsed])
 
   useLayoutEffect(() => {
     if (!scrollKey) return
@@ -175,6 +298,122 @@ export function NotebookEditor({
     NOTEBOOK_SCROLL_POSITIONS.set(scrollKey, Math.max(0, Number(scrollTop) || 0))
   }
 
+  const updateBookmarkState = (next: NotebookLineBookmark[]): NotebookLineBookmark[] => {
+    const stored = storeNotebookLineBookmarks(scrollKeyRef.current, next)
+    setBookmarkRevision(value => value + 1)
+    return stored
+  }
+
+  const toggleLineBookmark = (cellIndex: number, lineNumber: number): void => {
+    const key = scrollKeyRef.current
+    if (!key) return
+    const safeCellIndex = Math.max(0, Number(cellIndex) || 0)
+    const safeLineNumber = Math.max(1, Number(lineNumber) || 1)
+    const current = getNotebookLineBookmarks(key)
+    const exists = current.some(item => item.cellIndex === safeCellIndex && item.lineNumber === safeLineNumber)
+    updateBookmarkState(exists
+      ? current.filter(item => !(item.cellIndex === safeCellIndex && item.lineNumber === safeLineNumber))
+      : [...current, { cellIndex: safeCellIndex, lineNumber: safeLineNumber }])
+  }
+
+  const applyBookmarkDecorations = (cellIndex: number, editor?: NotebookMonacoEditorLike): void => {
+    const targetEditor = editor || cellEditorsRef.current[cellIndex]
+    if (!targetEditor?.deltaDecorations) return
+    const previous = cellBookmarkDecorationsRef.current[cellIndex] || []
+    const maxLineNumber = Math.max(1, Number(targetEditor.getModel?.()?.getLineCount?.()) || 1)
+    const nextDecorations: NotebookEditorDecorationLike[] = getNotebookLineBookmarks(scrollKeyRef.current)
+      .filter(item => item.cellIndex === cellIndex && item.lineNumber <= maxLineNumber)
+      .map(item => ({
+        range: {
+          startLineNumber: item.lineNumber,
+          startColumn: 1,
+          endLineNumber: item.lineNumber,
+          endColumn: 1,
+        },
+        options: {
+          isWholeLine: true,
+          glyphMarginClassName: 'notebook-line-bookmark-glyph',
+          glyphMarginHoverMessage: { value: `북마크 · Cell ${cellIndex + 1} · Line ${item.lineNumber}` },
+        },
+      }))
+    cellBookmarkDecorationsRef.current[cellIndex] = targetEditor.deltaDecorations(previous, nextDecorations)
+  }
+
+  useEffect(() => {
+    Object.entries(cellEditorsRef.current).forEach(([indexText, editor]) => {
+      if (!editor) return
+      applyBookmarkDecorations(Number(indexText), editor)
+    })
+  }, [bookmarkRevision, scrollKey])
+
+  const revealBookmark = (bookmark: NotebookLineBookmark): void => {
+    const maxIndex = parsed.ok ? Math.max(0, parsed.notebook.cells.length - 1) : 0
+    const safeCellIndex = Math.max(0, Math.min(bookmark.cellIndex, maxIndex))
+    const editor = cellEditorsRef.current[safeCellIndex]
+    const maxLineNumber = Math.max(1, Number(editor?.getModel?.()?.getLineCount?.()) || bookmark.lineNumber || 1)
+    const safeLineNumber = Math.max(1, Math.min(bookmark.lineNumber, maxLineNumber))
+    setActiveCellIndex(safeCellIndex)
+    const section = shellRef.current?.querySelector(`[data-notebook-cell-index="${safeCellIndex}"]`) as HTMLElement | null
+    section?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+    window.setTimeout(() => {
+      const targetEditor = cellEditorsRef.current[safeCellIndex]
+      targetEditor?.revealLineInCenter?.(safeLineNumber)
+      targetEditor?.setPosition?.({ lineNumber: safeLineNumber, column: 1 })
+      targetEditor?.focus?.()
+    }, 80)
+  }
+
+  const moveToBookmark = (direction: 1 | -1): void => {
+    const current = getNotebookLineBookmarks(scrollKeyRef.current)
+    if (!current.length) return
+    const currentLine = Math.max(0, Number(cellEditorsRef.current[activeCellIndex]?.getPosition?.()?.lineNumber) || 0)
+    let target: NotebookLineBookmark | undefined
+    if (direction > 0) {
+      target = current.find(item => item.cellIndex > activeCellIndex || (item.cellIndex === activeCellIndex && item.lineNumber > currentLine))
+      target ||= current[0]
+    } else {
+      target = [...current].reverse().find(item => item.cellIndex < activeCellIndex || (item.cellIndex === activeCellIndex && item.lineNumber < currentLine))
+      target ||= current[current.length - 1]
+    }
+    if (target) revealBookmark(target)
+  }
+
+  const clearBookmarks = (): void => {
+    const current = getNotebookLineBookmarks(scrollKeyRef.current)
+    if (!current.length) return
+    if (!window.confirm(`현재 Notebook의 북마크 ${current.length}개를 모두 해제하시겠습니까?`)) return
+    updateBookmarkState([])
+  }
+
+  const toggleActiveLineBookmark = (): void => {
+    if (!parsed.ok || parsed.notebook.cells[activeCellIndex]?.cell_type !== 'code') return
+    const editor = cellEditorsRef.current[activeCellIndex]
+    if (!editor) return
+    const lineNumber = Math.max(1, Number(editor.getPosition?.()?.lineNumber) || 1)
+    toggleLineBookmark(activeCellIndex, lineNumber)
+    editor?.revealLineInCenter?.(lineNumber)
+    editor?.setPosition?.({ lineNumber, column: 1 })
+    editor?.focus?.()
+  }
+
+  const shiftBookmarksForInsertedCell = (insertAt: number): void => {
+    const current = getNotebookLineBookmarks(scrollKeyRef.current)
+    if (!current.length) return
+    updateBookmarkState(current.map(item => item.cellIndex >= insertAt
+      ? { ...item, cellIndex: item.cellIndex + 1 }
+      : item))
+  }
+
+  const shiftBookmarksForDeletedCell = (deletedIndex: number): void => {
+    const current = getNotebookLineBookmarks(scrollKeyRef.current)
+    if (!current.length) return
+    updateBookmarkState(current
+      .filter(item => item.cellIndex !== deletedIndex)
+      .map(item => item.cellIndex > deletedIndex
+        ? { ...item, cellIndex: item.cellIndex - 1 }
+        : item))
+  }
+
   const commitNotebook = (notebook: NotebookDocument) => {
     const serialized = JSON.stringify(notebook, null, 1) + '\n'
     onChange?.(serialized)
@@ -190,6 +429,10 @@ export function NotebookEditor({
   }
 
   const updateCellSource = (index: number, text: string) => {
+    // Mirror synchronously before React serializes the notebook so Ctrl+S / blur
+    // never observes a stale cell value. The Monaco model itself stays intact,
+    // which preserves caret/selection through typing, deletion and paste.
+    latestCellSourcesRef.current[index] = text
     patchCell(index, { source: textToNotebookSource(text) })
   }
 
@@ -283,6 +526,7 @@ export function NotebookEditor({
       const result = await onExecutePython?.({
         pythonCode,
         filePath: String(filePath || ''),
+        projectRoot: String(projectRoot || ''),
         cellIndex: index,
         mode: reset ? 'full' : 'selection',
         selectionOnly,
@@ -410,6 +654,7 @@ export function NotebookEditor({
       ? { cell_type: 'markdown', metadata: {}, source: [] }
       : { cell_type: 'code', execution_count: null, metadata: {}, outputs: [], source: [] }
     notebook.cells.splice(insertAt, 0, cell)
+    shiftBookmarksForInsertedCell(insertAt)
     commitNotebook(notebook)
     setActiveCellIndex(insertAt)
     if (cellType === 'markdown') setEditingMarkdown(prev => ({ ...prev, [insertAt]: true }))
@@ -420,6 +665,7 @@ export function NotebookEditor({
     const notebook = structuredClone(parsed.notebook)
     if (!notebook.cells[index]) return
     notebook.cells.splice(index, 1)
+    shiftBookmarksForDeletedCell(index)
     commitNotebook(notebook)
     setActiveCellIndex(Math.max(0, Math.min(index, notebook.cells.length - 1)))
   }
@@ -502,8 +748,16 @@ export function NotebookEditor({
         <strong>Jupyter Notebook</strong>
         <span className="notebook-kernel-chip">{kernel || 'python'}</span>
         <span className="notebook-cell-count">{notebook.cells.length} cells</span>
+        <span className="notebook-bookmark-hint" title="상단의 현재 줄 버튼을 누르거나 Code 셀의 줄 번호/왼쪽 북마크 여백을 클릭하면 북마크를 추가/해제할 수 있습니다.">🔖 현재 줄 버튼 또는 줄 번호 클릭</span>
       </div>
       <div className="notebook-toolbar-actions">
+        <div className="notebook-bookmark-navigation" aria-label="Notebook 북마크 이동">
+          <button type="button" className="notebook-bookmark-toggle" disabled={notebook.cells[activeCellIndex]?.cell_type !== 'code'} title="현재 활성 Code 셀의 커서 줄에 북마크 추가/해제" onClick={toggleActiveLineBookmark}>🔖 현재 줄</button>
+          <button type="button" disabled={!bookmarks.length} title="이전 북마크로 이동" onClick={() => moveToBookmark(-1)}>◀</button>
+          <span className="notebook-bookmark-count" title="현재 Notebook에 저장된 줄 북마크 수"><i aria-hidden="true" />북마크 {bookmarks.length}</span>
+          <button type="button" disabled={!bookmarks.length} title="다음 북마크로 이동" onClick={() => moveToBookmark(1)}>▶</button>
+          {bookmarks.length > 0 && <button type="button" title="현재 Notebook의 북마크 모두 해제" onClick={clearBookmarks}>모두 해제</button>}
+        </div>
         <button type="button" onClick={() => addCell('code')}>＋ 코드</button>
         <button type="button" onClick={() => addCell('markdown')}>＋ Markdown</button>
         <button type="button" onClick={clearAllOutputs}>출력 모두 지우기</button>
@@ -563,13 +817,36 @@ export function NotebookEditor({
                   height={`${editorHeight}px`}
                   path={`${getEditorModelPath(projectRoot, filePath)}?cell=${index}`}
                   language="python"
-                  value={source}
+                  defaultValue={source}
                   onChange={nextValue => updateCellSource(index, nextValue ?? '')}
                   onMount={editor => {
-                    cellEditorsRef.current[index] = editor
+                    cellEditorsRef.current[index] = editor as unknown as NotebookMonacoEditorLike
+                    latestCellSourcesRef.current[index] = editor.getValue?.() ?? source
+                    applyBookmarkDecorations(index, editor)
+                    editor.onMouseDown?.((event: NotebookEditorMouseDownEventLike) => {
+                      // Monaco MouseTargetType: glyph=2, line number=3, line decoration=4.
+                      // v5.382부터는 사용자가 클릭 위치를 헷갈리지 않도록 줄 번호 자체와
+                      // 그 왼쪽 여백 어느 쪽을 눌러도 북마크가 토글됩니다.
+                      if (![2, 3, 4].includes(Number(event?.target?.type))) return
+                      const lineNumber = Number(event?.target?.position?.lineNumber)
+                      if (!Number.isInteger(lineNumber) || lineNumber < 1) return
+                      setActiveCellIndex(index)
+                      toggleLineBookmark(index, lineNumber)
+                    })
                     editor.onDidFocusEditorText(() => {
                       setActiveCellIndex(index)
                       onEditorFocus?.()
+                    })
+                    editor.onDidBlurEditorText(() => {
+                      // If an external Agent/Reload changed this cell while it was
+                      // focused, apply that authoritative value only after blur.
+                      // Normal typing already mirrors the same value, so this does
+                      // not disturb the user's caret during editing.
+                      const expected = latestCellSourcesRef.current[index]
+                      const current = editor.getValue?.() ?? ''
+                      if (typeof expected === 'string' && expected !== current) {
+                        editor.setValue?.(expected)
+                      }
                     })
                     editor.onDidChangeCursorSelection((event: NotebookCursorSelectionEvent) => {
                       const selection = event?.selection
@@ -592,12 +869,24 @@ export function NotebookEditor({
                   theme="vs-dark"
                   options={{
                     minimap: { enabled: false },
+                    glyphMargin: true,
+                    lineNumbersMinChars: 3,
+                    lineDecorationsWidth: 14,
                     fontSize: 13,
                     lineNumbers: 'on',
                     scrollBeyondLastLine: false,
                     automaticLayout: true,
                     tabSize: 4,
                     insertSpaces: true,
+                    // AgentStudio Notebook uses literal/manual typing semantics.
+                    // Typing `print(` must remain `print(` (not `print()`), and
+                    // typing a quote must not inject a matching quote that can
+                    // relocate the caret after the notebook JSON round-trip.
+                    autoClosingBrackets: 'never',
+                    autoClosingQuotes: 'never',
+                    autoClosingDelete: 'never',
+                    autoClosingOvertype: 'never',
+                    autoSurround: 'never',
                     folding: false,
                     renderLineHighlight: 'line',
                     overviewRulerLanes: 0,
@@ -615,7 +904,7 @@ export function NotebookEditor({
                         height={`${Math.min(520, Math.max(100, lineCount * 20 + 36))}px`}
                         path={`${getEditorModelPath(projectRoot, filePath)}?markdown=${index}`}
                         language="markdown"
-                        value={source}
+                        defaultValue={source}
                         onChange={nextValue => updateCellSource(index, nextValue ?? '')}
                         theme="vs-dark"
                         options={{
@@ -625,6 +914,11 @@ export function NotebookEditor({
                           scrollBeyondLastLine: false,
                           automaticLayout: true,
                           wordWrap: 'on',
+                          autoClosingBrackets: 'never',
+                          autoClosingQuotes: 'never',
+                          autoClosingDelete: 'never',
+                          autoClosingOvertype: 'never',
+                          autoSurround: 'never',
                           overviewRulerLanes: 0,
                           mouseWheelZoom: false,
                           scrollbar: { vertical: 'auto', horizontal: 'auto', alwaysConsumeMouseWheel: false },

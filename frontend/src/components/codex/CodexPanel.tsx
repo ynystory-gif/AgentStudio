@@ -3,6 +3,8 @@ import { api, runtimeInfo } from '../../api'
 import { AiAttachmentPicker, type AiAttachment, type AiAttachmentAnalysisState } from '../ai/AiAttachmentPicker'
 import type {
   CodexModel,
+  CodexRateLimitSnapshot,
+  CodexRateLimitWindow,
   CodexServerRequest,
   CodexStatus,
   CodexThread,
@@ -41,6 +43,34 @@ function effortValue(value: unknown): string {
     return String(row.reasoningEffort || row.effort || row.value || row.label || '')
   }
   return ''
+}
+
+function remainingPercent(window?: CodexRateLimitWindow | null): string {
+  if (!window || typeof window.usedPercent !== 'number') return '-'
+  return `${Math.max(0, 100 - Number(window.usedPercent)).toFixed(0)}%`
+}
+
+function usageWindowLabel(window: CodexRateLimitWindow | null | undefined, fallback: string): string {
+  const minutes = Number(window?.windowDurationMins || 0)
+  if (!minutes) return fallback
+  if (minutes === 300) return '5시간'
+  if (minutes === 10080) return '1주'
+  if (minutes % 10080 === 0) return `${Math.round(minutes / 10080)}주`
+  if (minutes % 1440 === 0) return `${Math.round(minutes / 1440)}일`
+  if (minutes % 60 === 0) return `${Math.round(minutes / 60)}시간`
+  return `${minutes}분`
+}
+
+function formatUsageReset(window?: CodexRateLimitWindow | null): string {
+  const value = Number(window?.resetsAt || 0)
+  if (!value) return '-'
+  const date = new Date(value * 1000)
+  if (Number.isNaN(date.getTime())) return '-'
+  const duration = Number(window?.windowDurationMins || 0)
+  if (duration >= 1440) {
+    return date.toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' })
+  }
+  return date.toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit' })
 }
 
 function userInputQuestions(request: CodexServerRequest): Array<Record<string, any>> {
@@ -116,6 +146,7 @@ export function CodexPanel({ projectRoot, activeFile = '' }: Props) {
   const [model, setModel] = useState('')
   const [effort, setEffort] = useState('medium')
   const [detailOpen, setDetailOpen] = useState(false)
+  const [usageRefreshing, setUsageRefreshing] = useState(false)
   const [loginUrl, setLoginUrl] = useState('')
   const [lastDiff, setLastDiff] = useState('')
   const [reasoning, setReasoning] = useState('')
@@ -125,6 +156,7 @@ export function CodexPanel({ projectRoot, activeFile = '' }: Props) {
   const mountedRef = useRef(true)
   const activeAssistantIdRef = useRef('')
   const autoStartAttemptedRef = useRef('')
+  const settingsMenuRef = useRef<HTMLDivElement | null>(null)
 
   const models = status.models || []
   const selectedModel = useMemo(() => models.find(row => modelId(row) === model) || null, [models, model])
@@ -222,6 +254,23 @@ export function CodexPanel({ projectRoot, activeFile = '' }: Props) {
       autoStartAttemptedRef.current = ''
     }
   }, [projectRoot])
+
+  useEffect(() => {
+    if (!detailOpen) return
+    const closeOnPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      if (target && !settingsMenuRef.current?.contains(target)) setDetailOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setDetailOpen(false)
+    }
+    document.addEventListener('mousedown', closeOnPointerDown)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeOnPointerDown)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [detailOpen])
 
   useEffect(() => {
     if (status.initialized) loadThreads()
@@ -538,14 +587,34 @@ export function CodexPanel({ projectRoot, activeFile = '' }: Props) {
 
   const loggedIn = !!status.account
   const plan = String(status.account?.planType || '').toUpperCase()
-  const usageBucket = status.rate_limits?.rateLimits
+  const usageBucket: CodexRateLimitSnapshot | undefined = status.rate_limits?.rateLimits
     || Object.values(status.rate_limits?.rateLimitsByLimitId || {})[0]
-  const primaryRemaining = typeof usageBucket?.primary?.usedPercent === 'number'
-    ? `${Math.max(0, 100 - usageBucket.primary.usedPercent).toFixed(0)}%`
-    : ''
-  const secondaryRemaining = typeof usageBucket?.secondary?.usedPercent === 'number'
-    ? `${Math.max(0, 100 - usageBucket.secondary.usedPercent).toFixed(0)}%`
-    : ''
+
+  async function refreshCodexUsage(force = true) {
+    if (!loggedIn || usageRefreshing) return
+    setUsageRefreshing(true)
+    try {
+      const result = await api<any>(`/codex/rate-limits?force=${force ? 'true' : 'false'}`)
+      if (!result?.ok && !result?.rate_limits) {
+        throw new Error(result?.message || result?.error || 'Codex 사용량을 확인할 수 없습니다.')
+      }
+      await refreshStatus()
+    } catch (error: any) {
+      setStatus(prev => ({ ...prev, rate_limits_error: error?.message || String(error) }))
+    } finally {
+      if (mountedRef.current) setUsageRefreshing(false)
+    }
+  }
+
+  function toggleSettingsMenu() {
+    const opening = !detailOpen
+    setDetailOpen(opening)
+    if (opening) {
+      setThreadMenuOpen(false)
+      if (loggedIn) void refreshCodexUsage(true)
+      else void refreshStatus()
+    }
+  }
 
   if (!projectRoot) {
     return <div className="codex-panel code-tab-panel"><div className="codex-empty"><b>Codex</b><span>먼저 프로젝트를 선택하세요.</span></div></div>
@@ -586,7 +655,7 @@ export function CodexPanel({ projectRoot, activeFile = '' }: Props) {
       <div className="codex-toolbar-actions">
         <button type="button" title="새 대화" onClick={newConversation} disabled={!!turnId}>＋</button>
         <div className="codex-thread-menu-wrap">
-          <button type="button" title="최근 대화" onClick={() => { setThreadMenuOpen(v => !v); loadThreads() }}>⌄</button>
+          <button type="button" title="최근 대화" onClick={() => { setDetailOpen(false); setThreadMenuOpen(v => !v); loadThreads() }}>⌄</button>
           {threadMenuOpen && <div className="codex-thread-menu">
             <div className="codex-thread-menu-head">최근 대화</div>
             {threads.length ? threads.map(row => <button type="button" key={row.id} onClick={() => resumeThread(row)}>
@@ -595,20 +664,64 @@ export function CodexPanel({ projectRoot, activeFile = '' }: Props) {
             </button>) : <span>저장된 대화가 없습니다.</span>}
           </div>}
         </div>
-        <button type="button" title="상태 상세" onClick={() => setDetailOpen(v => !v)}>⚙</button>
+        <div className="codex-settings-menu-wrap" ref={settingsMenuRef}>
+          <button type="button" title="Codex 설정 및 남은 사용량" aria-expanded={detailOpen} onClick={toggleSettingsMenu}>⚙</button>
+          {detailOpen && <div className="codex-usage-popover">
+            <div className="codex-usage-account">
+              <div className="codex-usage-avatar">{String(status.account?.email || 'C').slice(0, 1).toUpperCase()}</div>
+              <div>
+                <strong>{status.account?.email || 'Codex'}</strong>
+                <span>{plan ? `ChatGPT ${plan}` : 'ChatGPT Codex'}</span>
+              </div>
+            </div>
+
+            <div className="codex-usage-section">
+              <div className="codex-usage-section-title">
+                <span>◔</span><strong>남은 사용량</strong>
+                <button type="button" title="사용량 새로고침" onClick={() => void refreshCodexUsage(true)} disabled={usageRefreshing || !loggedIn}>
+                  {usageRefreshing ? '…' : '↻'}
+                </button>
+              </div>
+              {usageBucket ? <div className="codex-usage-compact-list">
+                <div className="codex-usage-compact-row">
+                  <span>{usageWindowLabel(usageBucket.primary, '5시간')}</span>
+                  <b>{remainingPercent(usageBucket.primary)}</b>
+                  <small>{formatUsageReset(usageBucket.primary)}</small>
+                </div>
+                <div className="codex-usage-compact-row">
+                  <span>{usageWindowLabel(usageBucket.secondary, '1주')}</span>
+                  <b>{remainingPercent(usageBucket.secondary)}</b>
+                  <small>{formatUsageReset(usageBucket.secondary)}</small>
+                </div>
+                {usageBucket.individualLimit && <div className="codex-usage-compact-row">
+                  <span>개별 한도</span>
+                  <b>{usageBucket.individualLimit.remainingPercent ?? '-'}%</b>
+                  <small>{usageBucket.individualLimit.resetsAt ? new Date(usageBucket.individualLimit.resetsAt * 1000).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' }) : '-'}</small>
+                </div>}
+              </div> : <div className="codex-usage-empty">
+                {loggedIn ? (status.rate_limits_error || '사용량 정보를 확인하는 중입니다.') : 'ChatGPT 계정을 연결하면 남은 사용량이 표시됩니다.'}
+              </div>}
+              {status.rate_limits?.rateLimitResetCredits?.availableCount != null && status.rate_limits.rateLimitResetCredits.availableCount > 0 && <div className="codex-reset-credit">
+                <span>재설정 {status.rate_limits.rateLimitResetCredits.availableCount}회 가능</span><b>›</b>
+              </div>}
+            </div>
+
+            <div className="codex-usage-menu-divider" />
+            <details className="codex-usage-technical">
+              <summary>Codex 상세 정보</summary>
+              <div><span>CLI</span><b>{status.version || '확인 중'}</b></div>
+              <div><span>프로세스</span><b>{status.running ? `PID ${status.pid || '-'}` : '중지'}</b></div>
+              <div><span>프로젝트</span><b title={projectRoot}>{projectRoot}</b></div>
+              {activeFile && <div><span>현재 파일</span><b title={activeFile}>{activeFile}</b></div>}
+            </details>
+            <button type="button" className="codex-usage-system-settings" onClick={() => { window.location.href = '/system' }}>
+              <span>⚙</span><strong>Codex 설정</strong><small>시스템 설정 열기</small>
+            </button>
+            {(status.rate_limits_error || status.last_error) && <div className="codex-usage-error">{status.rate_limits_error || status.last_error}</div>}
+          </div>}
+        </div>
       </div>
     </div>
-
-    {detailOpen && <div className="codex-status-card">
-      <div><span>CLI</span><b>{status.version || '확인 중'}</b></div>
-      <div><span>프로세스</span><b>{status.running ? `PID ${status.pid || '-'}` : '중지'}</b></div>
-      <div><span>프로젝트</span><b title={projectRoot}>{projectRoot}</b></div>
-      {activeFile && <div><span>현재 파일</span><b title={activeFile}>{activeFile}</b></div>}
-      {loggedIn && <div><span>계정</span><b>{status.account?.email || 'ChatGPT 연결됨'}</b></div>}
-      {primaryRemaining && <div><span>1차 한도</span><b>{primaryRemaining} 남음</b></div>}
-      {secondaryRemaining && <div><span>2차 한도</span><b>{secondaryRemaining} 남음</b></div>}
-      {status.last_error && <pre>{status.last_error}</pre>}
-    </div>}
 
     {!status.initialized && <div className="codex-connect-card">
       <b>Codex app-server를 시작하는 중입니다.</b>

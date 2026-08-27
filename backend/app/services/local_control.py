@@ -4,12 +4,15 @@ import json
 import os
 import uuid
 import subprocess
+import re
+import unicodedata
 from pathlib import Path
 from threading import RLock
 
 from watchfiles import Change, awatch
 
 from app.core.config import get_settings
+from app.services.gpu_runtime_manager import gpu_runtime_environment
 
 
 _runtime_project_roots: set[Path] = set()
@@ -408,6 +411,265 @@ def _search_notebook_source(text: str, query: str, *, case_sensitive: bool, max_
     return results
 
 
+def _pdf_search_normalize(value: str) -> str:
+    """Normalize extracted PDF text for duplicate detection and display grouping."""
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    normalized = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", normalized)
+    return " ".join(normalized.split()).casefold()
+
+
+def _pdf_search_match_key(
+    value: str,
+    *,
+    case_sensitive: bool,
+    aggressive: bool = False,
+) -> str:
+    """Build a PDF search key resilient to PDF text-layer fragmentation.
+
+    The normal key removes whitespace and invisible characters while preserving
+    punctuation.  The aggressive fallback additionally ignores punctuation and
+    symbols.  The latter is intentionally used only after the normal match fails
+    so queries such as Korean slide sentences still work when the embedded PDF
+    text inserts quote/dash/bullet objects between visible words.
+    """
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    normalized = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", normalized)
+    normalized = normalized if case_sensitive else normalized.casefold()
+    if aggressive:
+        normalized = "".join(ch for ch in normalized if ch.isalnum())
+    else:
+        normalized = re.sub(r"\s+", "", normalized)
+    return normalized
+
+
+def _search_pdf_text_layer_matches(
+    page_text: str,
+    query: str,
+    *,
+    case_sensitive: bool,
+    max_results: int,
+) -> list[dict]:
+    """Find PDF matches and map them back to a nearby extracted source line."""
+    source = str(page_text or "")
+    lines = source.splitlines()
+    if not lines:
+        return []
+
+    def _search(aggressive: bool) -> list[dict]:
+        needle = _pdf_search_match_key(
+            query,
+            case_sensitive=case_sensitive,
+            aggressive=aggressive,
+        )
+        # Avoid excessively broad punctuation-insensitive fallback such as "C++"
+        # becoming merely "c".
+        if not needle or (aggressive and len(needle) < 3):
+            return []
+
+        compact_parts: list[str] = []
+        line_spans: list[tuple[int, int, int]] = []
+        cursor = 0
+        for index, raw_line in enumerate(lines):
+            key = _pdf_search_match_key(
+                raw_line,
+                case_sensitive=case_sensitive,
+                aggressive=aggressive,
+            )
+            start = cursor
+            compact_parts.append(key)
+            cursor += len(key)
+            line_spans.append((start, cursor, index))
+
+        compact_page = "".join(compact_parts)
+        if not compact_page:
+            return []
+
+        matches: list[dict] = []
+        start_at = 0
+        while len(matches) < max_results:
+            match_at = compact_page.find(needle, start_at)
+            if match_at < 0:
+                break
+            line_index = 0
+            for span_start, span_end, candidate_index in line_spans:
+                if span_end > match_at or (span_start == match_at and span_end > span_start):
+                    line_index = candidate_index
+                    break
+            raw_line = lines[line_index] if line_index < len(lines) else ""
+            matches.append({
+                "line_number": line_index + 1,
+                "column": 1,
+                "snippet": raw_line.strip(),
+                "match_mode": (
+                    "pdf_punctuation_whitespace_insensitive"
+                    if aggressive
+                    else "pdf_whitespace_insensitive"
+                ),
+            })
+            start_at = match_at + max(1, len(needle))
+        return matches
+
+    primary = _search(False)
+    return primary if primary else _search(True)
+
+
+def _pdf_search_context(lines: list[str], line_index: int, *, radius: int = 2) -> str:
+    """Build neighboring context so visually repeated headings can be distinguished."""
+    current = max(0, min(int(line_index), max(0, len(lines) - 1)))
+    chosen: list[str] = []
+    for distance in range(0, max(1, radius) + 1):
+        indexes = [current] if distance == 0 else [current - distance, current + distance]
+        for index in indexes:
+            if index < 0 or index >= len(lines):
+                continue
+            text = " ".join(str(lines[index] or "").split()).strip()
+            if not text:
+                continue
+            normalized = _pdf_search_normalize(text)
+            if normalized and all(_pdf_search_normalize(item) != normalized for item in chosen):
+                chosen.append(text)
+        if len(chosen) >= 3:
+            break
+    context = "  ·  ".join(chosen[:3]).strip()
+    return context[:520] if context else ""
+
+
+def _pypdf_page_text_variants(page) -> list[tuple[str, str]]:
+    """Return multiple pypdf extraction orders because slide PDFs vary widely."""
+    variants: list[tuple[str, str]] = []
+    try:
+        layout = str(page.extract_text(extraction_mode="layout") or "")
+        if layout.strip():
+            variants.append(("pypdf_layout", layout))
+    except Exception:
+        pass
+    try:
+        plain = str(page.extract_text() or "")
+        if plain.strip() and all(plain != text for _, text in variants):
+            variants.append(("pypdf_plain", plain))
+    except Exception:
+        pass
+    return variants
+
+
+def _search_pdf_source(path: Path, query: str, *, case_sensitive: bool, max_results: int) -> dict:
+    """Search a PDF using multiple text extractors with stale/duplicate suppression.
+
+    pypdf layout/plain extraction and, when available, PyMuPDF sorted text are all
+    considered.  This improves Korean slide/PDF search where one extractor can
+    reorder, split or omit text objects even though Chromium visually renders the
+    sentence correctly.  Results remain page-based because visual x/y coordinates
+    are not reliably portable to Chromium's built-in PDF viewer.
+    """
+    try:
+        from pypdf import PdfReader
+    except Exception as exc:
+        raise RuntimeError("PDF 텍스트 검색 모듈(pypdf)이 설치되어 있지 않습니다.") from exc
+
+    reader = PdfReader(str(path))
+    fitz_doc = None
+    try:
+        import fitz  # type: ignore
+        fitz_doc = fitz.open(str(path))
+    except Exception:
+        fitz_doc = None
+
+    results: list[dict] = []
+    pages_scanned = 0
+    text_pages = 0
+    duplicate_matches_removed = 0
+    extractors_used: set[str] = set()
+
+    try:
+        for page_index, page in enumerate(reader.pages):
+            if len(results) >= max_results:
+                break
+            pages_scanned += 1
+            variants = _pypdf_page_text_variants(page)
+            if fitz_doc is not None and page_index < len(fitz_doc):
+                try:
+                    fitz_text = str(fitz_doc[page_index].get_text("text", sort=True) or "")
+                    if fitz_text.strip() and all(fitz_text != text for _, text in variants):
+                        variants.append(("pymupdf_sorted", fitz_text))
+                except Exception:
+                    pass
+            if not variants:
+                continue
+            text_pages += 1
+
+            remaining = max_results - len(results)
+            page_candidates: list[dict] = []
+            for extractor_name, page_text in variants:
+                extractors_used.add(extractor_name)
+                lines = page_text.splitlines()
+                raw_rows = _search_pdf_text_layer_matches(
+                    page_text,
+                    query,
+                    case_sensitive=case_sensitive,
+                    max_results=max(remaining * 6, remaining),
+                )
+                for row in raw_rows:
+                    line_number = max(1, int(row.get("line_number") or 1))
+                    raw_line = lines[line_number - 1] if line_number - 1 < len(lines) else str(row.get("snippet") or "")
+                    context = _pdf_search_context(lines, line_number - 1)
+                    page_candidates.append({
+                        **row,
+                        "snippet": context or str(row.get("snippet") or "").strip(),
+                        "match_line": " ".join(str(raw_line or "").split()).strip(),
+                        "page_index": page_index,
+                        "page_number": page_index + 1,
+                        "extractor": extractor_name,
+                    })
+
+            # Chromium page navigation cannot jump to a reliable x/y text span,
+            # only to the PDF page. Multiple extractor hits on the same page are
+            # therefore not independently actionable and used to look like
+            # duplicate search results. Return the single clearest hit per page.
+            page_results: list[dict] = []
+            if page_candidates and remaining > 0:
+                query_key = _pdf_search_match_key(query, case_sensitive=False, aggressive=True)
+                extractor_priority = {"pypdf_plain": 0, "pymupdf_sorted": 1, "pypdf_layout": 2}
+
+                def _candidate_score(row: dict) -> tuple[int, int, int]:
+                    line = str(row.get("match_line") or row.get("snippet") or "")
+                    line_key = _pdf_search_match_key(line, case_sensitive=False, aggressive=True)
+                    contains = 0 if query_key and query_key in line_key else 1
+                    # Prefer a concise source line and then the extractor that
+                    # usually preserves human reading order most naturally.
+                    extra = max(0, len(line_key) - len(query_key)) if query_key else len(line_key)
+                    priority = extractor_priority.get(str(row.get("extractor") or ""), 9)
+                    return (contains, extra, priority)
+
+                page_candidates.sort(key=_candidate_score)
+                page_results.append(page_candidates[0])
+                duplicate_matches_removed += max(0, len(page_candidates) - 1)
+
+            for page_match_index, row in enumerate(page_results, start=1):
+                results.append({
+                    **row,
+                    "page_match_index": page_match_index,
+                    "match_id": f"p{page_index + 1}-m{page_match_index}",
+                })
+                if len(results) >= max_results:
+                    break
+    finally:
+        if fitz_doc is not None:
+            try:
+                fitz_doc.close()
+            except Exception:
+                pass
+
+    return {
+        "results": results,
+        "pdf_pages_scanned": pages_scanned,
+        "pdf_text_pages": text_pages,
+        "pdf_duplicate_matches_removed": duplicate_matches_removed,
+        "pdf_extractors": sorted(extractors_used),
+        "document_type": "pdf",
+        "truncated": len(results) >= max_results,
+    }
+
+
 async def search_project_text(
     root: str,
     query: str,
@@ -447,6 +709,26 @@ async def search_project_text(
                 candidates.append((item, relative))
                 if len(candidates) >= max_files:
                     break
+
+        # Explicit current-PDF search: extract text with pypdf and preserve page
+        # coordinates for navigation. Project-wide search intentionally keeps
+        # binary PDFs excluded to avoid expensive background scans.
+        if requested and len(candidates) == 1 and candidates[0][0].suffix.casefold() == '.pdf':
+            pdf_path, relative = candidates[0]
+            pdf_result = _search_pdf_source(
+                pdf_path,
+                needle,
+                case_sensitive=case_sensitive,
+                max_results=max_results,
+            )
+            return {
+                'query': needle,
+                'results': [{'path': relative, **row} for row in pdf_result['results']],
+                'files_scanned': 1,
+                'skipped_large': 0,
+                'skipped_binary': 0,
+                **{key: value for key, value in pdf_result.items() if key != 'results'},
+            }
 
         results: list[dict] = []
         scanned = 0
@@ -840,6 +1122,7 @@ async def run_command(command: str, cwd: str):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=s.max_command_seconds,
+            env=gpu_runtime_environment(os.environ.copy()),
         )
 
     try:
