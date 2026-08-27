@@ -1,5 +1,60 @@
-# THEANOVA AgentStudio v5.382
+> Latest patch: **v5.390 UnifiedDesignProjectControlsAndThemeRegistryUX**
 
+# THEANOVA AgentStudio v5.388
+
+## v5.388 FrontendThemeImportRecovery
+
+- Imported Theme을 48개 Frontend/Styling target + Generic Adapter에 적용합니다.
+- Theme 화면에서 `지원 Frontend/스타일 목록 보기`로 현재 Registry를 확인할 수 있습니다.
+- Local/Supabase Runtime DB에 새 ORM 테이블을 자동 self-heal하여 `ui_themes` 누락으로 URL/이미지 Theme 저장이 함께 실패하는 문제를 수정했습니다.
+- URL 입력 보정, 차단 사이트 안내, 공개 CDN CSS 분석, 이미지 분석 안전 검사를 추가했습니다.
+- Frontend와 Backend가 다른 버전일 때 Theme API 404를 재시작 안내로 표시합니다.
+
+자세한 내용: `docs/FRONTEND_THEME_IMPORT_RECOVERY_V5388.md`
+
+---
+
+# THEANOVA AgentStudio v5.387
+
+## v5.387 FrontendAgnosticThemeAdapters
+
+- Imported Theme을 React 전용이 아닌 canonical Design Token으로 저장하고 선택된 Frontend 기술의 native Theme 방식으로 변환합니다.
+- 레이아웃 Theme 영역의 `적용 Frontend 목록`에서 현재 Adapter Registry를 확인할 수 있습니다.
+- React JS/TS, Next, Vue, Nuxt, Angular, Svelte/SvelteKit, Astro, Solid, Preact, HTML/CSS/JS, Streamlit, Gradio, NiceGUI, Django/Jinja, Blazor/Razor, React Native/Expo, Flutter 및 주요 Styling System을 지원하며 목록 밖 기술은 Generic Adapter를 사용합니다.
+
+## v5.386 ImportedThemeLibrary
+
+- 레이아웃 Theme에 Light/Dark/Auto 외 DB 기반 사용자 Theme Library를 추가했습니다.
+- 웹사이트 URL을 입력하면 공개 HTML/CSS에서 색상, font-family, border-radius, shadow 특성을 분석해 Design Token으로 저장합니다.
+- 화면 캡처 이미지는 브라우저 Canvas에서 색상 팔레트를 샘플링해 Theme Token으로 저장합니다.
+- 저장된 Theme은 Theme Select에 즉시 추가되고, 선택한 theme_id/theme_name/theme_tokens/component/layout rules가 Agent 설계 및 코드 생성에 전달됩니다.
+- Custom Theme 선택 시 레이아웃 미리보기가 즉시 해당 팔레트로 변경됩니다.
+- 참조 사이트의 로고/문구/이미지/고유 콘텐츠는 복제하지 않고 스타일 특성만 재사용합니다.
+- URL importer는 SSRF 방지를 위해 localhost/사설망/비표준 포트를 차단합니다.
+
+
+## v5.384 GeneratedAgentTestEnvironmentRoleSeed
+
+생성되는 신규 Agent의 관리자 기능에 DEV/TEST 전용 **테스트 환경**을 자동 설계/생성합니다. 요구사항·DB·Auth/RBAC를 분석해 기본 코드, Seed Data, 권한별 테스트 계정, Test-as-user, 시나리오 실행과 초기화 기능을 구성합니다.
+
+- 로그인/회원 기능: 테스트 회원 기본 10명
+- Role/Permission: 발견된 권한별 테스트 계정 자동 생성, SUPER_ADMIN 등 최고 권한 기본 1명
+- 상품 기능: 상품 50개 + 카테고리 5개 + 재고 50개 기본 Seed
+- 주문 기능: 주문 20건 + 주문상세 연계 Seed
+- RAG/상담/Memory/예약: 요구에 맞는 문서·Chunk·세션·메시지·Memory·예약 Seed 자동 설계
+- 테스트 데이터는 `is_test` / `test_batch_id`로 운영 데이터와 격리
+- Seed/초기화/삭제/Test-as-user는 development/test에서만 허용하고 production은 Backend에서 거부
+- Test-as-user는 관리자 전용 short-lived impersonation + 감사 로그 + TEST 배너
+- 테스트 비밀번호는 소스에 하드코딩하지 않음
+
+## v5.383 AgentUILayoutRuntimePersistenceControls
+
+- 레이아웃 템플릿 설정 패널을 `UI 구성 / 레이아웃 / 실행 및 상태 유지 / 알림`으로 구분해 Agent 서비스의 화면 전환 정책을 함께 설정할 수 있도록 확장했습니다.
+- `메뉴 이동 시 Agent 실행 유지`는 사용자가 끌 수 없는 플랫폼 고정 정책으로 표시합니다. 생성 Agent는 UI component lifecycle과 Backend Agent Runtime을 분리하고 `session_id/run_id` 기반으로 실행을 계속하도록 설계 Context에 반영됩니다.
+- `이전 화면 상태`, `스크롤 위치`, `입력 중 내용`, `선택/탭 상태` 복원 옵션과 `자동 / Keep Alive / 상태 저장 후 재생성` 화면 유지 방식을 선택할 수 있습니다.
+- 실행 중 작업 표시 위치를 `상단 상태바 / 좌측 메뉴 / 우측 패널 / 하단 상태바 / 플로팅 버튼` 중 선택할 수 있고 Agent 완료/실패 알림 및 실행 작업 클릭 시 원래 화면 이동 정책도 저장합니다.
+- WebSocket/SSE 자동 재연결, 현재 run 상태 재조회, 누락 이벤트 재동기화는 사용자가 끄지 않는 플랫폼 기본 정책으로 고정했습니다.
+- AI Chat/RAG 템플릿은 입력 내용 복원을 기본 ON, Dashboard/Monitoring은 선택/필터 상태 복원을 기본 ON, Headless Agent는 화면 복원 대신 Backend Runtime 유지와 완료/실패 알림을 기본으로 사용합니다.
 
 
 ## v5.382 SourceTextLineBookmarkNavigation

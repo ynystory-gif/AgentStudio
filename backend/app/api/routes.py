@@ -8,8 +8,10 @@ from app.services.ollama_runtime_manager import get_ollama_runtime_status, start
 from app.services.gpu_runtime_manager import get_gpu_runtime_status, set_gpu_runtime_enabled, gpu_recommendation
 import asyncio
 import json
-from app.models.entities import Project, ProjectAnalysis
+from app.models.entities import Project, ProjectAnalysis, AgentDesignProject, AgentDesignProjectVersion, UITheme
 from app.services.project_paths import resolve_project_paths
+from app.services.ui_theme_service import analyze_theme_from_url, build_rules
+from app.services.frontend_theme_registry import list_frontend_theme_targets
 from app.services.database_provisioning import provision_agentstudio_database
 from app.services.database_schema_design import build_database_plan, finalize_database_plan, materialize_database_plan
 from app.services.db_erd_service import build_project_db_erd, build_agentstudio_db_erd
@@ -80,7 +82,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from langgraph.types import Command
 from sqlalchemy import select, func
-from app.core.database import SessionLocal, migrate_agentstudio_schema, verify_project_schema, current_event_loop_name
+from app.core.database import SessionLocal, ensure_runtime_metadata_tables, migrate_agentstudio_schema, verify_project_schema, current_event_loop_name
 from app.core.machine_identity import current_pc_name
 from app.models.entities import MCPServer, ToolRecord
 from app.services.ws_hub import hub
@@ -703,6 +705,43 @@ class SupabaseSchemaInitializeRequest(BaseModel):
     database_url: str = ""
     langgraph_database_url: str = ""
     schema: str = "theanova_agentstudio"
+
+class AgentDesignProjectSaveRequest(BaseModel):
+    id: int | None = None
+    name: str = ""
+    project_root: str = ""
+    status: str = "INTERVIEWING"
+    progress: int = 0
+    current_stage: str = "REQUIREMENTS"
+    current_question: str = ""
+    langgraph_thread_id: str = ""
+    snapshot: dict = {}
+    feature_registry: list = []
+    create_version: bool = False
+    version_label: str = ""
+
+
+class AgentDesignProjectVersionRequest(BaseModel):
+    label: str = ""
+    snapshot: dict = {}
+    feature_registry: list = []
+
+
+class UIThemeImportUrlRequest(BaseModel):
+    name: str = ""
+    url: str = ""
+    scope: str = "GLOBAL"
+
+
+class UIThemeImportImageRequest(BaseModel):
+    name: str = ""
+    file_name: str = ""
+    tokens: dict = {}
+    component_rules: dict = {}
+    layout_rules: dict = {}
+    preview_colors: list[str] = []
+    scope: str = "GLOBAL"
+
 
 class RequirementSaveRequest(BaseModel):
     project_id: int | None = None
@@ -1408,6 +1447,337 @@ async def provision_agentstudio_db(req: DatabaseProvisionRequest):
             "message": str(e),
         }
 
+
+
+def _design_project_payload(row: AgentDesignProject, *, include_snapshot: bool = False) -> dict:
+    payload = {
+        "id": row.id,
+        "name": row.name,
+        "project_root": row.project_root,
+        "status": row.status,
+        "progress": row.progress,
+        "current_stage": row.current_stage,
+        "current_question": row.current_question,
+        "langgraph_thread_id": row.langgraph_thread_id,
+        "feature_registry": row.feature_registry or [],
+        "version_no": row.version_no,
+        "created_at": row.created_at.isoformat() if row.created_at else "",
+        "updated_at": row.updated_at.isoformat() if row.updated_at else "",
+        "last_opened_at": row.last_opened_at.isoformat() if row.last_opened_at else "",
+    }
+    if include_snapshot:
+        payload["snapshot"] = row.snapshot or {}
+    return payload
+
+
+
+async def _ensure_ui_theme_storage() -> None:
+    """Self-heal Theme storage on the currently active runtime DB.
+
+    This also fixes installations that switched from the local bootstrap DB to an
+    older Supabase schema before the ui_themes table was introduced.
+    """
+    try:
+        await ensure_runtime_metadata_tables()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Theme 저장 테이블을 준비하지 못했습니다. SYSTEM_ADMIN에서 현재 DB 연결/스키마를 확인한 뒤 "
+                f"Backend를 재시작하세요. 상세: {exc}"
+            ),
+        ) from exc
+
+
+def _ui_theme_payload(row: UITheme) -> dict:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "theme_type": row.theme_type,
+        "source_type": row.source_type,
+        "source_url": row.source_url,
+        "source_label": row.source_label,
+        "scope": row.scope,
+        "tokens": row.tokens or {},
+        "component_rules": row.component_rules or {},
+        "layout_rules": row.layout_rules or {},
+        "preview_colors": row.preview_colors or [],
+        "created_at": row.created_at.isoformat() if row.created_at else "",
+        "updated_at": row.updated_at.isoformat() if row.updated_at else "",
+    }
+
+
+@router.get("/ui-themes/frontend-targets")
+async def list_ui_theme_frontend_targets():
+    targets = list_frontend_theme_targets()
+    groups: dict[str, list[dict]] = {}
+    for item in targets:
+        groups.setdefault(str(item.get("group") or "기타"), []).append(item)
+    return {"ok": True, "targets": targets, "groups": groups, "count": len(targets)}
+
+
+@router.get("/ui-themes")
+async def list_ui_themes():
+    await _ensure_ui_theme_storage()
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(UITheme)
+                .where(UITheme.pc_name == current_pc_name())
+                .order_by(UITheme.updated_at.desc(), UITheme.id.desc())
+            )
+        ).scalars().all()
+    return {"ok": True, "themes": [_ui_theme_payload(row) for row in rows]}
+
+
+@router.post("/ui-themes/import-url")
+async def import_ui_theme_from_url(req: UIThemeImportUrlRequest):
+    await _ensure_ui_theme_storage()
+    name = (req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Theme 이름을 입력하세요.")
+    try:
+        analysis = await analyze_theme_from_url(req.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"웹사이트 Theme 분석 실패: {exc}") from exc
+
+    now = datetime.utcnow()
+    async with SessionLocal() as session:
+        row = UITheme(
+            pc_name=current_pc_name(),
+            name=name,
+            theme_type="IMPORTED",
+            source_type="URL",
+            source_url=str(analysis.get("source_url") or req.url).strip(),
+            source_label=json.dumps(analysis.get("source_meta") or {}, ensure_ascii=False),
+            scope=(req.scope or "GLOBAL").strip().upper(),
+            tokens=analysis.get("tokens") or {},
+            component_rules=analysis.get("component_rules") or {},
+            layout_rules=analysis.get("layout_rules") or {},
+            preview_colors=analysis.get("preview_colors") or [],
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+    return {"ok": True, "theme": _ui_theme_payload(row)}
+
+
+@router.post("/ui-themes/import-image")
+async def import_ui_theme_from_image(req: UIThemeImportImageRequest):
+    await _ensure_ui_theme_storage()
+    name = (req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Theme 이름을 입력하세요.")
+    tokens = req.tokens or {}
+    colors = tokens.get("colors") if isinstance(tokens, dict) else None
+    if not isinstance(colors, dict) or not colors.get("primary") or not colors.get("background"):
+        raise HTTPException(status_code=400, detail="이미지에서 추출된 Theme 색상 정보가 없습니다.")
+    component_rules = req.component_rules or {}
+    layout_rules = req.layout_rules or {}
+    if not component_rules or not layout_rules:
+        default_components, default_layout = build_rules(tokens)
+        component_rules = component_rules or default_components
+        layout_rules = layout_rules or default_layout
+    now = datetime.utcnow()
+    async with SessionLocal() as session:
+        row = UITheme(
+            pc_name=current_pc_name(),
+            name=name,
+            theme_type="IMPORTED",
+            source_type="IMAGE",
+            source_url="",
+            source_label=(req.file_name or "화면 캡처 이미지").strip(),
+            scope=(req.scope or "GLOBAL").strip().upper(),
+            tokens=tokens,
+            component_rules=component_rules,
+            layout_rules=layout_rules,
+            preview_colors=req.preview_colors or [],
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+    return {"ok": True, "theme": _ui_theme_payload(row)}
+
+
+@router.delete("/ui-themes/{theme_id}")
+async def delete_ui_theme(theme_id: int):
+    await _ensure_ui_theme_storage()
+    async with SessionLocal() as session:
+        row = (
+            await session.execute(
+                select(UITheme).where(
+                    UITheme.id == theme_id,
+                    UITheme.pc_name == current_pc_name(),
+                )
+            )
+        ).scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Theme을 찾을 수 없습니다.")
+        await session.delete(row)
+        await session.commit()
+    return {"ok": True, "theme_id": theme_id}
+
+
+@router.get("/agent-design-projects")
+async def list_agent_design_projects():
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(AgentDesignProject)
+                .where(
+                    AgentDesignProject.pc_name == current_pc_name(),
+                    AgentDesignProject.status != "ARCHIVED",
+                )
+                .order_by(AgentDesignProject.updated_at.desc(), AgentDesignProject.id.desc())
+            )
+        ).scalars().all()
+    return {"ok": True, "projects": [_design_project_payload(row) for row in rows]}
+
+
+@router.get("/agent-design-projects/{design_project_id}")
+async def get_agent_design_project(design_project_id: int):
+    async with SessionLocal() as session:
+        row = (
+            await session.execute(
+                select(AgentDesignProject).where(
+                    AgentDesignProject.id == design_project_id,
+                    AgentDesignProject.pc_name == current_pc_name(),
+                )
+            )
+        ).scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Agent 설계 프로젝트를 찾을 수 없습니다.")
+        row.last_opened_at = datetime.utcnow()
+        row.updated_at = datetime.utcnow()
+        await session.commit()
+        await session.refresh(row)
+        versions = (
+            await session.execute(
+                select(AgentDesignProjectVersion)
+                .where(AgentDesignProjectVersion.design_project_id == row.id)
+                .order_by(AgentDesignProjectVersion.version_no.desc())
+                .limit(20)
+            )
+        ).scalars().all()
+    payload = _design_project_payload(row, include_snapshot=True)
+    payload["versions"] = [
+        {
+            "id": version.id,
+            "version_no": version.version_no,
+            "label": version.label,
+            "created_at": version.created_at.isoformat() if version.created_at else "",
+        }
+        for version in versions
+    ]
+    return {"ok": True, "project": payload}
+
+
+@router.post("/agent-design-projects/save")
+async def save_agent_design_project(req: AgentDesignProjectSaveRequest):
+    now = datetime.utcnow()
+    async with SessionLocal() as session:
+        row = None
+        if req.id is not None:
+            row = (
+                await session.execute(
+                    select(AgentDesignProject).where(
+                        AgentDesignProject.id == req.id,
+                        AgentDesignProject.pc_name == current_pc_name(),
+                    )
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            row = AgentDesignProject(
+                pc_name=current_pc_name(),
+                name=(req.name or "새 Agent 설계").strip(),
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            await session.flush()
+
+        if req.create_version and (row.snapshot or row.feature_registry):
+            next_version = int(row.version_no or 1) + 1
+            session.add(AgentDesignProjectVersion(
+                design_project_id=row.id,
+                version_no=int(row.version_no or 1),
+                label=(req.version_label or f"v{int(row.version_no or 1)} Snapshot").strip(),
+                snapshot=row.snapshot or {},
+                feature_registry=row.feature_registry or [],
+                created_at=now,
+            ))
+            row.version_no = next_version
+
+        row.name = (req.name or row.name or "새 Agent 설계").strip()
+        row.project_root = (req.project_root or "").strip()
+        row.status = (req.status or "INTERVIEWING").strip().upper()
+        row.progress = max(0, min(100, int(req.progress or 0)))
+        row.current_stage = (req.current_stage or "REQUIREMENTS").strip()
+        row.current_question = req.current_question or ""
+        row.langgraph_thread_id = req.langgraph_thread_id or row.langgraph_thread_id or f"agent_design_{row.id}"
+        row.snapshot = req.snapshot or {}
+        row.feature_registry = req.feature_registry or []
+        row.updated_at = now
+        row.last_opened_at = now
+        await session.commit()
+        await session.refresh(row)
+
+    return {"ok": True, "project": _design_project_payload(row, include_snapshot=True)}
+
+
+@router.post("/agent-design-projects/{design_project_id}/version")
+async def snapshot_agent_design_project(design_project_id: int, req: AgentDesignProjectVersionRequest):
+    now = datetime.utcnow()
+    async with SessionLocal() as session:
+        row = (
+            await session.execute(
+                select(AgentDesignProject).where(
+                    AgentDesignProject.id == design_project_id,
+                    AgentDesignProject.pc_name == current_pc_name(),
+                )
+            )
+        ).scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Agent 설계 프로젝트를 찾을 수 없습니다.")
+        version_no = int(row.version_no or 1)
+        version = AgentDesignProjectVersion(
+            design_project_id=row.id,
+            version_no=version_no,
+            label=(req.label or f"v{version_no} Snapshot").strip(),
+            snapshot=req.snapshot or row.snapshot or {},
+            feature_registry=req.feature_registry or row.feature_registry or [],
+            created_at=now,
+        )
+        session.add(version)
+        row.version_no = version_no + 1
+        row.updated_at = now
+        await session.commit()
+    return {"ok": True, "version_no": version_no, "label": version.label}
+
+
+@router.post("/agent-design-projects/{design_project_id}/archive")
+async def archive_agent_design_project(design_project_id: int):
+    async with SessionLocal() as session:
+        row = (
+            await session.execute(
+                select(AgentDesignProject).where(
+                    AgentDesignProject.id == design_project_id,
+                    AgentDesignProject.pc_name == current_pc_name(),
+                )
+            )
+        ).scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Agent 설계 프로젝트를 찾을 수 없습니다.")
+        row.status = "ARCHIVED"
+        row.updated_at = datetime.utcnow()
+        await session.commit()
+    return {"ok": True}
 
 
 @router.post("/persistence/requirements")
@@ -2767,7 +3137,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.382", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.390", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -3363,7 +3733,7 @@ async def export_agentstudio_presentation(payload: PresentationExportRequest):
         content, filename = await asyncio.to_thread(
             build_agentstudio_presentation,
             data,
-            "5.382",
+            "5.390",
         )
     except Exception as exc:
         raise HTTPException(
@@ -5202,6 +5572,10 @@ def _build_interview_requirement_context(
         "6. 재시도와 실패 처리를 별도 정책/분기로 설계합니다.",
         "7. 단순히 3~4단계로 축약하지 말고 실제 실행 가능한 업무 Workflow를 설계합니다.",
         "8. confirmed_requirements.ui_layout이 있으면 선택한 Header/Sidebar/Footer/User Menu/Main Layout/Theme/Components를 UI 파일 구조와 코드 생성 계획에 반드시 반영합니다.",
+        "9. UI Layout을 사용하는 Agent는 메뉴/탭/페이지 이동으로 실행 중 Agent 작업을 중단하지 않습니다. Agent Runtime은 UI component lifecycle과 분리하고 session_id/run_id 기반 Backend Runtime으로 유지합니다.",
+        "10. ui_layout의 restore_screen_state/restore_scroll_position/restore_draft_input/restore_selection_state/screen_restore_mode 설정을 Frontend 상태 저장·복원 설계에 반영합니다.",
+        "11. ui_layout의 show_running_tasks/runtime_status_position/notify_agent_complete/notify_agent_failure/run_item_navigate를 실행 상태 UI와 알림 설계에 반영합니다. WebSocket/SSE는 자동 재연결, 현재 run 재조회, 누락 이벤트 재동기화를 기본 정책으로 설계합니다.",
+        "12. ui_layout.theme가 custom이면 theme_id/theme_name/theme_tokens/component_rules/layout_rules를 Design Token의 단일 기준으로 사용하고 React/TypeScript CSS 변수 또는 Theme Provider에 반영합니다. 참조 사이트의 로고·문구·이미지·고유 콘텐츠를 복제하지 말고 색상·타이포그래피·간격·Radius·Shadow·Component 스타일 특성만 적용합니다.",
     ])
 
     return "\n".join(rows)
@@ -5813,13 +6187,14 @@ async def save_workflow_design_checkpoint(req: AgentDesignCheckpointRequest):
         "agent_build_stage", "attachment_memory", "attachment_summary",
         "attachment_summary_files", "attachment_requirements",
         "attachment_requirement_coverage", "manual_requirement_overrides",
+        "feature_registry", "design_project_id", "design_project_version",
         "ui_layout", "build_resume",
     }
     snapshot = {
         key: value for key, value in (req.snapshot or {}).items()
         if key in allowed
     }
-    snapshot["version"] = 2
+    snapshot["version"] = 3
     snapshot["project_root"] = str(root)
     snapshot["saved_at"] = str(snapshot.get("saved_at") or datetime.now().astimezone().isoformat())
     snapshot["server_saved_at"] = datetime.now().astimezone().isoformat()
@@ -5859,7 +6234,7 @@ async def load_workflow_design_checkpoint(project_root: str):
             "file_plan": req.get("file_plan") or workflow_state.get("file_plan") or {},
         }
         legacy_snapshot = {
-            "version": 2,
+            "version": 3,
             "saved_at": str(
                 workflow_state.get("diagnostic_generated_at")
                 or current_run.get("updated_at")

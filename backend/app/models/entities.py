@@ -23,6 +23,55 @@ class Project(Base):
     last_opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
 
+
+class AgentDesignProject(Base):
+    __tablename__ = "agent_design_projects"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pc_name: Mapped[str] = mapped_column(String(255), default="", index=True)
+    name: Mapped[str] = mapped_column(String(300), default="")
+    project_root: Mapped[str] = mapped_column(String(1200), default="")
+    status: Mapped[str] = mapped_column(String(50), default="INTERVIEWING", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    current_stage: Mapped[str] = mapped_column(String(100), default="REQUIREMENTS")
+    current_question: Mapped[str] = mapped_column(Text, default="")
+    langgraph_thread_id: Mapped[str] = mapped_column(String(160), default="")
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    feature_registry: Mapped[list] = mapped_column(JSON, default=list)
+    version_no: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AgentDesignProjectVersion(Base):
+    __tablename__ = "agent_design_project_versions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    design_project_id: Mapped[int] = mapped_column(ForeignKey("agent_design_projects.id"), index=True)
+    version_no: Mapped[int] = mapped_column(Integer, default=1)
+    label: Mapped[str] = mapped_column(String(300), default="")
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    feature_registry: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class UITheme(Base):
+    __tablename__ = "ui_themes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pc_name: Mapped[str] = mapped_column(String(255), default="", index=True)
+    name: Mapped[str] = mapped_column(String(300), default="")
+    theme_type: Mapped[str] = mapped_column(String(40), default="IMPORTED", index=True)
+    source_type: Mapped[str] = mapped_column(String(40), default="CUSTOM")
+    source_url: Mapped[str] = mapped_column(String(2000), default="")
+    source_label: Mapped[str] = mapped_column(String(1000), default="")
+    scope: Mapped[str] = mapped_column(String(40), default="GLOBAL", index=True)
+    tokens: Mapped[dict] = mapped_column(JSON, default=dict)
+    component_rules: Mapped[dict] = mapped_column(JSON, default=dict)
+    layout_rules: Mapped[dict] = mapped_column(JSON, default=dict)
+    preview_colors: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
     id: Mapped[int] = mapped_column(primary_key=True)

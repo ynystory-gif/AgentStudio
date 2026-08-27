@@ -1343,7 +1343,7 @@ def _add_ui_layout_slide(prs, payload: dict[str, Any], page: int, version: str):
     summary = " · ".join(x for x in [
         _safe_text(layout.get("app_type"), "", 30),
         _safe_text(layout.get("main_layout"), "", 30),
-        _safe_text(layout.get("theme"), "", 20),
+        _safe_text(layout.get("theme_name") if layout.get("theme") == "custom" else layout.get("theme"), "", 40),
         "Responsive" if layout.get("responsive", True) else "Fixed",
     ] if x)
     _add_text(slide, summary, 0.55, 1.80, 5.4, 0.3, size=9, color=C["muted"])
@@ -1393,7 +1393,7 @@ def _add_ui_layout_slide(prs, payload: dict[str, Any], page: int, version: str):
         ("App type", layout.get("app_type")), ("Navigation", layout.get("navigation")), ("Main layout", layout.get("main_layout")),
         ("Header", "사용" if header else "없음"), ("Sidebar", "접기 가능" if sidebar and layout.get("sidebar_collapsible") else ("사용" if sidebar else "없음")),
         ("Footer", "사용" if footer else "없음"), ("User menu", _safe_text(layout.get("user_menu_position"),"사용" if user_menu else "없음",30) if user_menu else "없음"),
-        ("Theme", layout.get("theme")), ("Responsive", "Yes" if layout.get("responsive",True) else "No"),
+        ("Theme", layout.get("theme_name") if layout.get("theme") == "custom" else layout.get("theme")), ("Responsive", "Yes" if layout.get("responsive",True) else "No"),
     ]
     yy=1.88
     for label,value in items:
@@ -1405,7 +1405,7 @@ def _add_ui_layout_slide(prs, payload: dict[str, Any], page: int, version: str):
     return True
 
 
-def build_agentstudio_presentation(payload: dict[str, Any], version: str = "5.382") -> tuple[bytes, str]:
+def build_agentstudio_presentation(payload: dict[str, Any], version: str = "5.390") -> tuple[bytes, str]:
     scope = str(payload.get("scope") or "ALL").strip().upper()
     deck_type = str(payload.get("deck_type") or "AGENT").strip().upper()
     if scope not in {"ALL", "WORKFLOW", "RUN", "REPORT", "ARCHITECTURE", "DB_ERD"}:

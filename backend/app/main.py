@@ -11,7 +11,7 @@ if sys.platform == "win32":
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.core.database import init_db, migrate_agentstudio_schema
+from app.core.database import init_db, migrate_agentstudio_schema, ensure_runtime_metadata_tables
 from app.api.routes import router
 from app.services.langgraph_runtime import agent_graph_runtime
 from app.services.mcp_registry import mcp_registry_monitor
@@ -46,8 +46,15 @@ async def lifespan(app: FastAPI):
         # If Supabase was selected on this PC, switch the runtime DB only after
         # local settings have been restored safely.
         runtime_db = await apply_saved_database_provider()
+        # The selected runtime provider can differ from the bootstrap DB. Ensure tables
+        # introduced by the current release exist on whichever DB is active now.
+        runtime_metadata = await ensure_runtime_metadata_tables()
 
         print("[완료되었습니다] PostgreSQL/pgvector 초기화")
+        print(
+            f"[완료되었습니다] Runtime ORM 테이블 확인: "
+            f"{runtime_metadata.get('table_count', 0)}개 · schema={runtime_metadata.get('schema', '')}"
+        )
         print(
             f"[완료되었습니다] Runtime DB: {runtime_db.get('active_provider', 'local')} "
             f"· {runtime_db.get('target', '')}"
@@ -126,7 +133,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.382", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.390", lifespan=lifespan)
 
 # Frontend 개발 서버(Vite)와 Backend API 간 CORS 허용
 app.add_middleware(

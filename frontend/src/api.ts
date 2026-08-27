@@ -87,8 +87,21 @@ export async function api<T = unknown>(path: string, options: RequestInit = {}):
 
   if (!res.ok) {
     const body = await res.text()
+    let detail = body || res.statusText
+    try {
+      const parsed = JSON.parse(body) as { detail?: unknown; message?: unknown }
+      if (typeof parsed.detail === 'string' && parsed.detail.trim()) detail = parsed.detail
+      else if (typeof parsed.message === 'string' && parsed.message.trim()) detail = parsed.message
+    } catch {
+      // Keep the original response body when the backend did not return JSON.
+    }
+
+    if (res.status === 404 && path.startsWith('/ui-themes')) {
+      detail = 'Theme API를 찾을 수 없습니다. Frontend와 Backend 버전이 다른 경우가 많습니다. SYSTEM_ADMIN에서 AgentStudio를 완전히 재시작한 뒤 다시 시도하세요.'
+    }
+
     throw new AgentStudioApiError(
-      `Backend HTTP ${res.status}: ${body || res.statusText}`,
+      `Backend HTTP ${res.status}: ${detail}`,
       {
         kind: 'http',
         status: res.status,

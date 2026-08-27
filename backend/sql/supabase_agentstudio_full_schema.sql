@@ -1,6 +1,6 @@
 -- ============================================================
 -- THEANOVA AgentStudio - Supabase PostgreSQL Full Schema
--- v5.308 ProjectMachineIsolation
+-- v5.389 FrontendThemeImportRecovery
 --
 -- Target layout:
 --   theanova_agentstudio : AgentStudio ORM + LangGraph Checkpointer
@@ -306,6 +306,62 @@ CREATE INDEX IF NOT EXISTS ix_app_settings_key ON theanova_agentstudio.app_setti
 CREATE INDEX IF NOT EXISTS ix_app_settings_pc_name ON theanova_agentstudio.app_settings(pc_name);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_app_settings_pc_name_key ON theanova_agentstudio.app_settings(pc_name, key);
 CREATE INDEX IF NOT EXISTS ix_agentstudio_machines_pc_name ON theanova_agentstudio.agentstudio_machines(pc_name);
+
+-- ------------------------------------------------------------
+-- v5.385+ Agent Design Project / v5.386+ Imported Theme tables
+-- Fresh Supabase installs include them here; v5.389 runtime also self-heals
+-- existing schemas with SQLAlchemy create_all(checkfirst).
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.agent_design_projects (
+    id SERIAL PRIMARY KEY,
+    pc_name VARCHAR(255) NOT NULL DEFAULT '',
+    name VARCHAR(300) NOT NULL DEFAULT '',
+    project_root VARCHAR(1200) NOT NULL DEFAULT '',
+    status VARCHAR(50) NOT NULL DEFAULT 'INTERVIEWING',
+    progress INTEGER NOT NULL DEFAULT 0,
+    current_stage VARCHAR(100) NOT NULL DEFAULT 'REQUIREMENTS',
+    current_question TEXT NOT NULL DEFAULT '',
+    langgraph_thread_id VARCHAR(160) NOT NULL DEFAULT '',
+    snapshot JSON NOT NULL DEFAULT '{}'::json,
+    feature_registry JSON NOT NULL DEFAULT '[]'::json,
+    version_no INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_opened_at TIMESTAMP NULL
+);
+CREATE INDEX IF NOT EXISTS ix_agent_design_projects_pc_name ON theanova_agentstudio.agent_design_projects(pc_name);
+CREATE INDEX IF NOT EXISTS ix_agent_design_projects_status ON theanova_agentstudio.agent_design_projects(status);
+
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.agent_design_project_versions (
+    id SERIAL PRIMARY KEY,
+    design_project_id INTEGER NOT NULL REFERENCES theanova_agentstudio.agent_design_projects(id),
+    version_no INTEGER NOT NULL DEFAULT 1,
+    label VARCHAR(300) NOT NULL DEFAULT '',
+    snapshot JSON NOT NULL DEFAULT '{}'::json,
+    feature_registry JSON NOT NULL DEFAULT '[]'::json,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS ix_agent_design_project_versions_design_project_id ON theanova_agentstudio.agent_design_project_versions(design_project_id);
+
+CREATE TABLE IF NOT EXISTS theanova_agentstudio.ui_themes (
+    id SERIAL PRIMARY KEY,
+    pc_name VARCHAR(255) NOT NULL DEFAULT '',
+    name VARCHAR(300) NOT NULL DEFAULT '',
+    theme_type VARCHAR(40) NOT NULL DEFAULT 'IMPORTED',
+    source_type VARCHAR(40) NOT NULL DEFAULT 'CUSTOM',
+    source_url VARCHAR(2000) NOT NULL DEFAULT '',
+    source_label VARCHAR(1000) NOT NULL DEFAULT '',
+    scope VARCHAR(40) NOT NULL DEFAULT 'GLOBAL',
+    tokens JSON NOT NULL DEFAULT '{}'::json,
+    component_rules JSON NOT NULL DEFAULT '{}'::json,
+    layout_rules JSON NOT NULL DEFAULT '{}'::json,
+    preview_colors JSON NOT NULL DEFAULT '[]'::json,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS ix_ui_themes_pc_name ON theanova_agentstudio.ui_themes(pc_name);
+CREATE INDEX IF NOT EXISTS ix_ui_themes_theme_type ON theanova_agentstudio.ui_themes(theme_type);
+CREATE INDEX IF NOT EXISTS ix_ui_themes_scope ON theanova_agentstudio.ui_themes(scope);
 
 COMMIT;
 

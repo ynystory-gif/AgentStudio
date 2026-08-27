@@ -12877,3 +12877,200 @@ small{font-size:var(--agentstudio-min-readable-font-size);}
   .editor-bookmark-toggle-button::after{content:"🔖";font-size:13px}
   .editor-bookmark-clear-button{display:none}
 }
+
+
+/* ===== v5.383 Agent UI Layout Runtime Persistence Controls ===== */
+.ui-layout-config-section{display:grid;gap:8px;padding:10px;border:1px solid #21384b;border-radius:10px;background:#08141e}.ui-layout-config-section.runtime{border-color:#28516a;background:linear-gradient(180deg,#091923,#08141e)}.ui-layout-config-section-head{display:grid;gap:2px}.ui-layout-config-section-head strong{font-size:13px;color:#dff2ff}.ui-layout-config-section-head small{font-size:12px;line-height:1.35;color:#708ba1}.ui-layout-runtime-lock{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;padding:9px;border:1px solid #27607c;border-radius:8px;background:#0b2130}.ui-layout-runtime-lock>span{font-size:16px}.ui-layout-runtime-lock>div{display:grid;gap:2px;min-width:0}.ui-layout-runtime-lock strong{font-size:12.5px;color:#d9f4ff}.ui-layout-runtime-lock small{font-size:11.5px;line-height:1.35;color:#86a8ba}.ui-layout-runtime-lock em{font-style:normal;font-size:10.5px;font-weight:800;color:#8de7b9;border:1px solid #2a7655;background:#0c3b2b;border-radius:999px;padding:3px 7px;white-space:nowrap}.ui-layout-toggle-grid.runtime label{min-height:37px}.ui-layout-toggle-grid label.wide{grid-column:1/-1}.ui-layout-runtime-note{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px;align-items:start;padding:7px 8px;border-radius:7px;background:#0a1b28;border:1px dashed #2a4a61}.ui-layout-runtime-note b{font-size:11.5px;color:#78c8ef}.ui-layout-runtime-note span{font-size:11.5px;line-height:1.4;color:#7490a4}.ui-layout-config-section .ui-layout-select-field{grid-template-columns:104px minmax(0,1fr)}
+
+/* v5.385 Agent Design Project persistence + Feature Management */
+.agent-design-project-toolbar{
+  display:flex;align-items:center;justify-content:space-between;gap:14px;
+  padding:10px 14px;border-bottom:1px solid var(--border,#2b3344);
+  background:color-mix(in srgb,var(--panel,#121826) 92%,#2563eb 8%);
+}
+.agent-design-project-identity{display:flex;align-items:baseline;gap:9px;min-width:0}
+.agent-design-project-identity>span{font-size:11px;color:#8ea0bd;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+.agent-design-project-identity>strong{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
+.agent-design-project-identity>small{font-size:11px;color:#91a0b8;white-space:nowrap}
+.agent-design-project-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.agent-design-project-actions button,.agent-design-project-list-toolbar button,.agent-feature-actions button,.agent-feature-editor button{
+  border:1px solid #3a455d;background:#182033;color:#e7edf7;border-radius:6px;padding:6px 9px;font-size:11px;cursor:pointer
+}
+.agent-design-project-actions button:hover,.agent-feature-actions button:hover{border-color:#5d76a6;background:#202b42}
+.agent-design-project-actions button.primary,.agent-feature-manager button.primary,.agent-feature-editor button.primary{background:#2456d6;border-color:#3971ff;color:white}
+.agent-design-save-state{font-size:10px;color:#83c7a1;margin-left:4px}
+.agent-design-modal-backdrop{position:fixed;inset:0;z-index:22000;background:rgba(2,6,23,.68);display:flex;align-items:center;justify-content:center;padding:28px}
+.agent-design-project-modal{width:min(900px,94vw);max-height:78vh;display:flex;flex-direction:column;background:#101827;border:1px solid #334155;border-radius:12px;box-shadow:0 24px 70px rgba(0,0,0,.45);overflow:hidden}
+.agent-design-modal-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #2c374a}
+.agent-design-modal-head>div{display:flex;flex-direction:column;gap:3px}.agent-design-modal-head strong{font-size:15px}.agent-design-modal-head small{font-size:11px;color:#91a0b8}.agent-design-modal-head>button{border:0;background:transparent;color:#c7d2e5;font-size:18px;cursor:pointer}
+.agent-design-project-list-toolbar{display:flex;align-items:center;justify-content:space-between;padding:9px 14px;border-bottom:1px solid #263247;color:#9eabc0;font-size:11px}
+.agent-design-project-list{overflow:auto;padding:8px;display:flex;flex-direction:column;gap:6px}.agent-design-project-row{display:flex;align-items:center;justify-content:space-between;gap:14px;text-align:left;width:100%;border:1px solid #2c394f;background:#151e2e;color:#e5edf8;border-radius:8px;padding:11px 12px;cursor:pointer}.agent-design-project-row:hover,.agent-design-project-row.current{border-color:#4f73c8;background:#19263d}.agent-design-project-main{display:flex;flex-direction:column;gap:3px;min-width:0}.agent-design-project-main strong{font-size:13px}.agent-design-project-main small{font-size:10px;color:#8999b1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:540px}.agent-design-project-meta{display:grid;grid-template-columns:auto 42px 150px;align-items:center;gap:8px;font-size:10px;color:#98a6bc}.agent-design-project-meta b{color:#a8c4ff}.agent-design-project-meta i{font-style:normal;text-align:right}.agent-design-project-empty,.agent-design-project-error{padding:20px;text-align:center;color:#91a0b8;font-size:12px}.agent-design-project-error{color:#fca5a5;padding:8px 14px}
+.agent-feature-manager{margin-top:10px;border:1px solid #2d3a50;border-radius:9px;background:#111927;overflow:hidden}.agent-feature-manager-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px;border-bottom:1px solid #29364a}.agent-feature-manager-head>div{display:flex;flex-direction:column;gap:2px}.agent-feature-manager-head strong{font-size:12px}.agent-feature-manager-head small{font-size:10px;color:#8fa0b8;line-height:1.35}.agent-feature-manager-head button{border:1px solid #3971ff;border-radius:6px;padding:6px 9px;font-size:10px;cursor:pointer}.agent-feature-list{max-height:260px;overflow:auto;padding:7px;display:flex;flex-direction:column;gap:6px}.agent-feature-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px;border:1px solid #28364b;background:#151f30;border-radius:7px}.agent-feature-row.status-disabled{opacity:.72}.agent-feature-row.status-removed{opacity:.58;border-style:dashed}.agent-feature-info{display:flex;flex-direction:column;gap:2px;min-width:0}.agent-feature-info strong{font-size:11px}.agent-feature-info small{font-size:9px;color:#91a0b7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:210px}.agent-feature-info span{font-size:9px;color:#6f85a7}.agent-feature-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.agent-feature-actions button{padding:4px 6px;font-size:9px}.agent-feature-actions button.danger{border-color:#7f3540;color:#f2a8b0}.agent-feature-empty{padding:14px;color:#8493aa;font-size:10px;line-height:1.5}.agent-feature-editor{border-top:1px solid #2d3a50;padding:10px;display:flex;flex-direction:column;gap:8px;background:#0f1724}.agent-feature-editor>strong{font-size:11px}.agent-feature-editor label{display:flex;flex-direction:column;gap:4px}.agent-feature-editor label span{font-size:9px;color:#8fa0b8}.agent-feature-editor input,.agent-feature-editor textarea{width:100%;box-sizing:border-box;border:1px solid #34445d;background:#0b1220;color:#e5edf7;border-radius:6px;padding:7px;font-size:10px}.agent-feature-editor textarea{min-height:66px;resize:vertical}.agent-feature-editor>div{display:flex;justify-content:flex-end;gap:6px}
+@media (max-width:1100px){.agent-design-project-toolbar{align-items:flex-start;flex-direction:column}.agent-design-project-actions{justify-content:flex-start}.agent-design-project-meta{grid-template-columns:auto 36px}.agent-design-project-meta small{display:none}}
+
+
+/* ===== v5.386 Imported URL/Screenshot Theme Library ===== */
+.ui-layout-wireframe.custom{background:var(--ui-theme-background,#f8fafc);border-color:var(--ui-theme-border,#dbe4ee)}
+.ui-layout-wireframe.custom .ui-layout-wf-header{background:var(--ui-theme-surface,#fff);border-color:var(--ui-theme-border,#dbe4ee)}
+.ui-layout-wireframe.custom .ui-layout-wf-header>i,.ui-layout-wireframe.custom .ui-layout-wf-header>b{background:var(--ui-theme-primary,#2563eb)}
+.ui-layout-wireframe.custom .ui-layout-wf-nav span,.ui-layout-wireframe.custom .ui-layout-wf-sidebar i,.ui-layout-wireframe.custom .ui-layout-wf-footer span{background:var(--ui-theme-secondary,#64748b)}
+.ui-layout-wireframe.custom .ui-layout-wf-sidebar,.ui-layout-wireframe.custom .ui-layout-wf-footer,.ui-layout-wireframe.custom .ui-layout-wf-context{background:var(--ui-theme-background,#f8fafc);border-color:var(--ui-theme-border,#dbe4ee)}
+.ui-layout-wireframe.custom .ui-layout-wf-search{background:color-mix(in srgb,var(--ui-theme-primary,#2563eb) 32%,var(--ui-theme-surface,#fff))}
+.ui-layout-wireframe.custom .ui-layout-wf-kpis span,.ui-layout-wireframe.custom .ui-layout-wf-context span{background:color-mix(in srgb,var(--ui-theme-primary,#2563eb) 18%,var(--ui-theme-surface,#fff))}
+.ui-layout-wireframe.custom .ui-layout-wf-content span{background:linear-gradient(135deg,color-mix(in srgb,var(--ui-theme-primary,#2563eb) 12%,var(--ui-theme-surface,#fff)),color-mix(in srgb,var(--ui-theme-primary,#2563eb) 28%,var(--ui-theme-surface,#fff)))}
+.ui-layout-theme-field{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:7px}
+.ui-layout-theme-import-button{height:31px;margin-bottom:1px;padding:0 9px;border:1px solid #2e5979;border-radius:6px;background:#102235;color:#8ed4ff;font-size:11px;white-space:nowrap;cursor:pointer}
+.ui-layout-theme-import-button:hover{background:#163149;border-color:#4387b5}
+.ui-layout-selected-theme{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;padding:8px;border:1px solid #27455e;border-radius:7px;background:#0b1824}
+.ui-layout-selected-theme>div:nth-child(2){display:flex;min-width:0;flex-direction:column;gap:2px}.ui-layout-selected-theme strong{font-size:11px;color:#d8edff}.ui-layout-selected-theme small{font-size:10px;color:#7892a8;white-space:normal;line-height:1.35}.ui-layout-selected-theme>button{border:1px solid #573844;border-radius:5px;background:#24141b;color:#df879d;font-size:10px;padding:5px 7px;cursor:pointer}
+.ui-layout-theme-palette,.ui-layout-theme-import-palette{display:flex;align-items:center;gap:3px}.ui-layout-theme-palette i{display:block;width:12px;height:24px;border:1px solid rgba(255,255,255,.18)}.ui-layout-theme-palette i:first-child{border-radius:5px 0 0 5px}.ui-layout-theme-palette i:last-child{border-radius:0 5px 5px 0}
+.ui-layout-theme-import-panel{display:flex;flex-direction:column;gap:8px;padding:9px;border:1px solid #2b506c;border-radius:7px;background:#0b1621}.ui-layout-theme-import-tabs{display:grid;grid-template-columns:1fr 1fr;gap:5px}.ui-layout-theme-import-tabs button{height:28px;border:1px solid #29445b;border-radius:5px;background:#101e2a;color:#7f99ae;font-size:10px;cursor:pointer}.ui-layout-theme-import-tabs button.active{border-color:#3c8fc2;background:#12334a;color:#bceaff}.ui-layout-theme-import-panel>label{display:grid;grid-template-columns:82px minmax(0,1fr);align-items:center;gap:7px;font-size:10px;color:#8ea7ba}.ui-layout-theme-import-panel input{width:100%;box-sizing:border-box;height:29px;padding:0 7px;border:1px solid #2b455a;border-radius:5px;background:#08121b;color:#dcecff;font-size:10px}.ui-layout-theme-file input{padding:4px 6px;height:auto}.ui-layout-theme-import-palette i{width:22px;height:20px;border:1px solid rgba(255,255,255,.2);border-radius:4px}.ui-layout-theme-import-help{font-size:9.5px;line-height:1.45;color:#70889a}.ui-layout-theme-import-error{padding:6px 7px;border:1px solid #613340;border-radius:5px;background:#28131a;color:#f1a3b6;font-size:10px;line-height:1.4}.ui-layout-theme-import-actions{display:flex;justify-content:flex-end;gap:6px}.ui-layout-theme-import-actions button{min-height:28px;padding:0 10px;border:1px solid #30475a;border-radius:5px;background:#111d28;color:#aebfce;font-size:10px;cursor:pointer}.ui-layout-theme-import-actions button.primary{border-color:#2783b7;background:#126c9a;color:white}.ui-layout-theme-import-actions button:disabled{opacity:.55;cursor:wait}
+
+.ui-layout-theme-library{display:flex;flex-direction:column;gap:4px;padding-top:6px;border-top:1px solid #22394c}.ui-layout-theme-library>strong{font-size:10px;color:#9cb8cc}.ui-layout-theme-library>div{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;align-items:center;gap:5px;padding:4px 0;border-bottom:1px solid rgba(80,114,140,.18)}.ui-layout-theme-library>div:last-child{border-bottom:0}.ui-layout-theme-library b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:#cce4f5}.ui-layout-theme-library em{font-style:normal;font-size:9px;color:#637f94}.ui-layout-theme-library button{height:23px;padding:0 6px;border:1px solid #2d5673;border-radius:4px;background:#102638;color:#87c9ef;font-size:9px;cursor:pointer}.ui-layout-theme-library button.danger{border-color:#563440;background:#25151b;color:#dd8298}.ui-layout-theme-library-palette{display:flex}.ui-layout-theme-library-palette i{width:8px;height:16px;border:1px solid rgba(255,255,255,.12)}
+
+/* ===== v5.387 Frontend-agnostic Theme Adapter Registry ===== */
+.ui-layout-theme-target-summary{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  margin-top:8px;padding:10px 12px;border:1px solid var(--border,#30363d);border-radius:10px;
+  background:rgba(127,127,127,.06)
+}
+.ui-layout-theme-target-summary>div{display:flex;flex-direction:column;gap:3px;min-width:0}
+.ui-layout-theme-target-summary strong{font-size:12px}
+.ui-layout-theme-target-summary small{font-size:11px;line-height:1.45;opacity:.78}
+.ui-layout-theme-target-summary button{white-space:nowrap;border:1px solid var(--border,#30363d);border-radius:8px;padding:6px 9px;background:transparent;cursor:pointer}
+.ui-layout-theme-target-list{margin-top:8px;padding:10px;border:1px solid var(--border,#30363d);border-radius:10px;max-height:280px;overflow:auto;background:rgba(127,127,127,.04)}
+.ui-layout-theme-target-group{display:grid;grid-template-columns:94px minmax(0,1fr);gap:10px;padding:7px 0;border-bottom:1px solid rgba(127,127,127,.14)}
+.ui-layout-theme-target-group:last-of-type{border-bottom:0}
+.ui-layout-theme-target-group>strong{font-size:11px;opacity:.8;padding-top:5px}
+.ui-layout-theme-target-group>div{display:flex;flex-wrap:wrap;gap:6px}
+.ui-layout-theme-target-group span{display:flex;flex-direction:column;gap:1px;min-width:132px;padding:5px 7px;border:1px solid rgba(127,127,127,.18);border-radius:7px;background:rgba(127,127,127,.05)}
+.ui-layout-theme-target-group b{font-size:11px;font-weight:600}
+.ui-layout-theme-target-group em{font-size:10px;font-style:normal;opacity:.64}
+.ui-layout-theme-target-footnote{display:block;margin-top:9px;line-height:1.45;opacity:.72}
+
+/* v5.388 Theme import/runtime self-heal feedback */
+.ui-layout-theme-backend-warning{display:flex;flex-direction:column;gap:3px;margin-top:8px;padding:8px 9px;border:1px solid #6b4d25;border-radius:8px;background:#261b0d;color:#f5c983}
+.ui-layout-theme-backend-warning b{font-size:11px}
+.ui-layout-theme-backend-warning span{font-size:10px;line-height:1.45;color:#f0c48b;word-break:break-word}
+.ui-layout-theme-backend-warning small{font-size:9.5px;line-height:1.4;color:#a99173}
+
+/* ===== v5.389 Agent Design Project Toolbar Visibility Fix =====
+   AgentDesignProjectToolbar was inserted before builder-chat-head in v5.385,
+   while older builder grid contracts still declared only four rows.
+   Reserve five explicit rows so Save/Load controls are always visible. */
+.builder-chat{
+  grid-template-rows:auto auto minmax(0,1fr) auto auto!important;
+}
+.agent-design-project-toolbar{
+  display:flex!important;
+  visibility:visible!important;
+  opacity:1!important;
+  position:relative;
+  z-index:8;
+  min-height:48px;
+  flex:0 0 auto;
+  overflow:visible;
+  box-sizing:border-box;
+}
+.agent-design-project-actions{
+  display:flex!important;
+  visibility:visible!important;
+}
+.agent-design-project-actions .agent-design-save-button,
+.agent-design-project-actions .agent-design-load-button{
+  min-width:112px;
+  font-weight:800;
+}
+.agent-design-project-actions .agent-design-load-button{
+  border-color:#3d6d9a;
+  color:#b9dcff;
+  background:#132237;
+}
+.agent-design-project-actions .agent-design-load-button:hover{
+  border-color:#5c94c7;
+  background:#19304d;
+}
+@media(max-width:1280px){
+  .agent-design-project-toolbar{align-items:flex-start;flex-direction:column;gap:7px}
+  .agent-design-project-actions{justify-content:flex-start;width:100%}
+  .agent-design-project-identity{width:100%}
+}
+
+
+/* ===== v5.390 Unified Design Project Controls + Theme Registry UX ===== */
+/* The active Workspace DESIGN screen uses unified-design-chat, not legacy builder-chat. */
+.unified-design-chat{
+  grid-template-rows:auto 58px minmax(0,1fr) auto!important;
+}
+.unified-design-chat>.agent-design-project-toolbar{
+  border-bottom-color:#223247;
+  background:linear-gradient(90deg,#0d1825,#101d2c 68%,#0c1722);
+}
+.unified-design-chat>.agent-design-project-toolbar .agent-design-project-identity>strong{
+  max-width:360px;
+}
+
+/* Feature management is visible in the actual right Project Configuration area. */
+.unified-feature-manager-shell{margin:0 0 12px}
+.unified-feature-manager-shell .agent-feature-manager{margin-top:0;background:#0c1622;border-color:#274158}
+.unified-feature-manager-shell .agent-feature-manager-head{padding:10px 11px;background:#0e1c2a}
+.unified-feature-manager-shell .agent-feature-list{max-height:300px}
+.design-info-panel .agent-feature-row{align-items:flex-start;flex-direction:column;gap:7px}
+.design-info-panel .agent-feature-info{width:100%}
+.design-info-panel .agent-feature-info small{max-width:none;white-space:normal;line-height:1.35}
+.design-info-panel .agent-feature-actions{width:100%;justify-content:flex-end}
+.design-info-panel .agent-feature-actions button.danger{background:#28151b;border-color:#7b3947;color:#ffb0ba}
+.design-info-panel .agent-feature-actions button.danger:hover{background:#3a1b24;border-color:#a54c5d}
+
+/* Keep the narrow layout configuration panel readable: no 48-item registry inline. */
+.ui-layout-theme-target-summary{
+  align-items:stretch;
+  flex-direction:column;
+  gap:8px;
+  padding:10px;
+  background:linear-gradient(180deg,rgba(24,54,76,.34),rgba(16,30,43,.36));
+  border-color:#2a4a61;
+}
+.ui-layout-theme-target-summary>div:first-child{gap:2px}
+.ui-layout-theme-target-summary strong{font-size:11.5px;color:#d9efff}
+.ui-layout-theme-target-summary small{font-size:10px;line-height:1.4;color:#839caf;opacity:1}
+.ui-layout-theme-target-actions{display:flex!important;align-items:center;justify-content:space-between;gap:8px;flex-direction:row!important}
+.ui-layout-theme-target-actions>span{font-size:9.5px;font-weight:800;color:#76c6ef;border:1px solid #285d7b;background:#0c2637;border-radius:999px;padding:4px 7px;white-space:nowrap}
+.ui-layout-theme-target-summary .ui-layout-theme-target-actions>button{flex:1;min-width:0;color:#bce8ff;border-color:#326886;background:#10283a;font-size:10px}
+.ui-layout-theme-target-summary .ui-layout-theme-target-actions>button:hover{background:#17384e;border-color:#4593bd}
+
+.ui-layout-theme-target-modal-backdrop{
+  position:fixed;inset:0;z-index:23050;display:flex;align-items:center;justify-content:center;
+  padding:28px;background:rgba(2,8,16,.74);backdrop-filter:blur(3px)
+}
+.ui-layout-theme-target-modal{
+  width:min(920px,94vw);max-height:min(760px,86vh);display:grid;grid-template-rows:auto auto minmax(0,1fr);
+  overflow:hidden;border:1px solid #31546d;border-radius:14px;background:#09131d;
+  box-shadow:0 28px 90px rgba(0,0,0,.56)
+}
+.ui-layout-theme-target-modal-head{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 18px;border-bottom:1px solid #233d51;background:linear-gradient(90deg,#0c1d2a,#102739)}
+.ui-layout-theme-target-modal-head>div{display:grid;gap:3px}
+.ui-layout-theme-target-modal-head span{font-size:9px;font-weight:900;letter-spacing:.12em;color:#5fc4f2}
+.ui-layout-theme-target-modal-head strong{font-size:17px;color:#eef8ff}
+.ui-layout-theme-target-modal-head small{font-size:11px;line-height:1.4;color:#8aa6ba}
+.ui-layout-theme-target-modal-head>button{width:32px;height:32px;border:1px solid #34556b;border-radius:8px;background:#0d1a25;color:#9eb9ca;font-size:20px;cursor:pointer}
+.ui-layout-theme-target-modal-head>button:hover{background:#162a39;color:white}
+.ui-layout-theme-target-modal-stats{display:grid;grid-template-columns:auto auto minmax(0,1fr);align-items:center;gap:8px 10px;padding:10px 18px;border-bottom:1px solid #1e3446;background:#0a1722}
+.ui-layout-theme-target-modal-stats b{font-size:20px;color:#65cff8}
+.ui-layout-theme-target-modal-stats span{font-size:11px;font-weight:800;color:#d8e8f2}
+.ui-layout-theme-target-modal-stats small{justify-self:end;font-size:10px;color:#748ea1}
+.ui-layout-theme-target-list.modal-list{margin:0;padding:12px 18px 16px;border:0;border-radius:0;max-height:none;overflow:auto;background:#09131d}
+.ui-layout-theme-target-list.modal-list .ui-layout-theme-target-group{grid-template-columns:120px minmax(0,1fr);gap:14px;padding:11px 0}
+.ui-layout-theme-target-list.modal-list .ui-layout-theme-target-group>strong{font-size:11px;color:#8eb8d1;padding-top:7px}
+.ui-layout-theme-target-list.modal-list .ui-layout-theme-target-group>div{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:7px}
+.ui-layout-theme-target-list.modal-list .ui-layout-theme-target-group span{min-width:0;padding:7px 9px;border-color:#294256;background:#0d1c29}
+.ui-layout-theme-target-list.modal-list .ui-layout-theme-target-group b{font-size:11px;color:#d9eaf5}
+.ui-layout-theme-target-list.modal-list .ui-layout-theme-target-group em{font-size:9px;color:#718da2}
+.ui-layout-theme-target-empty{padding:28px;text-align:center;color:#8098aa;font-size:11px}
+
+@media(max-width:900px){
+  .ui-layout-theme-target-modal-backdrop{padding:12px}
+  .ui-layout-theme-target-modal-stats{grid-template-columns:auto 1fr}
+  .ui-layout-theme-target-modal-stats small{grid-column:1/-1;justify-self:start}
+  .ui-layout-theme-target-list.modal-list .ui-layout-theme-target-group{grid-template-columns:1fr}
+}

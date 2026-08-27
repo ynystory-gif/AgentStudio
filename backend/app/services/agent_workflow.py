@@ -23,6 +23,7 @@ from app.services.settings_generator import (
     generate_settings_artifacts,
     validate_settings_artifacts,
 )
+from app.services.frontend_theme_registry import detect_frontend_theme_target, frontend_theme_generation_instruction
 
 
 class AgentState(TypedDict, total=False):
@@ -53,6 +54,7 @@ class AgentState(TypedDict, total=False):
     target_agent_workflow: dict
     file_plan: dict
     settings_plan: dict
+    test_environment_plan: dict
     settings_path_normalization: dict
     settings_requirement_spec: dict
     settings_schema: dict
@@ -223,6 +225,7 @@ async def requirement_analysis_node(state: AgentState):
         "design_bundle": design,
         "requirement_spec": design.get("requirement_spec") or {},
         "database_plan": design.get("database_plan") or {},
+        "test_environment_plan": design.get("test_environment_plan") or {},
         "status": "REQUIREMENTS_ANALYZED",
     }
 
@@ -681,6 +684,11 @@ def _ensure_minimum_agent_file_plan(
             "typescript", "type script", "타입스크립트", "타입 스크립트", ".tsx", "react+ts", "react + ts"
         )
     )
+    frontend_target = detect_frontend_theme_target(text)
+    frontend_target_id = str(frontend_target.get("id") or "generic_web")
+    has_frontend = frontend_target_id != "generic_web" or any(token in text for token in (
+        "frontend", "front-end", "프론트", "web ui", "웹 ui", "웹앱", "관리자 화면", "대시보드"
+    ))
     has_mcp = "mcp" in text
 
     # LLM이 React + TypeScript 요구를 App.jsx 같은 JS 경로로 제안해도
@@ -789,6 +797,17 @@ def _ensure_minimum_agent_file_plan(
             ] + (["types"] if is_react_typescript else []),
         }
 
+    elif has_frontend:
+        value["frontend_contract"] = {
+            "framework": str(frontend_target.get("label") or "Generic Web Frontend"),
+            "target_id": frontend_target_id,
+            "language": str(frontend_target.get("language") or "Framework dependent"),
+            "theme_strategy": str(frontend_target.get("strategy") or "Canonical Design Token adapter"),
+            "theme_adapter_required": True,
+            "modular_layout_required": True,
+            "required_layers": ["layout/navigation", "pages/views", "services/api", "theme/styles"],
+        }
+
     if needs_settings:
         settings_plan = design_bundle.get("settings_plan") or {}
         for group in ("backend", "frontend"):
@@ -803,6 +822,48 @@ def _ensure_minimum_agent_file_plan(
                         "Settings Generator가 관리하는 설정 구성요소",
                         "settings",
                     )
+
+
+    test_environment_plan = design_bundle.get("test_environment_plan") or {}
+    if test_environment_plan.get("enabled"):
+        test_files: list[str] = []
+        backend_plan = test_environment_plan.get("backend") or {}
+        for key in ("schema", "service", "router"):
+            path = str(backend_plan.get(key) or "").replace("\\", "/").strip()
+            if path:
+                _append_planned_file(
+                    value,
+                    path,
+                    "DEV/TEST 전용 Seed Data·권한별 테스트 계정·초기화·사용자 전환 관리",
+                    "test environment",
+                )
+                test_files.append(path)
+
+        for raw in test_environment_plan.get("tests") or []:
+            path = str(raw or "").replace("\\", "/").strip()
+            if path:
+                _append_planned_file(
+                    value,
+                    path,
+                    "테스트 데이터 격리·Role/Permission·production 거부·impersonation 계약 테스트",
+                    "test environment",
+                )
+                test_files.append(path)
+
+        frontend_plan = test_environment_plan.get("frontend") or {}
+        for key in ("page", "api_client"):
+            path = str(frontend_plan.get(key) or "").replace("\\", "/").strip()
+            if path and has_frontend:
+                _append_planned_file(
+                    value,
+                    path,
+                    "관리자 테스트 환경 UI/API — Seed 현황, 권한별 계정, Test-as-user, 시나리오 실행",
+                    "test environment",
+                )
+                test_files.append(path)
+
+        if test_files:
+            _map_component_file(value, "Generated Agent Test Environment", test_files)
 
 
     database_plan = design_bundle.get("database_plan") or {}
@@ -899,7 +960,16 @@ def _requirement_contracts(state: AgentState) -> dict:
         )
     ).casefold()
 
+    frontend_target = detect_frontend_theme_target(payload)
+    frontend_target_id = str(frontend_target.get("id") or "generic_web")
+    frontend_present = frontend_target_id != "generic_web" or any(token in payload for token in (
+        "frontend", "front-end", "프론트", "web ui", "웹 ui", "웹앱", "streamlit", "gradio", "nicegui",
+        "blazor", "flutter", "react native", "vue", "angular", "svelte", "astro", "html", "css"
+    ))
+
     return {
+        "frontend": frontend_present,
+        "frontend_target": frontend_target,
         "fastapi": (
             "fastapi" in payload
             or "uvicorn" in payload
@@ -2316,7 +2386,7 @@ def _repair_required_paths(
 
 
 _TEST_REPAIR_SUFFIXES = (
-    ".py", ".js", ".jsx", ".ts", ".tsx", ".json", ".html", ".css", ".md", ".txt",
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".astro", ".dart", ".razor", ".cshtml", ".json", ".html", ".css", ".scss", ".sass", ".less", ".md", ".txt",
 )
 
 
@@ -2343,8 +2413,8 @@ def _candidate_code_paths_from_text(text: str) -> list[str]:
 
     patterns = (
         # Windows/Unix 상대·절대 경로. 공백이 거의 없는 소스 경로를 대상으로 합니다.
-        re.compile(r"(?i)([A-Za-z]:[\\/][^\r\n\"'<>|]+?\.(?:py|jsx?|tsx?|json|html|css|md|txt))"),
-        re.compile(r"(?i)((?:\.?\.?[\\/])?(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+\.(?:py|jsx?|tsx?|json|html|css|md|txt))"),
+        re.compile(r"(?i)([A-Za-z]:[\\/][^\r\n\"'<>|]+?\.(?:py|jsx?|tsx?|vue|svelte|astro|dart|razor|cshtml|json|html|css|scss|sass|less|md|txt))"),
+        re.compile(r"(?i)((?:\.?\.?[\\/])?(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+\.(?:py|jsx?|tsx?|vue|svelte|astro|dart|razor|cshtml|json|html|css|scss|sass|less|md|txt))"),
         # Python compileall / traceback가 basename만 주는 경우.
         re.compile(r"(?i)\(([A-Za-z0-9_.-]+\.py),\s*line\s*\d+\)"),
     )
@@ -2866,6 +2936,13 @@ def _incremental_focus_paths(state: AgentState, revision: dict) -> set[str]:
         for group in ("backend", "frontend"):
             for raw in (state.get("settings_plan") or {}).get(group, {}).values():
                 add(raw)
+    if "test_environment_plan" in affected:
+        test_plan = state.get("test_environment_plan") or _bundle(state).get("test_environment_plan") or {}
+        for group in ("backend", "frontend"):
+            for raw in (test_plan.get(group) or {}).values():
+                add(raw)
+        for raw in test_plan.get("tests") or []:
+            add(raw)
 
     # Keep incremental edits bounded. Missing required files are never dropped.
     required = _required_manifest_paths(state)
@@ -2887,6 +2964,7 @@ async def code_generation_node(state: AgentState):
         "target_agent_workflow": state.get("target_agent_workflow", {}),
         "file_plan": state.get("file_plan", {}),
         "settings_plan": state.get("settings_plan", {}),
+        "test_environment_plan": state.get("test_environment_plan", {}) or design_bundle.get("test_environment_plan", {}),
         "settings_schema": state.get("settings_schema", {}),
         "settings_ui_plan": state.get("settings_ui_plan", {}),
         # 전체 Coding Style rule/prompt는 create_patch()가 한 번만 주입합니다.
@@ -3098,7 +3176,9 @@ async def code_generation_node(state: AgentState):
             "기본 LLM은 설정에서 gpt-4o-mini를 읽고 Ollama로 전환 가능해야 하며 "
             "gpt-4를 소스에 직접 하드코딩하지 마십시오. "
             "React + Vite, FastAPI + Uvicorn, MCP stdio 계약을 확정 요구사항 그대로 유지하십시오. "
-            "React + TypeScript 요구이면 App.tsx/main.tsx와 분리된 Layout/Header/Sidebar/Footer/Page 구조를 유지하고 .jsx/.js로 후퇴하지 마십시오."
+            "React + TypeScript 요구이면 App.tsx/main.tsx와 분리된 Layout/Header/Sidebar/Footer/Page 구조를 유지하고 .jsx/.js로 후퇴하지 마십시오. "
+            "UI Layout Runtime 정책이 있으면 메뉴/탭 이동으로 Agent run을 중단하지 말고 session_id/run_id 기반 Backend Runtime 유지, Frontend 상태 복원, WebSocket/SSE 재연결·run 재조회를 보존하십시오. "
+            "Generated Agent Test Environment 정책이 있으면 테스트 데이터 격리, 권한별 테스트 계정, 관리자 impersonation, production 거부 계약을 삭제하거나 약화하지 마십시오."
         )
 
         try:
@@ -3201,7 +3281,10 @@ async def code_generation_node(state: AgentState):
             + "\n\n[영향받은 설계 section]\n" + json.dumps(affected_sections, ensure_ascii=False, indent=2)
             + "\n\n[수정 허용/우선 파일]\n" + json.dumps(sorted(focus_paths), ensure_ascii=False, indent=2)
             + "\n\n전체 프로젝트를 처음부터 다시 생성하지 마십시오. 기존 정상 파일은 보존하고 이번 변경에 영향받은 파일만 수정하십시오. "
-            "새 설계에서 추가된 required 파일은 생성할 수 있습니다. 변경과 무관한 파일은 changes[]에 넣지 마십시오."
+            "새 설계에서 추가된 required 파일은 생성할 수 있습니다. 변경과 무관한 파일은 changes[]에 넣지 마십시오. "
+            "ui_layout 변경분에 실행/상태 유지 설정이 포함되면 기존 Agent Runtime을 UI component lifecycle에 종속시키지 말고, 상태 store·복원·실행 상태 표시·알림·WebSocket/SSE 재연결 정책만 필요한 파일에 증분 반영하십시오. "
+            "ui_layout.theme가 custom이면 theme_id/theme_name/theme_tokens/component_rules/layout_rules를 보존하고 기존 Frontend 기술에 맞는 native Theme 방식으로 증분 스타일링하십시오. React/Vue/Angular/Svelte/Next/Nuxt/Astro/HTML/Streamlit/Gradio/NiceGUI/Blazor/React Native/Flutter 등 특정 Framework 하나로 강제하지 마십시오. 참조 사이트의 로고·콘텐츠는 복제하지 마십시오. "
+            "auth/role/permission/database/상품/주문 변경으로 test_environment_plan이 바뀌면 Seed Data·권한별 테스트 계정·시나리오·관리자 Test-as-user 관련 파일만 함께 증분 반영하십시오."
         )
         try:
             plan = await create_patch(patch_request, files, state.get("provider"), project_scope=True)
@@ -3251,7 +3334,19 @@ async def code_generation_node(state: AgentState):
             "MCP stdio 요구에서는 Flask/requests 기반 localhost HTTP 서버로 대체하지 마십시오. "
             "기본 모델/Provider는 환경설정에서 읽고 gpt-4를 직접 하드코딩하지 마십시오. "
             "10MB/120초/Chunking 등 인터뷰 확정값도 구현하십시오. "
-            "AgentStudio Coding Style Registry의 선택 규칙을 생성 코드에 적용하십시오."
+            "AgentStudio Coding Style Registry의 선택 규칙을 생성 코드에 적용하십시오. "
+            "confirmed_requirements.ui_layout이 선택되어 있으면 메뉴/탭/Route 전환과 Frontend View/Component lifecycle이 Agent run의 cancel/stop과 연결되지 않게 하십시오. "
+            "custom Theme이 선택되어 있으면 ui_layout.theme_tokens/component_rules/layout_rules를 canonical Design Token으로 유지한 뒤 확정된 Frontend Framework의 native Theme 방식으로 변환하여 Header/Navigation/Card/Button/Form/Table/Modal 등 공통 UI에 일관되게 적용하십시오. React 전용 Theme Provider나 CSS 변수 방식으로 고정하지 마십시오. "
+            + frontend_theme_generation_instruction((state.get("request") or "") + "\n" + json.dumps(build_context, ensure_ascii=False)) + " "
+            "Agent Runtime은 Backend session_id/run_id 기반으로 UI lifecycle과 분리하고, Frontend는 실행 상태 store와 상태 재조회/재연결로 복원하십시오. "
+            "restore_screen_state/restore_scroll_position/restore_draft_input/restore_selection_state/screen_restore_mode와 show_running_tasks/runtime_status_position/알림 설정을 실제 UI 코드에 반영하십시오. "
+            "WebSocket/SSE가 끊겼다가 다시 연결되면 현재 run 상태를 재조회하고 누락된 진행 이벤트를 재동기화하도록 구현하십시오. "
+            "test_environment_plan.enabled=true이면 생성 Agent의 관리자 기능에 DEV/TEST 전용 테스트 환경을 실제 구현하십시오. "
+            "Seed Data 생성/초기화/삭제, 데이터 현황, 수량 변경, 시나리오 실행, 결과/로그를 제공하고 is_test/test_batch_id로 운영 데이터와 격리하십시오. "
+            "로그인/회원 기능이 있으면 기본 테스트 회원 10명을 지원하고 Role/Permission이 있으면 plan.role_test_accounts의 모든 Role별 테스트 계정과 허용/거부 Permission 검증을 구현하십시오. "
+            "관리자는 각 테스트 계정의 '이 권한으로 테스트' 기능으로 short-lived impersonation을 시작/종료할 수 있어야 하며 모든 전환을 감사 로그에 남기고 TEST 배너를 표시하십시오. "
+            "production에서는 seed/reset/delete/impersonation을 Backend에서 반드시 거부하고 테스트 비밀번호를 소스에 하드코딩하지 마십시오. "
+            "상품 도메인이 있으면 기본 상품 50개 및 카테고리/재고, 주문 기능이 있으면 주문 Seed를 plan 수량대로 연계 생성하십시오."
         )
 
         try:
@@ -3659,8 +3754,8 @@ async def build_artifact_validation_node(state: AgentState):
 
         suffix = path.suffix.casefold()
         if suffix not in {
-            ".py", ".js", ".jsx", ".ts", ".tsx",
-            ".md", ".json", ".txt", ".html", ".css", ".yml", ".yaml",
+            ".py", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".astro", ".dart", ".razor", ".cshtml",
+            ".md", ".json", ".txt", ".html", ".css", ".scss", ".sass", ".less", ".yml", ".yaml",
         }:
             continue
 
@@ -3723,8 +3818,8 @@ async def build_artifact_validation_node(state: AgentState):
         })
 
     source_suffixes = {
-        ".py", ".js", ".jsx", ".ts", ".tsx",
-        ".json", ".md", ".txt", ".html", ".css",
+        ".py", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".astro", ".dart", ".razor", ".cshtml",
+        ".json", ".md", ".txt", ".html", ".css", ".scss", ".sass", ".less",
     }
 
     actual_source_files = []
@@ -4065,7 +4160,7 @@ async def environment_configuration_node(state: AgentState):
     }
 
 
-_PRETEST_SOURCE_SUFFIXES = {'.py', '.js', '.jsx', '.ts', '.tsx', '.json', '.sql', '.sh', '.ps1', '.html', '.css'}
+_PRETEST_SOURCE_SUFFIXES = {'.py', '.js', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.astro', '.dart', '.razor', '.cshtml', '.json', '.sql', '.sh', '.ps1', '.html', '.css', '.scss', '.sass', '.less'}
 
 
 async def _repair_wrapped_generated_source_files(project_root: str) -> list[dict]:
@@ -5026,6 +5121,10 @@ async def package_completion_node(state: AgentState):
         ),
         "settings_plan": state.get(
             "settings_plan",
+            {},
+        ),
+        "test_environment_plan": state.get(
+            "test_environment_plan",
             {},
         ),
         "settings_validation": state.get(

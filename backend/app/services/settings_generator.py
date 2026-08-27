@@ -116,6 +116,7 @@ async def generate_settings_artifacts(
         "5. .env.example에는 실제 Secret을 쓰지 않습니다.\n"
         "6. settings_plan 경로는 프로젝트 루트 기준 상대경로이며 대소문자까지 그대로 사용합니다.\n"
         "7. 신규 파일은 create_file=true와 content를 사용합니다.\n"
+        "8. 생성 대상 Agent에 관리자 테스트 환경이 계획되어 있으면 Settings UI Navigation에서 테스트 환경 메뉴를 숨기거나 삭제하지 않습니다.\n"
     )
 
     plan = await create_patch(prompt, files, provider, project_scope=True)

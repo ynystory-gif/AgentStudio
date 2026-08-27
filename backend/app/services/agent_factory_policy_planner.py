@@ -23,6 +23,7 @@ POLICY_FILES = [
     "settings_schema_policy.json",
     "settings_ui_policy.json",
     "settings_test_policy.json",
+    "generated_agent_test_environment_policy.json",
 ]
 
 
@@ -121,6 +122,7 @@ def infer_fastapi_factory_plan(
             "DEPENDENCY_LIFECYCLE_POLICY",
             "API_ERROR_SECURITY_POLICY",
             "AGENT_API_TEST_POLICY",
+            "GENERATED_AGENT_TEST_ENVIRONMENT_POLICY",
             *(
                 ["ASYNC_STRATEGY_POLICY"]
                 if needs_async

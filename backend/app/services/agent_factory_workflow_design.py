@@ -12,6 +12,7 @@ from app.services.agent_factory_policy_planner import (
 )
 from app.services.model_router import LLMTask, model_for_task
 from app.services.database_schema_design import build_database_plan
+from app.services.frontend_theme_registry import detect_frontend_theme_target, frontend_test_environment_files
 
 
 SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니다.
@@ -176,6 +177,51 @@ SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니�
       "invalid value rejection"
     ]
   },
+  "test_environment_plan": {
+    "enabled": true,
+    "reason": "신규 Agent 기능 검증용 DEV/TEST 관리자 테스트 환경",
+    "environment_guard": {
+      "allowed_environments": ["development", "test"],
+      "deny_production": true,
+      "require_admin": true,
+      "audit_actions": true
+    },
+    "seed_defaults": [
+      {"entity": "users", "count": 10, "reason": "로그인/회원 기능이 있는 경우"}
+    ],
+    "role_test_accounts": [
+      {"role": "USER", "count": 10, "permissions_source": "runtime_rbac"}
+    ],
+    "impersonation": {
+      "enabled": true,
+      "admin_only": true,
+      "short_lived": true,
+      "audit": true,
+      "visible_test_banner": true
+    },
+    "admin_ui": {
+      "menu_label": "테스트 환경",
+      "show_seed_status": true,
+      "show_role_accounts": true,
+      "allow_count_override": true,
+      "allow_generate": true,
+      "allow_reset": true,
+      "allow_delete": true,
+      "allow_test_as_user": true,
+      "allow_scenario_run": true
+    },
+    "backend": {
+      "schema": "backend/app/schemas/test_environment.py",
+      "service": "backend/app/services/test_data_service.py",
+      "router": "backend/app/routers/admin_test_environment.py"
+    },
+    "frontend": {
+      "page": "frontend/src/pages/admin/TestEnvironmentPage.tsx",
+      "api_client": "frontend/src/services/testEnvironmentApi.ts"
+    },
+    "tests": ["backend/tests/test_test_environment.py"],
+    "scenarios": []
+  },
   "environment_plan": {
     "env_vars": [],
     "dependencies": [],
@@ -219,6 +265,12 @@ SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니�
 - database_plan.finalized=true인 경우 사용자가 확인한 DB 계약이므로 이후 코드 생성은 해당 Table/Column/FK와 Migration DDL을 임의 변경하지 않습니다.
 - API Key/Password/Token은 secret=true로 표시하고 GET 응답에서 평문 노출하지 않습니다.
 - 설정 UI가 필요한 경우 file_plan.new_files에 Backend Settings API/Schema/Service와 React Settings UI/API Client를 포함합니다.
+- 모든 신규 생성 Agent는 DEV/TEST 전용 test_environment_plan을 설계하고, 어떤 Frontend Framework이든 UI가 있으면 해당 기술의 관리자 메뉴/화면에 테스트 환경을 포함합니다. React로 강제하지 않습니다.
+- 로그인/회원이 있으면 기본 테스트 회원 10명을 생성할 수 있게 하고, Role/Permission이 있으면 발견된 모든 권한별 테스트 계정과 허용/거부 권한 검증 시나리오를 자동 구성합니다.
+- 최고 권한 계정은 기본 1개만 생성하고 일반 USER는 기본 10개로 하되 관리자가 수량을 변경할 수 있어야 합니다.
+- 상품 기능이 있으면 테스트 상품 50개를 기본값으로 하고 카테고리/재고/주문 등 연관 Seed를 요구사항에 맞게 함께 구성합니다.
+- 테스트 데이터는 is_test/test_batch_id로 운영 데이터와 격리하고 production에서는 Seed/초기화/삭제/사용자 전환을 거부합니다.
+- 테스트 사용자 전환은 관리자 전용 short-lived impersonation으로 구현하고 감사 로그와 TEST 표시를 남기며 테스트 비밀번호를 소스에 하드코딩하지 않습니다.
 - Agent Architecture의 모든 component는 file_plan.component_file_map에서 최소 1개 이상의 실제 파일과 연결되어야 합니다.
 - 생성 대상이 웹 Agent라면 실행 가능한 Backend entrypoint, Frontend entrypoint/package 설정, API client, README, 환경 예제, 의존성 파일, 테스트 파일까지 계획합니다.
 - 모든 생성 대상 Agent는 프로젝트 루트의 SYSTEM_ADMIN.cmd를 사용자 단일 실행 진입점으로 제공하며, CMD는 UTF-8(chcp 65001) 기준으로 SYSTEM_ADMIN.ps1 관리 스크립트를 호출합니다. SYSTEM_ADMIN.ps1은 Windows PowerShell 5.1 호환을 위해 UTF-8 BOM으로 저장합니다.
@@ -349,6 +401,7 @@ def _fallback_design(request: str) -> dict:
             },
             "tests": [],
         },
+        "test_environment_plan": {},
         "environment_plan": {
             "env_vars": [],
             "dependencies": [],
@@ -609,6 +662,212 @@ def _enforce_workflow_requirement_coverage(
     return design
 
 
+
+_ROLE_RULES = (
+    ("SUPER_ADMIN", ("super_admin", "super admin", "슈퍼관리자", "최고 관리자", "최고관리자", "시스템 관리자"), 1),
+    ("ADMIN", ("admin", "관리자"), 2),
+    ("MANAGER", ("manager", "매니저", "관리 책임자"), 2),
+    ("STAFF", ("staff", "직원", "담당자", "operator", "운영자"), 3),
+    ("USER", ("user", "회원", "사용자", "customer", "고객"), 10),
+)
+
+
+def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
+    return any(token in text for token in tokens)
+
+
+def _detect_test_roles(text: str) -> list[dict]:
+    roles: list[dict] = []
+    seen: set[str] = set()
+    for role, tokens, count in _ROLE_RULES:
+        if _contains_any(text, tokens):
+            if role == "ADMIN" and "SUPER_ADMIN" in seen and not _contains_any(text, (" admin", "관리자", "admin 권한", "admin role")):
+                continue
+            roles.append({
+                "role": role,
+                "count": count,
+                "permissions_source": "runtime_rbac",
+            })
+            seen.add(role)
+    auth_signal = _contains_any(text, ("로그인", "인증", "auth", "rbac", "role", "permission", "권한", "회원", "사용자 계정"))
+    if auth_signal and not roles:
+        roles = [
+            {"role": "ADMIN", "count": 2, "permissions_source": "runtime_rbac"},
+            {"role": "USER", "count": 10, "permissions_source": "runtime_rbac"},
+        ]
+    elif auth_signal and "USER" not in {row["role"] for row in roles}:
+        roles.append({"role": "USER", "count": 10, "permissions_source": "runtime_rbac"})
+    return roles
+
+
+def _seed_default(entity: str, count: int, reason: str, related: list[str] | None = None) -> dict:
+    return {
+        "entity": entity,
+        "count": count,
+        "reason": reason,
+        "related_entities": list(related or []),
+        "is_test": True,
+        "batch_key": "test_batch_id",
+    }
+
+
+def _enforce_generated_test_environment_plan(design: dict, request: str) -> dict:
+    """신규 Agent의 관리자 테스트 환경을 요구 의미에 맞게 결정적으로 보강합니다."""
+    plan = dict(design.get("test_environment_plan") or {})
+    combined = (
+        str(request or "")
+        + "\n"
+        + json.dumps({
+            "requirement_spec": design.get("requirement_spec") or {},
+            "capability_plan": design.get("capability_plan") or {},
+            "agent_architecture": design.get("agent_architecture") or {},
+            "database_plan": design.get("database_plan") or {},
+        }, ensure_ascii=False)
+    ).casefold()
+
+    headless = _contains_any(combined, ("headless", "ui 없음", "화면 없음", "no ui"))
+    frontend_target = detect_frontend_theme_target(combined)
+    frontend_target_id = str(frontend_target.get("id") or "generic_web")
+    frontend_present = (
+        frontend_target_id != "generic_web"
+        or _contains_any(combined, ("frontend", "front-end", "프론트", "웹 ui", "web ui", "웹앱", "관리자 화면", "대시보드"))
+    ) and not headless
+    frontend_test_files = frontend_test_environment_files(frontend_target_id)
+    auth = _contains_any(combined, ("로그인", "인증", "auth", "rbac", "role", "permission", "권한", "회원", "사용자 계정", "customer", "고객"))
+    products = _contains_any(combined, ("상품", "product", "catalog", "카탈로그", "쇼핑", "commerce"))
+    orders = _contains_any(combined, ("주문", "order", "장바구니", "cart", "checkout"))
+    rag = _contains_any(combined, ("rag", "문서 검색", "vector", "벡터", "embedding", "임베딩", "pgvector"))
+    consultation = _contains_any(combined, ("상담", "대화", "chat", "memory", "메모리", "conversation"))
+    reservation = _contains_any(combined, ("예약", "reservation", "booking", "appointment"))
+
+    seeds: list[dict] = []
+    if auth:
+        seeds.append(_seed_default("users", 10, "로그인/회원 기능 검증용 테스트 사용자"))
+    if products:
+        seeds.extend([
+            _seed_default("categories", 5, "상품 분류 테스트"),
+            _seed_default("products", 50, "상품 검색/추천/관리 테스트", ["categories"]),
+            _seed_default("inventory", 50, "재고 조회/차감 테스트", ["products"]),
+        ])
+    if orders:
+        seeds.append(_seed_default("orders", 20, "주문 Workflow 테스트", ["users", "products"]))
+        seeds.append(_seed_default("order_items", 40, "주문 상세 연결 데이터", ["orders", "products"]))
+    if rag:
+        seeds.extend([
+            _seed_default("rag_documents", 20, "RAG 문서 테스트"),
+            _seed_default("rag_chunks", 100, "Chunk/Vector 검색 테스트", ["rag_documents"]),
+        ])
+    if consultation:
+        seeds.extend([
+            _seed_default("consultation_sessions", 20, "상담 Session 테스트", ["users"] if auth else []),
+            _seed_default("consultation_messages", 100, "대화 이력 테스트", ["consultation_sessions"]),
+            _seed_default("memories", 30, "Memory 저장/조회 테스트", ["consultation_sessions"]),
+        ])
+    if reservation:
+        seeds.extend([
+            _seed_default("reservation_services", 10, "예약 대상 서비스 테스트"),
+            _seed_default("reservation_slots", 100, "예약 가능 시간 테스트", ["reservation_services"]),
+            _seed_default("reservations", 20, "예약 생성/취소 테스트", ["reservation_services", "reservation_slots"]),
+        ])
+    if not seeds:
+        seeds.append(_seed_default("agent_test_cases", 10, "도메인 데이터가 없는 Agent의 기본 Smoke/Workflow 테스트"))
+
+    role_source = (
+        str(request or "")
+        + "\n"
+        + json.dumps(
+            (design.get("agent_architecture") or {}).get("security") or [],
+            ensure_ascii=False,
+        )
+    ).casefold()
+    roles = _detect_test_roles(role_source) if auth else []
+    role_testing = bool(auth and roles)
+    scenarios = [
+        "테스트 데이터 생성 후 핵심 Agent Workflow 실행",
+        "동일 test_batch_id 재실행 시 중복 폭증 방지",
+        "테스트 데이터 삭제가 non-test 운영 데이터에 영향 없음",
+        "production 환경에서 seed/reset/delete/impersonation 거부",
+    ]
+    if role_testing:
+        scenarios.extend([
+            "각 Role별 허용 Permission 접근 성공",
+            "각 Role별 금지 Permission 접근 거부",
+            "일반 사용자의 다른 사용자 소유 데이터 접근 차단",
+            "관리자 Test-as-user 전환 및 원래 관리자 Session 복귀",
+        ])
+    if products:
+        scenarios.extend(["상품 검색/추천", "재고 조회"])
+    if orders:
+        scenarios.extend(["장바구니/주문 생성", "본인 주문 조회 및 권한 검증"])
+    if rag:
+        scenarios.append("RAG 검색 결과 및 Chunk 근거 검증")
+
+    plan.update({
+        "enabled": True,
+        "reason": str(plan.get("reason") or "신규 생성 Agent를 관리자 화면에서 즉시 검증할 수 있는 DEV/TEST Seed/계정/시나리오 환경"),
+        "mode": "admin_ui_and_api" if frontend_present else "management_api_cli",
+        "environment_guard": {
+            "allowed_environments": ["development", "test"],
+            "deny_production": True,
+            "require_admin": True,
+            "audit_actions": True,
+        },
+        "seed_defaults": seeds,
+        "role_test_accounts": roles,
+        "role_permission_testing": {
+            "enabled": role_testing,
+            "verify_allowed_permissions": role_testing,
+            "verify_denied_permissions": role_testing,
+            "verify_own_resource_isolation": role_testing,
+        },
+        "data_isolation": {
+            "required": True,
+            "test_flag": "is_test",
+            "batch_field": "test_batch_id",
+            "batch_delete_only": True,
+            "idempotent_seed": True,
+        },
+        "impersonation": {
+            "enabled": role_testing,
+            "admin_only": True,
+            "allowed_environments": ["development", "test"],
+            "short_lived": True,
+            "audit": True,
+            "visible_test_banner": True,
+            "exit_to_original_admin": True,
+            "hardcoded_password_forbidden": True,
+        },
+        "admin_ui": {
+            "enabled": bool(frontend_present),
+            "menu_label": "테스트 환경",
+            "show_seed_status": True,
+            "show_role_accounts": bool(roles),
+            "allow_count_override": True,
+            "allow_generate": True,
+            "allow_reset": True,
+            "allow_delete": True,
+            "allow_test_as_user": role_testing,
+            "allow_scenario_run": True,
+            "show_run_result": True,
+            "show_audit_log": True,
+        },
+        "backend": {
+            "schema": "backend/app/schemas/test_environment.py",
+            "service": "backend/app/services/test_data_service.py",
+            "router": "backend/app/routers/admin_test_environment.py",
+        },
+        "frontend": {
+            "framework_target": frontend_target_id if frontend_present else "headless",
+            "framework_label": str(frontend_target.get("label") or "") if frontend_present else "Headless",
+            "page": str(frontend_test_files.get("page") or "") if frontend_present else "",
+            "api_client": str(frontend_test_files.get("api_client") or "") if frontend_present else "",
+        },
+        "tests": ["backend/tests/test_test_environment.py"],
+        "scenarios": scenarios,
+    })
+    design["test_environment_plan"] = plan
+    return design
+
 async def design_agent_factory(
     request: str,
     project_context: dict | None = None,
@@ -714,6 +973,7 @@ async def design_agent_factory(
                 parsed["database_plan"]["custom_design_notes"] = notes
                 parsed["design_runtime"]["database_provider"] = "deterministic_fallback"
                 parsed["design_runtime"]["database_error"] = f"{type(db_exc).__name__}: {db_exc}"
+        parsed = _enforce_generated_test_environment_plan(parsed, request)
         return parsed
 
     except Exception:
@@ -724,6 +984,7 @@ async def design_agent_factory(
         )
         _sanitize_requirement_spec(fallback, request)
         fallback["database_plan"] = build_database_plan(request, fallback)
+        fallback = _enforce_generated_test_environment_plan(fallback, request)
         return fallback
 
 # v5.345: Incremental design revision. Reuse the previous design unless the
@@ -731,7 +992,7 @@ async def design_agent_factory(
 _DESIGN_SECTION_KEYS = (
     "requirement_spec", "capability_plan", "tool_mcp_plan",
     "agent_architecture", "database_plan", "target_agent_workflow",
-    "file_plan", "settings_plan", "environment_plan",
+    "file_plan", "settings_plan", "test_environment_plan", "environment_plan",
 )
 
 
@@ -782,17 +1043,17 @@ def _new_interview_messages(previous_design: dict | None, current_messages: list
 def _impact_sections(changed_groups: list[str], delta_text: str) -> list[str]:
     mapping = {
         "original_request": set(_DESIGN_SECTION_KEYS),
-        "ui": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
-        "ui_layout": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
-        "backend": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
+        "ui": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "environment_plan"},
+        "ui_layout": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "environment_plan"},
+        "backend": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "environment_plan"},
         "llm": {"requirement_spec", "capability_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
         "file_access": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan"},
         "mcp": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "environment_plan"},
-        "database": {"requirement_spec", "capability_plan", "agent_architecture", "database_plan", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
+        "database": {"requirement_spec", "capability_plan", "agent_architecture", "database_plan", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "environment_plan"},
         "result": {"requirement_spec", "target_agent_workflow", "file_plan", "settings_plan"},
         "processing": {"requirement_spec", "target_agent_workflow", "settings_plan", "environment_plan"},
         "runtime": {"requirement_spec", "file_plan", "settings_plan", "environment_plan"},
-        "auth": {"requirement_spec", "capability_plan", "agent_architecture", "database_plan", "target_agent_workflow", "file_plan", "settings_plan"},
+        "auth": {"requirement_spec", "capability_plan", "agent_architecture", "database_plan", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan"},
         "manual_overrides": set(_DESIGN_SECTION_KEYS),
     }
     impacted: set[str] = set()
@@ -800,11 +1061,11 @@ def _impact_sections(changed_groups: list[str], delta_text: str) -> list[str]:
         impacted.update(mapping.get(group, {"requirement_spec", "target_agent_workflow", "file_plan"}))
     lower = str(delta_text or "").casefold()
     if any(token in lower for token in ("redis", "postgres", "pgvector", "database", "db ", "테이블", "entity", "관계")):
-        impacted.update({"database_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"})
+        impacted.update({"database_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "environment_plan"})
     if any(token in lower for token in ("mcp", "tool", "api 연동", "외부 api")):
         impacted.update({"tool_mcp_plan", "capability_plan", "agent_architecture", "target_agent_workflow", "file_plan"})
     if any(token in lower for token in ("react", "streamlit", "ui", "화면")):
-        impacted.update({"agent_architecture", "target_agent_workflow", "file_plan", "settings_plan"})
+        impacted.update({"agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan"})
     return [key for key in _DESIGN_SECTION_KEYS if key in impacted] or ["requirement_spec", "target_agent_workflow"]
 
 
@@ -943,6 +1204,7 @@ async def design_agent_factory_incremental(
                 except Exception as db_exc:
                     runtime["database_provider"] = "deterministic_fallback"
                     runtime["database_error"] = f"{type(db_exc).__name__}: {db_exc}"
+        result = _enforce_generated_test_environment_plan(result, request)
         runtime["workflow_provider"] = getattr(llm, "last_provider", "")
         runtime["incremental_revision"] = {
             "mode": "PARTIAL_REVISE",

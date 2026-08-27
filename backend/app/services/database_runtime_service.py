@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.core.database import (
     Base,
     create_agentstudio_async_engine,
+    ensure_runtime_metadata_tables,
     migrate_agentstudio_schema,
     migrate_agentstudio_schema_on_connection,
     normalize_async_database_url,
@@ -973,8 +974,9 @@ async def apply_saved_database_provider() -> dict[str, Any]:
     try:
         await rebind_database(database_url, schema=target_schema)
         # Saved Supabase providers are rebound after the local bootstrap migration.
-        # Apply the current AgentStudio compatibility migration to the actual
-        # Supabase schema before any project list/root restore query runs.
+        # v5.388: create newly-added ORM tables (for example ui_themes) on the actual
+        # active Supabase schema before compatibility migrations or API queries run.
+        await ensure_runtime_metadata_tables()
         await migrate_agentstudio_schema()
         scoped_langgraph_url = _postgres_url_with_search_path(
             langgraph_url or _langgraph_url_from_database_url(database_url),

@@ -186,6 +186,24 @@ async def get_db():
         yield session
 
 
+async def ensure_runtime_metadata_tables() -> dict:
+    """Create newly-added ORM tables on the *currently active* runtime DB.
+
+    AgentStudio bootstraps from local PostgreSQL and can then switch to Supabase.
+    A new release may add tables after a user's Supabase schema was first provisioned,
+    so migration-only startup is not enough: create_all(checkfirst) must also run after
+    the runtime rebind. This is additive and never drops user data.
+    """
+    import app.models.entities  # noqa: F401
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return {
+        "ok": True,
+        "schema": runtime_schema or "public/default",
+        "table_count": len(Base.metadata.tables),
+    }
+
+
 async def init_db():
     import app.models.entities  # noqa: F401
     async with engine.begin() as conn:

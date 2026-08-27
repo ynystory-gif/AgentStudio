@@ -21,13 +21,14 @@ import { CodexPanel } from './components/codex/CodexPanel'
 import { CodexSettingsPanel } from './components/codex/CodexSettingsPanel'
 import { AiAttachmentPicker } from './components/ai/AiAttachmentPicker'
 import { AgentActivityProgress } from './components/ai/AgentActivityProgress'
+import { AgentDesignProjectToolbar, AgentFeatureManager } from './components/ai/AgentDesignProjectManager'
 import { parseTerminalServerMessage, serializeTerminalClientMessage, terminalCellWidth, terminalNextCharacter, terminalPreviousCharacter } from './utils/terminal'
 import { getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isDatabaseDiagramFile, isNotebookFile, isPdfFile, isPresentationFile } from './utils/editor'
 import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSqlCode } from './utils/notebook'
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.382'
+const AGENTSTUDIO_FRONTEND_VERSION='5.390'
 
 const DebouncedProjectSearchInput=memo(function DebouncedProjectSearchInput({value,onCommit,placeholder='프로젝트 검색...'}){
   const [localValue,setLocalValue]=useState(value||'')
@@ -310,12 +311,146 @@ const UI_LAYOUT_TEMPLATES=[
 ]
 
 const uiLayoutTemplateById=(id)=>UI_LAYOUT_TEMPLATES.find(item=>item.id===id)||UI_LAYOUT_TEMPLATES[0]
+
+// v5.384: Layout는 화면 모양만 고르는 값이 아니라, 화면을 떠났다가 돌아왔을 때
+// 실행 중 Agent와 사용자의 작업 Context를 어떻게 복원할지도 함께 정의합니다.
+// Agent Runtime 자체는 UI lifecycle과 분리되어 항상 유지되며 사용자가 끌 수 없습니다.
+const UI_LAYOUT_RUNTIME_BASE=Object.freeze({
+  agent_runtime_persistent:true,
+  restore_screen_state:true,
+  restore_scroll_position:true,
+  restore_draft_input:false,
+  restore_selection_state:true,
+  show_running_tasks:true,
+  runtime_status_position:'top_statusbar',
+  screen_restore_mode:'auto',
+  notify_agent_complete:true,
+  notify_agent_failure:true,
+  run_item_navigate:true,
+  event_stream_auto_reconnect:true,
+  event_stream_resync:true,
+})
+const uiLayoutRuntimeDefaults=(template={})=>{
+  const base={...UI_LAYOUT_RUNTIME_BASE}
+  if(template.id==='headless_agent'){
+    return {...base,restore_screen_state:false,restore_scroll_position:false,restore_draft_input:false,restore_selection_state:false,screen_restore_mode:'state_rehydrate'}
+  }
+  if(['ai_chat_workspace','rag_knowledge'].includes(template.id)){
+    return {...base,restore_draft_input:true,restore_selection_state:true,screen_restore_mode:'auto'}
+  }
+  if(template.id==='mcp_console'||template.id==='monitoring_console'||template.app_type==='dashboard'){
+    return {...base,restore_draft_input:false,restore_selection_state:true,screen_restore_mode:'auto'}
+  }
+  if(template.app_type==='mobile_web'){
+    return {...base,restore_draft_input:true,restore_selection_state:true,screen_restore_mode:'auto'}
+  }
+  if(template.app_type==='website'){
+    return {...base,restore_draft_input:false,restore_selection_state:false,screen_restore_mode:'state_rehydrate'}
+  }
+  return base
+}
+const normalizeUILayoutConfig=(template,value={})=>({
+  ...template,
+  ...uiLayoutRuntimeDefaults(template),
+  ...(value&&typeof value==='object'?value:{}),
+  // 플랫폼 고정 정책: 메뉴/탭 이동은 실행 중 Agent를 중단시키지 않습니다.
+  agent_runtime_persistent:true,
+  event_stream_auto_reconnect:true,
+  event_stream_resync:true,
+})
+const uiThemeSelectValue=(config={})=>config?.theme==='custom'&&config?.theme_id?`custom:${config.theme_id}`:(config?.theme||'light')
+const uiThemeColors=(config={})=>config?.theme==='custom'?(config?.theme_tokens?.colors||{}):{}
+const uiThemeIsDark=(config={})=>{
+  if(config?.theme==='dark') return true
+  if(config?.theme!=='custom') return false
+  const value=String(uiThemeColors(config).background||'#ffffff').replace('#','')
+  if(!/^[0-9a-fA-F]{6}$/.test(value)) return false
+  const r=parseInt(value.slice(0,2),16),g=parseInt(value.slice(2,4),16),b=parseInt(value.slice(4,6),16)
+  return ((.2126*r+.7152*g+.0722*b)/255)<.48
+}
+const uiThemeWireframeStyle=(config={})=>{
+  if(config?.theme!=='custom') return undefined
+  const colors=uiThemeColors(config)
+  return {
+    '--ui-theme-primary':colors.primary||'#2563eb',
+    '--ui-theme-background':colors.background||'#f8fafc',
+    '--ui-theme-surface':colors.surface||'#ffffff',
+    '--ui-theme-text':colors.textPrimary||'#0f172a',
+    '--ui-theme-border':colors.border||'#dbe4ee',
+    '--ui-theme-secondary':colors.secondary||colors.textSecondary||'#64748b',
+  }
+}
+const buildImageThemeRules=(tokens={})=>{
+  const colors=tokens.colors||{},radius=tokens.radius||{}
+  return {
+    component_rules:{
+      button:{background:colors.primary||'#2563eb',color:'#ffffff',radius:radius.button??8},
+      card:{background:colors.surface||'#ffffff',border:colors.border||'#dbe4ee',radius:radius.card??12},
+      input:{background:colors.surface||'#ffffff',border:colors.border||'#dbe4ee',radius:radius.input??8},
+      header:{background:colors.surface||'#ffffff',accent:colors.primary||'#2563eb'},
+      sidebar:{background:colors.background||'#f8fafc',active:colors.primary||'#2563eb'},
+    },
+    layout_rules:{headerHeight:64,sidebarWidth:240,contentMaxWidth:1440,contentGap:20},
+  }
+}
+const extractThemeTokensFromImage=async(file)=>{
+  if(!file) throw new Error('화면 캡처 이미지를 선택하세요.')
+  if(file.size>25*1024*1024) throw new Error('Theme 분석 이미지는 25MB 이하 파일을 사용하세요.')
+  const imageUrl=URL.createObjectURL(file)
+  try{
+    const image=await new Promise((resolve,reject)=>{
+      const img=new Image()
+      img.onload=()=>resolve(img)
+      img.onerror=()=>reject(new Error('이미지를 읽을 수 없습니다.'))
+      img.src=imageUrl
+    })
+    const scale=Math.min(1,180/Math.max(image.naturalWidth||1,image.naturalHeight||1))
+    const width=Math.max(1,Math.round((image.naturalWidth||1)*scale))
+    const height=Math.max(1,Math.round((image.naturalHeight||1)*scale))
+    const canvas=document.createElement('canvas'); canvas.width=width; canvas.height=height
+    const ctx=canvas.getContext('2d',{willReadFrequently:true})
+    if(!ctx) throw new Error('브라우저 Canvas를 사용할 수 없어 이미지를 분석하지 못했습니다.')
+    ctx.drawImage(image,0,0,width,height)
+    const data=ctx.getImageData(0,0,width,height).data
+    const buckets=new Map()
+    for(let i=0;i<data.length;i+=16){
+      if(data[i+3]<180) continue
+      const r=Math.round(data[i]/32)*32,g=Math.round(data[i+1]/32)*32,b=Math.round(data[i+2]/32)*32
+      const key=[Math.min(255,r),Math.min(255,g),Math.min(255,b)].join(',')
+      buckets.set(key,(buckets.get(key)||0)+1)
+    }
+    const palette=[...buckets.entries()].sort((a,b)=>b[1]-a[1]).slice(0,18).map(([key])=>{
+      const [r,g,b]=key.split(',').map(Number)
+      return '#'+[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('')
+    })
+    const rgb=(hex)=>[parseInt(hex.slice(1,3),16),parseInt(hex.slice(3,5),16),parseInt(hex.slice(5,7),16)]
+    const lum=(hex)=>{const [r,g,b]=rgb(hex);return(.2126*r+.7152*g+.0722*b)/255}
+    const sat=(hex)=>{const a=rgb(hex).map(v=>v/255),hi=Math.max(...a),lo=Math.min(...a);return hi===lo?0:(hi-lo)/Math.max(hi,.001)}
+    const list=palette.length?palette:['#2563eb','#f8fafc','#ffffff','#0f172a','#dbe4ee']
+    const darkest=[...list].sort((a,b)=>lum(a)-lum(b))[0]
+    const lightest=[...list].sort((a,b)=>lum(b)-lum(a))[0]
+    const saturated=list.filter(c=>lum(c)>.12&&lum(c)<.92&&sat(c)>=.28).sort((a,b)=>sat(b)-sat(a))
+    const primary=saturated[0]||list[0]
+    const backgrounds=list.filter(c=>lum(c)>=.86)
+    const background=backgrounds[0]||lightest
+    const border=list.find(c=>lum(c)>=.62&&lum(c)<=.92&&sat(c)<.25)||'#dbe4ee'
+    const secondary=list.find(c=>lum(c)>=.18&&lum(c)<=.55)||'#475569'
+    const tokens={
+      colors:{primary,secondary,background,surface:lightest,textPrimary:darkest,textSecondary:secondary,border,success:'#16a34a',danger:'#dc2626'},
+      typography:{fontFamily:"system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",headingWeight:700,bodyWeight:400},
+      radius:{button:8,card:12,input:8},shadow:{card:'0 8px 24px rgba(15,23,42,.10)'},spacing:{unit:4,density:'comfortable'}
+    }
+    return {tokens,preview_colors:list.slice(0,6),...buildImageThemeRules(tokens)}
+  }finally{ URL.revokeObjectURL(imageUrl) }
+}
+
 const uiLayoutSummary=(value)=>{
   if(!value?.template_id) return ''
   const template=uiLayoutTemplateById(value.template_id)
-  if(value?.enabled===false||value?.template_id==='headless_agent') return 'UI 없음 · Headless Agent'
+  if(value?.enabled===false||value?.template_id==='headless_agent') return 'UI 없음 · Headless Agent · Agent Runtime 유지'
   const nav={header_sidebar:'상단+좌측 메뉴',left:'좌측 메뉴',top:'상단 메뉴',none:'메뉴 없음'}[value.navigation]||value.navigation||''
-  const parts=[template?.name||value.template_id,nav,value.footer?'Footer':'',value.user_menu?'사용자 메뉴':'',value.theme==='dark'?'Dark':'Light'].filter(Boolean)
+  const themeLabel=value.theme==='custom'?(value.theme_name||'Custom Theme'):(value.theme==='dark'?'Dark':value.theme==='auto'?'Auto':'Light')
+  const parts=[template?.name||value.template_id,nav,value.footer?'Footer':'',value.user_menu?'사용자 메뉴':'',themeLabel,value.agent_runtime_persistent!==false?'Agent 실행 유지':''].filter(Boolean)
   return parts.join(' · ')
 }
 
@@ -329,7 +464,8 @@ function UILayoutWireframe({config={},compact=false}){
   const userMenu=Boolean(merged.user_menu)
   const layout=merged.main_layout||'one_column'
   const cards=Math.min(compact?4:6,Math.max(3,components.length||4))
-  return <div className={`ui-layout-wireframe ${merged.theme==='dark'?'dark':'light'} ${compact?'compact':''}`}>
+  const customTheme=merged.theme==='custom'
+  return <div style={uiThemeWireframeStyle(merged)} className={`ui-layout-wireframe ${customTheme?'custom':uiThemeIsDark(merged)?'dark':'light'} ${compact?'compact':''}`}>
     {hasHeader&&<div className="ui-layout-wf-header"><i></i><div className="ui-layout-wf-nav"><span></span><span></span><span></span></div>{userMenu&&<b></b>}</div>}
     <div className="ui-layout-wf-body">
       {hasSidebar&&<div className="ui-layout-wf-sidebar"><i></i><i></i><i></i><i></i><i></i></div>}
@@ -350,14 +486,40 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
   const currentTemplate=uiLayoutTemplateById(value?.template_id)
   const [selectedId,setSelectedId]=useState(value?.template_id||currentTemplate.id)
   const [category,setCategory]=useState('추천')
-  const [draft,setDraft]=useState(()=>({...currentTemplate,...value,template_id:value?.template_id||currentTemplate.id}))
+  const [draft,setDraft]=useState(()=>normalizeUILayoutConfig(currentTemplate,{...value,template_id:value?.template_id||currentTemplate.id}))
+  const [customThemes,setCustomThemes]=useState([])
+  const [frontendThemeTargets,setFrontendThemeTargets]=useState([])
+  const [frontendThemeListOpen,setFrontendThemeListOpen]=useState(false)
+  const [themeImportOpen,setThemeImportOpen]=useState(false)
+  const [themeImportMode,setThemeImportMode]=useState('url')
+  const [themeImportName,setThemeImportName]=useState('')
+  const [themeImportUrl,setThemeImportUrl]=useState('')
+  const [themeImportFile,setThemeImportFile]=useState(null)
+  const [themeImportPreview,setThemeImportPreview]=useState(null)
+  const [themeImportBusy,setThemeImportBusy]=useState(false)
+  const [themeImportError,setThemeImportError]=useState('')
+  const [themeBackendWarning,setThemeBackendWarning]=useState('')
   useEffect(()=>{
     if(!open) return
     const template=uiLayoutTemplateById(value?.template_id)
-    const next={...template,...value,template_id:value?.template_id||template.id}
+    const next=normalizeUILayoutConfig(template,{...value,template_id:value?.template_id||template.id})
     setSelectedId(next.template_id)
     setDraft(next)
   },[open,value?.template_id])
+  useEffect(()=>{
+    if(!open) return
+    let alive=true
+    Promise.allSettled([api('/ui-themes'),api('/ui-themes/frontend-targets')]).then(results=>{
+      if(!alive) return
+      const themeResult=results[0]?.status==='fulfilled'?results[0].value:null
+      const frontendResult=results[1]?.status==='fulfilled'?results[1].value:null
+      setCustomThemes(Array.isArray(themeResult?.themes)?themeResult.themes:[])
+      setFrontendThemeTargets(Array.isArray(frontendResult?.targets)?frontendResult.targets:[])
+      const rejected=results.find(item=>item?.status==='rejected')
+      setThemeBackendWarning(rejected?String(rejected.reason?.message||'Theme Backend API 연결을 확인할 수 없습니다.'):'')
+    }).catch(error=>{if(alive){setCustomThemes([]);setFrontendThemeTargets([]);setThemeBackendWarning(String(error?.message||error))}})
+    return()=>{alive=false}
+  },[open])
   if(!open) return null
   const purpose=String(purposeText||'').toLowerCase()
   const scored=UI_LAYOUT_TEMPLATES.map(template=>({
@@ -370,14 +532,61 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
   const visible=UI_LAYOUT_TEMPLATES.filter(template=>category==='추천'?recommendedIds.has(template.id):template.category===category)
   const choose=(template)=>{
     setSelectedId(template.id)
-    setDraft({...template,template_id:template.id})
+    setDraft(normalizeUILayoutConfig(template,{template_id:template.id}))
   }
   const patch=(next)=>setDraft(prev=>({...prev,...next}))
+  const selectThemeValue=(raw)=>{
+    const value=String(raw||'light')
+    if(value.startsWith('custom:')){
+      const themeId=Number(value.slice(7))
+      const theme=customThemes.find(item=>Number(item.id)===themeId)
+      if(theme) patch({theme:'custom',theme_id:theme.id,theme_name:theme.name,theme_tokens:theme.tokens||{},theme_component_rules:theme.component_rules||{},theme_layout_rules:theme.layout_rules||{},theme_source_type:theme.source_type||'',theme_source_url:theme.source_url||''})
+      return
+    }
+    patch({theme:value,theme_id:null,theme_name:'',theme_tokens:{},theme_component_rules:{},theme_layout_rules:{},theme_source_type:'',theme_source_url:''})
+  }
+  const importTheme=async()=>{
+    setThemeImportBusy(true); setThemeImportError('')
+    try{
+      const name=String(themeImportName||'').trim()
+      if(!name) throw new Error('Theme 이름을 입력하세요.')
+      let result
+      if(themeImportMode==='url'){
+        const url=String(themeImportUrl||'').trim()
+        if(!url) throw new Error('웹사이트 URL을 입력하세요.')
+        result=await api('/ui-themes/import-url',{method:'POST',body:JSON.stringify({name,url,scope:'GLOBAL'})})
+      }else{
+        if(!themeImportFile) throw new Error('화면 캡처 이미지를 선택하세요.')
+        const analysis=themeImportPreview||await extractThemeTokensFromImage(themeImportFile)
+        result=await api('/ui-themes/import-image',{method:'POST',body:JSON.stringify({name,file_name:themeImportFile.name,tokens:analysis.tokens,component_rules:analysis.component_rules,layout_rules:analysis.layout_rules,preview_colors:analysis.preview_colors,scope:'GLOBAL'})})
+      }
+      const theme=result?.theme
+      if(!theme) throw new Error('Theme 저장 결과를 확인할 수 없습니다.')
+      setCustomThemes(prev=>[theme,...prev.filter(item=>Number(item.id)!==Number(theme.id))])
+      patch({theme:'custom',theme_id:theme.id,theme_name:theme.name,theme_tokens:theme.tokens||{},theme_component_rules:theme.component_rules||{},theme_layout_rules:theme.layout_rules||{},theme_source_type:theme.source_type||'',theme_source_url:theme.source_url||''})
+      setThemeImportOpen(false); setThemeImportName(''); setThemeImportUrl(''); setThemeImportFile(null); setThemeImportPreview(null)
+    }catch(error){setThemeImportError(String(error?.message||error))}finally{setThemeImportBusy(false)}
+  }
+  const chooseThemeImage=async(file)=>{
+    setThemeImportFile(file||null); setThemeImportPreview(null); setThemeImportError('')
+    if(!file) return
+    if(!String(file.type||'').startsWith('image/')){setThemeImportError('이미지 파일을 선택하세요.');return}
+    try{setThemeImportPreview(await extractThemeTokensFromImage(file))}catch(error){setThemeImportError(String(error?.message||error))}
+  }
+  const deleteCustomTheme=async(theme)=>{
+    if(!theme?.id) return
+    if(!window.confirm(`Theme '${theme.name}'을(를) 삭제하시겠습니까?`)) return
+    try{
+      await api(`/ui-themes/${theme.id}`,{method:'DELETE'})
+      setCustomThemes(prev=>prev.filter(item=>Number(item.id)!==Number(theme.id)))
+      if(Number(draft.theme_id)===Number(theme.id)) selectThemeValue('auto')
+    }catch(error){setThemeImportError(String(error?.message||error))}
+  }
   const selected=uiLayoutTemplateById(selectedId)
   return <div className="ui-layout-gallery-backdrop" role="dialog" aria-modal="true" aria-label="UI Layout Template Gallery">
     <div className="ui-layout-gallery-modal">
       <div className="ui-layout-gallery-head">
-        <div><span>NEW AGENT · UI / LAYOUT</span><strong>레이아웃 템플릿 갤러리</strong><small>Agent 목적에 맞는 추천안을 고르거나, 메뉴·Footer·사용자 메뉴를 직접 조정하세요.</small></div>
+        <div><span>NEW AGENT · UI / LAYOUT</span><strong>레이아웃 템플릿 갤러리</strong><small>화면 구조와 함께 메뉴 이동 후 상태 복원, 실행 중 Agent 표시, 완료/실패 알림 정책을 설정합니다.</small></div>
         <button type="button" onClick={onClose}>×</button>
       </div>
       <div className="ui-layout-gallery-toolbar">
@@ -394,21 +603,113 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
         <aside className="ui-layout-config-panel">
           <div className="ui-layout-config-preview"><UILayoutWireframe config={draft}/></div>
           <div className="ui-layout-config-title"><strong>{selected.name}</strong><small>{selected.description}</small></div>
-          <div className="ui-layout-toggle-grid">
-            <label><input type="checkbox" checked={Boolean(draft.header)} onChange={e=>patch({header:e.target.checked})}/>상단 Header</label>
-            <label><input type="checkbox" checked={Boolean(draft.sidebar)} onChange={e=>patch({sidebar:e.target.checked,navigation:e.target.checked?(draft.header?'header_sidebar':'left'):(draft.header?'top':'none')})}/>좌측 메뉴</label>
-            <label><input type="checkbox" checked={Boolean(draft.sidebar_collapsible)} disabled={!draft.sidebar} onChange={e=>patch({sidebar_collapsible:e.target.checked})}/>Sidebar 접기</label>
-            <label><input type="checkbox" checked={Boolean(draft.footer)} onChange={e=>patch({footer:e.target.checked})}/>Footer</label>
-            <label><input type="checkbox" checked={Boolean(draft.user_menu)} onChange={e=>patch({user_menu:e.target.checked})}/>사용자 메뉴</label>
-            <label><input type="checkbox" checked={draft.responsive!==false} onChange={e=>patch({responsive:e.target.checked})}/>반응형</label>
-          </div>
-          <label className="ui-layout-select-field"><span>Main Layout</span><select value={draft.main_layout||'one_column'} onChange={e=>patch({main_layout:e.target.value})}><option value="one_column">1 Column</option><option value="two_column">2 Column</option><option value="three_column">3 Column</option><option value="grid">Card Grid</option><option value="dashboard">Dashboard</option><option value="landing">Landing</option><option value="mobile">Mobile First</option></select></label>
-          <label className="ui-layout-select-field"><span>Theme</span><select value={draft.theme||'light'} onChange={e=>patch({theme:e.target.value})}><option value="light">Light</option><option value="dark">Dark</option><option value="auto">Auto</option></select></label>
-          <label className="ui-layout-select-field"><span>사용자 메뉴 위치</span><select value={draft.user_menu_position||'header_right'} disabled={!draft.user_menu} onChange={e=>patch({user_menu_position:e.target.value})}><option value="header_right">상단 우측</option><option value="sidebar_bottom">Sidebar 하단</option><option value="profile_page">Profile 페이지</option></select></label>
+
+          <section className="ui-layout-config-section">
+            <div className="ui-layout-config-section-head"><strong>UI 구성</strong><small>화면에 표시할 공통 영역</small></div>
+            <div className="ui-layout-toggle-grid">
+              <label><input type="checkbox" checked={Boolean(draft.header)} onChange={e=>patch({header:e.target.checked})}/>상단 Header</label>
+              <label><input type="checkbox" checked={Boolean(draft.sidebar)} onChange={e=>patch({sidebar:e.target.checked,navigation:e.target.checked?(draft.header?'header_sidebar':'left'):(draft.header?'top':'none')})}/>좌측 메뉴</label>
+              <label><input type="checkbox" checked={Boolean(draft.sidebar_collapsible)} disabled={!draft.sidebar} onChange={e=>patch({sidebar_collapsible:e.target.checked})}/>Sidebar 접기</label>
+              <label><input type="checkbox" checked={Boolean(draft.footer)} onChange={e=>patch({footer:e.target.checked})}/>Footer</label>
+              <label><input type="checkbox" checked={Boolean(draft.user_menu)} onChange={e=>patch({user_menu:e.target.checked})}/>사용자 메뉴</label>
+              <label><input type="checkbox" checked={draft.responsive!==false} onChange={e=>patch({responsive:e.target.checked})}/>반응형</label>
+            </div>
+          </section>
+
+          <section className="ui-layout-config-section">
+            <div className="ui-layout-config-section-head"><strong>레이아웃</strong><small>화면 배치와 Theme</small></div>
+            <label className="ui-layout-select-field"><span>Main Layout</span><select value={draft.main_layout||'one_column'} onChange={e=>patch({main_layout:e.target.value})}><option value="one_column">1 Column</option><option value="two_column">2 Column</option><option value="three_column">3 Column</option><option value="grid">Card Grid</option><option value="dashboard">Dashboard</option><option value="landing">Landing</option><option value="mobile">Mobile First</option></select></label>
+            <div className="ui-layout-theme-field">
+              <label className="ui-layout-select-field"><span>Theme</span><select value={uiThemeSelectValue(draft)} onChange={e=>selectThemeValue(e.target.value)}><option value="light">Light</option><option value="dark">Dark</option><option value="auto">Auto</option>{customThemes.length>0&&<optgroup label="사용자 Theme">{customThemes.map(theme=><option key={theme.id} value={`custom:${theme.id}`}>{theme.name}</option>)}</optgroup>}</select></label>
+              <button type="button" className="ui-layout-theme-import-button" onClick={()=>{setThemeImportOpen(value=>!value);setThemeImportError('')}}>+ 스타일 가져오기</button>
+            </div>
+            <div className="ui-layout-theme-target-summary">
+              <div>
+                <strong>Frontend Theme 적용</strong>
+                <small>공통 Design Token을 선택한 Frontend/스타일 방식으로 자동 변환합니다.</small>
+              </div>
+              <div className="ui-layout-theme-target-actions">
+                <span>{frontendThemeTargets.length||'–'} Adapters</span>
+                <button type="button" onClick={()=>setFrontendThemeListOpen(true)}>지원 목록 보기</button>
+              </div>
+            </div>
+            {themeBackendWarning&&<div className="ui-layout-theme-backend-warning"><b>Theme Backend 확인 필요</b><span>{themeBackendWarning}</span><small>SYSTEM_ADMIN에서 Backend까지 완전히 재시작하면 Frontend/Backend 버전 불일치도 함께 해소됩니다.</small></div>}
+            {draft.theme==='custom'&&<div className="ui-layout-selected-theme">
+              <div className="ui-layout-theme-palette">{(draft.theme_tokens?.colors?Object.values(draft.theme_tokens.colors).slice(0,5):[]).map((color,index)=><i key={`${color}-${index}`} style={{background:String(color)}}></i>)}</div>
+              <div><strong>{draft.theme_name||'Custom Theme'}</strong><small>{draft.theme_source_type==='URL'?'URL 분석 Theme':draft.theme_source_type==='IMAGE'?'화면 캡처 Theme':'사용자 Theme'} · 선택된 Frontend 기술의 native Theme 방식으로 자동 변환 적용</small></div>
+              <button type="button" onClick={()=>deleteCustomTheme(customThemes.find(item=>Number(item.id)===Number(draft.theme_id)))}>삭제</button>
+            </div>}
+            {themeImportOpen&&<div className="ui-layout-theme-import-panel">
+              <div className="ui-layout-theme-import-tabs"><button type="button" className={themeImportMode==='url'?'active':''} onClick={()=>{setThemeImportMode('url');setThemeImportError('')}}>웹사이트 URL</button><button type="button" className={themeImportMode==='image'?'active':''} onClick={()=>{setThemeImportMode('image');setThemeImportError('')}}>화면 캡처 이미지</button></div>
+              <label><span>Theme 이름</span><input value={themeImportName} onChange={e=>setThemeImportName(e.target.value)} placeholder="예: 쇼핑몰 A 스타일"/></label>
+              {themeImportMode==='url'
+                ?<label><span>URL</span><input value={themeImportUrl} onChange={e=>setThemeImportUrl(e.target.value)} placeholder="https://example.com"/></label>
+                :<label className="ui-layout-theme-file"><span>화면 캡처</span><input type="file" accept="image/*" onChange={e=>chooseThemeImage(e.target.files?.[0]||null)}/></label>}
+              {themeImportPreview&&<div className="ui-layout-theme-import-palette">{(themeImportPreview.preview_colors||[]).map((color,index)=><i key={`${color}-${index}`} style={{background:color}} title={color}></i>)}</div>}
+              <small className="ui-layout-theme-import-help">URL은 HTML/CSS의 색상·폰트·Radius·Shadow를 분석합니다. 캡처 이미지는 색상 중심으로 Design Token을 추정합니다. 저장된 Theme은 등록된 Frontend/스타일 Adapter에 맞게 자동 변환되고, 목록에 없는 Frontend도 Generic Adapter를 사용합니다. 지원 목록은 Theme 바로 아래의 ‘지원 Frontend/스타일 목록 보기’에서 확인할 수 있습니다. 로고·문구·이미지·고유 콘텐츠는 복제하지 않습니다.</small>
+              {customThemes.length>0&&<div className="ui-layout-theme-library"><strong>저장된 Theme</strong>{customThemes.slice(0,8).map(theme=><div key={theme.id}><span className="ui-layout-theme-library-palette">{(theme.preview_colors||[]).slice(0,4).map((color,index)=><i key={`${color}-${index}`} style={{background:color}}></i>)}</span><b>{theme.name}</b><em>{theme.source_type==='URL'?'URL':theme.source_type==='IMAGE'?'이미지':'Custom'}</em><button type="button" onClick={()=>{selectThemeValue(`custom:${theme.id}`);setThemeImportOpen(false)}}>적용</button><button type="button" className="danger" onClick={()=>deleteCustomTheme(theme)}>삭제</button></div>)}</div>}
+              {themeImportError&&<div className="ui-layout-theme-import-error">{themeImportError}</div>}
+              <div className="ui-layout-theme-import-actions"><button type="button" onClick={()=>setThemeImportOpen(false)}>취소</button><button type="button" className="primary" disabled={themeImportBusy} onClick={importTheme}>{themeImportBusy?'분석·저장 중...':'분석 후 Theme 저장'}</button></div>
+            </div>}
+            <label className="ui-layout-select-field"><span>사용자 메뉴 위치</span><select value={draft.user_menu_position||'header_right'} disabled={!draft.user_menu} onChange={e=>patch({user_menu_position:e.target.value})}><option value="header_right">상단 우측</option><option value="sidebar_bottom">Sidebar 하단</option><option value="profile_page">Profile 페이지</option></select></label>
+          </section>
+
+          <section className="ui-layout-config-section runtime">
+            <div className="ui-layout-config-section-head"><strong>실행 및 상태 유지</strong><small>다른 메뉴를 사용해도 실행과 작업 Context를 이어갑니다.</small></div>
+            <div className="ui-layout-runtime-lock">
+              <span aria-hidden="true">🔒</span>
+              <div><strong>메뉴 이동 시 Agent 실행 유지</strong><small>UI lifecycle과 Agent Runtime을 분리하여 메뉴·탭 이동으로 실행을 중단하지 않습니다.</small></div>
+              <em>항상 ON</em>
+            </div>
+            <div className="ui-layout-toggle-grid runtime">
+              <label><input type="checkbox" checked={draft.restore_screen_state!==false} disabled={selectedId==='headless_agent'} onChange={e=>patch({restore_screen_state:e.target.checked})}/>이전 화면 상태 복원</label>
+              <label><input type="checkbox" checked={draft.restore_scroll_position!==false} disabled={selectedId==='headless_agent'} onChange={e=>patch({restore_scroll_position:e.target.checked})}/>스크롤 위치 복원</label>
+              <label><input type="checkbox" checked={Boolean(draft.restore_draft_input)} disabled={selectedId==='headless_agent'} onChange={e=>patch({restore_draft_input:e.target.checked})}/>입력 중 내용 복원</label>
+              <label><input type="checkbox" checked={draft.restore_selection_state!==false} disabled={selectedId==='headless_agent'} onChange={e=>patch({restore_selection_state:e.target.checked})}/>선택/탭 상태 복원</label>
+              <label><input type="checkbox" checked={draft.show_running_tasks!==false} onChange={e=>patch({show_running_tasks:e.target.checked})}/>실행 중 작업 표시</label>
+            </div>
+            <label className="ui-layout-select-field"><span>실행 상태 위치</span><select value={draft.runtime_status_position||'top_statusbar'} disabled={draft.show_running_tasks===false} onChange={e=>patch({runtime_status_position:e.target.value})}><option value="top_statusbar">상단 상태바</option><option value="sidebar">좌측 메뉴</option><option value="right_panel">우측 패널</option><option value="bottom_statusbar">하단 상태바</option><option value="floating_button">플로팅 버튼</option></select></label>
+            <label className="ui-layout-select-field"><span>화면 유지 방식</span><select value={draft.screen_restore_mode||'auto'} disabled={selectedId==='headless_agent'} onChange={e=>patch({screen_restore_mode:e.target.value})}><option value="auto">자동 (권장)</option><option value="keep_alive">화면 유지 (Keep Alive)</option><option value="state_rehydrate">상태 저장 후 재생성</option></select></label>
+            <div className="ui-layout-runtime-note"><b>자동 복구</b><span>WebSocket/SSE 재연결 · 현재 run 상태 재조회 · 누락 이벤트 재동기화는 플랫폼 기본 정책으로 적용됩니다.</span></div>
+          </section>
+
+          <section className="ui-layout-config-section">
+            <div className="ui-layout-config-section-head"><strong>알림</strong><small>백그라운드 실행 결과를 놓치지 않도록 표시합니다.</small></div>
+            <div className="ui-layout-toggle-grid">
+              <label><input type="checkbox" checked={draft.notify_agent_complete!==false} onChange={e=>patch({notify_agent_complete:e.target.checked})}/>Agent 완료 알림</label>
+              <label><input type="checkbox" checked={draft.notify_agent_failure!==false} onChange={e=>patch({notify_agent_failure:e.target.checked})}/>Agent 실패 알림</label>
+              <label className="wide"><input type="checkbox" checked={draft.run_item_navigate!==false} onChange={e=>patch({run_item_navigate:e.target.checked})}/>실행 작업 클릭 시 해당 화면으로 이동</label>
+            </div>
+          </section>
+
           <div className="ui-layout-component-tags">{(draft.components||[]).map(item=><span key={item}>{item}</span>)}</div>
-          <div className="ui-layout-config-actions"><button type="button" onClick={onClose}>취소</button><button type="button" className="primary" onClick={()=>onApply({...draft,template_id:selectedId,selected_at:new Date().toISOString()})}>이 레이아웃 사용</button></div>
+          <div className="ui-layout-config-actions"><button type="button" onClick={onClose}>취소</button><button type="button" className="primary" onClick={()=>onApply(normalizeUILayoutConfig(selected,{...draft,template_id:selectedId,selected_at:new Date().toISOString()}))}>이 레이아웃 사용</button></div>
         </aside>
       </div>
+
+      {frontendThemeListOpen&&<div className="ui-layout-theme-target-modal-backdrop" onMouseDown={()=>setFrontendThemeListOpen(false)}>
+        <div className="ui-layout-theme-target-modal" onMouseDown={event=>event.stopPropagation()}>
+          <div className="ui-layout-theme-target-modal-head">
+            <div>
+              <span>THEME ADAPTER REGISTRY</span>
+              <strong>지원 Frontend / 스타일 목록</strong>
+              <small>Theme Design Token을 각 Frontend와 UI Framework에 맞는 방식으로 변환합니다.</small>
+            </div>
+            <button type="button" onClick={()=>setFrontendThemeListOpen(false)}>×</button>
+          </div>
+          <div className="ui-layout-theme-target-modal-stats">
+            <b>{frontendThemeTargets.length}</b>
+            <span>등록된 Adapter</span>
+            <small>목록에 없는 기술은 Generic Theme Adapter로 처리합니다.</small>
+          </div>
+          <div className="ui-layout-theme-target-list modal-list">
+            {frontendThemeTargets.length===0
+              ?<div className="ui-layout-theme-target-empty">Frontend 목록을 불러오는 중이거나 Backend 연결을 확인할 수 없습니다.</div>
+              :Array.from(new Set(frontendThemeTargets.map(item=>item.group||'기타'))).map(group=><div key={group} className="ui-layout-theme-target-group"><strong>{group}</strong><div>{frontendThemeTargets.filter(item=>(item.group||'기타')===group).map(item=><span key={item.id} title={item.strategy||''}><b>{item.label}</b><em>{item.language}</em></span>)}</div></div>)}
+            <small className="ui-layout-theme-target-footnote">목록에 없는 Frontend도 Generic Theme Adapter를 사용해 같은 색상·타이포그래피·Radius·Shadow·Spacing 의미를 유지합니다.</small>
+          </div>
+        </div>
+      </div>}
     </div>
   </div>
 }
@@ -2619,6 +2920,11 @@ function IDE() {
   const [uiLayoutConfig,setUiLayoutConfig]=useState(null)
   const [uiLayoutGalleryOpen,setUiLayoutGalleryOpen]=useState(false)
   const [confirmedInterviewRequirements,setConfirmedInterviewRequirements]=useState({})
+  const [designProjectId,setDesignProjectId]=useState(null)
+  const [designProjectSavedAt,setDesignProjectSavedAt]=useState('')
+  const [designProjectVersion,setDesignProjectVersion]=useState(1)
+  const [designFeatureRegistry,setDesignFeatureRegistry]=useState([])
+  const [designProjectSaving,setDesignProjectSaving]=useState(false)
   const [requirementDraftRestored,setRequirementDraftRestored]=useState(false)
   const [requirementDraftSavedAt,setRequirementDraftSavedAt]=useState('')
   const [requirementDraftCandidate,setRequirementDraftCandidate]=useState(null)
@@ -3140,6 +3446,7 @@ function IDE() {
     interviewAttachmentSummary,
     interviewAttachmentMemory,
     requirementManualOverrides,
+    designFeatureRegistry,
     uiLayoutConfig,
     restoredBuildResume
   ])
@@ -7277,6 +7584,10 @@ function IDE() {
     setUiLayoutConfig(null)
     setUiLayoutGalleryOpen(false)
     setConfirmedInterviewRequirements({})
+    setDesignProjectId(null)
+    setDesignProjectSavedAt('')
+    setDesignProjectVersion(1)
+    setDesignFeatureRegistry([])
 
     // '신규 Agent 만들기'는 기존 프로젝트/설계에서 사용하던 경로를 이어받지 않습니다.
     // 프로젝트 경로 input은 항상 빈 value로 시작하고 사용자가 직접 입력하거나 선택합니다.
@@ -8897,9 +9208,11 @@ function IDE() {
 
   const buildRequirementDraftSnapshot=(resumeOverride=null)=>{
     return {
-      version:2,
+      version:3,
       saved_at:new Date().toISOString(),
       agent_name:newAgentName||'',
+      design_project_id:designProjectId||null,
+      design_project_version:designProjectVersion||1,
       project_root:newAgentProjectRoot||root||'',
       workflow_request:workflowReq||'',
       chat:Array.isArray(chat)?chat:[],
@@ -8913,6 +9226,7 @@ function IDE() {
       attachment_requirements:interviewAttachmentRequirements||[],
       attachment_requirement_coverage:interviewAttachmentRequirementCoverage||{},
       manual_requirement_overrides:requirementManualOverrides||{},
+      feature_registry:designFeatureRegistry||[],
       ui_layout:uiLayoutConfig||null,
       build_resume:resumeOverride||(restoredBuildResume&&typeof restoredBuildResume==='object'?restoredBuildResume:null)
     }
@@ -8954,6 +9268,7 @@ function IDE() {
         || Boolean(snapshot.attachment_summary)
         || (Array.isArray(snapshot.attachment_requirements)&&snapshot.attachment_requirements.length>0)
         || Object.keys(snapshot.manual_requirement_overrides||{}).length>0
+        || (Array.isArray(snapshot.feature_registry)&&snapshot.feature_registry.length>0)
         || Boolean(snapshot.ui_layout?.template_id)
 
       if(!hasUsefulData) return false
@@ -9012,6 +9327,9 @@ function IDE() {
       setInterviewAttachmentRequirements(Array.isArray(snapshot?.attachment_requirements)?snapshot.attachment_requirements:[])
       setInterviewAttachmentRequirementCoverage(snapshot?.attachment_requirement_coverage&&typeof snapshot.attachment_requirement_coverage==='object'?snapshot.attachment_requirement_coverage:{})
       setRequirementManualOverrides(snapshot?.manual_requirement_overrides&&typeof snapshot.manual_requirement_overrides==='object'?snapshot.manual_requirement_overrides:{})
+      setDesignFeatureRegistry(Array.isArray(snapshot?.feature_registry)?snapshot.feature_registry:[])
+      if(snapshot?.design_project_id) setDesignProjectId(snapshot.design_project_id)
+      if(snapshot?.design_project_version) setDesignProjectVersion(snapshot.design_project_version)
       setUiLayoutConfig(snapshot?.ui_layout&&typeof snapshot.ui_layout==='object'?snapshot.ui_layout:null)
 
       if(snapshot?.workflow_request) setWorkflowReq(snapshot.workflow_request)
@@ -9056,7 +9374,7 @@ function IDE() {
       if(snapshot?.agent_name && !newAgentName) setNewAgentName(snapshot.agent_name)
 
       // Rewrite local draft in the current safe v2 format and persist it to the project folder.
-      const safeSnapshot={...snapshot,version:2,build_resume:resumeCandidate||snapshot?.build_resume||null}
+      const safeSnapshot={...snapshot,version:3,build_resume:resumeCandidate||snapshot?.build_resume||null}
       try{ localStorage.setItem(key,JSON.stringify(safeSnapshot)) }catch{}
       persistRequirementCheckpoint(safeSnapshot)
 
@@ -9088,6 +9406,7 @@ function IDE() {
         ||Boolean(snapshot.workflow_preview)
         ||Boolean(snapshot.attachment_summary)
         ||Object.keys(snapshot.manual_requirement_overrides||{}).length>0
+        ||(Array.isArray(snapshot.feature_registry)&&snapshot.feature_registry.length>0)
         ||Boolean(snapshot.ui_layout?.template_id)
       if(hasUsefulData){
         localStorage.setItem(requirementDraftKey(),JSON.stringify(snapshot))
@@ -9226,6 +9545,208 @@ function IDE() {
     cancelRequirementRedefinition()
   }
 
+  const getDetectedAgentFeatureNames=()=>{
+    const text=requirementConversationText()
+    const names=[]
+    const add=(label,...keywords)=>{
+      if(keywords.some(keyword=>text.includes(String(keyword).toLowerCase()))&&!names.includes(label)) names.push(label)
+    }
+    add('회원 로그인 / 인증','회원','로그인','인증','auth')
+    add('권한 / RBAC','권한','rbac','role','permission')
+    add('자연어 검색','자연어','semantic search','의미 기반')
+    add('Hybrid Search','hybrid','pgvector','벡터 검색','vector search')
+    add('상품 추천','상품 추천','추천 상품','recommend')
+    add('상품 관리','상품','product','catalog')
+    add('재고 확인','재고','inventory')
+    add('장바구니','장바구니','cart')
+    add('주문 처리','주문','order')
+    add('RAG','rag','faq','knowledge base','지식베이스')
+    add('파일 분석','파일 분석','첨부 파일','문서 분석')
+    add('코드 편집','코드 편집','코드 수정')
+    add('리포트','리포트','보고서')
+    add('대화 / 상담','대화','상담','챗봇')
+    add('관리자 화면','관리자','admin')
+    return names
+  }
+
+  const designProjectProgressInfo=()=>{
+    const total=getRequirementKeywordStatus().length||1
+    const collected=getRequirementKeywordStatus().filter(item=>item.collected).length
+    let progress=Math.round((collected/total)*55)
+    let status='INTERVIEWING'
+    if(targetWorkflowLoading){ status='DESIGNING'; progress=Math.max(progress,65) }
+    else if(agentBuildBusy||projectCreateFlowBusy){ status='GENERATING'; progress=Math.max(progress,80) }
+    else if(agentBuildStage==='PROJECT_CREATED'){ status='READY_TO_GENERATE'; progress=Math.max(progress,75) }
+    else if(targetWorkflowPreview){ status='READY_TO_GENERATE'; progress=Math.max(progress,70) }
+    if(developmentFinalStatus?.ok===true){ status='GENERATED'; progress=100 }
+    if(developmentFinalStatus?.ok===false){ status='FAILED'; progress=Math.max(progress,80) }
+    return {status,progress:Math.max(0,Math.min(100,progress))}
+  }
+
+  const saveAgentDesignProject=async({createVersion=false,versionLabel=''}={})=>{
+    if(designProjectSaving) return null
+    const snapshot=buildRequirementDraftSnapshot()
+    const hasUserContent=(snapshot.chat||[]).some(item=>item?.role==='user')
+      ||Boolean(snapshot.workflow_request)
+      ||Boolean(snapshot.agent_name)
+      ||(Array.isArray(snapshot.feature_registry)&&snapshot.feature_registry.length>0)
+    if(!hasUserContent){
+      setAgentBuildMessage('먼저 Agent 이름이나 설계 인터뷰 내용을 입력해 주세요.')
+      return null
+    }
+    const currentAssistant=[...(chat||[])].reverse().find(item=>item?.role==='assistant')
+    const {status,progress}=designProjectProgressInfo()
+    setDesignProjectSaving(true)
+    try{
+      const result=await api('/agent-design-projects/save',{
+        method:'POST',
+        body:JSON.stringify({
+          id:designProjectId||null,
+          name:String(newAgentName||'').trim()||String(getBuilderConversationSummary()?.purpose||'').trim()||'새 Agent 설계',
+          project_root:String(newAgentProjectRoot||'').trim(),
+          status,
+          progress,
+          current_stage:agentBuildStage||'REQUIREMENTS',
+          current_question:currentAssistant?String(currentAssistant.content||''):'',
+          langgraph_thread_id:designProjectId?`agent_design_${designProjectId}`:'',
+          snapshot,
+          feature_registry:designFeatureRegistry||[],
+          create_version:Boolean(createVersion),
+          version_label:String(versionLabel||'')
+        })
+      })
+      const project=result?.project
+      if(project){
+        setDesignProjectId(project.id)
+        setDesignProjectSavedAt(project.updated_at||new Date().toISOString())
+        setDesignProjectVersion(project.version_no||1)
+        setRequirementDraftSavedAt(project.updated_at||snapshot.saved_at)
+        setAgentBuildMessage(createVersion
+          ? `설계 프로젝트 v${project.version_no||1} 저장 완료 · 변경 전 Snapshot을 보존했습니다.`
+          : 'Agent 설계 프로젝트를 저장했습니다. 다른 작업 후 프로젝트 목록에서 다시 열어 이어서 진행할 수 있습니다.')
+      }
+      return project||null
+    }catch(e){
+      setAgentBuildMessage('설계 프로젝트 저장 실패: '+String(e?.message||e))
+      return null
+    }finally{
+      setDesignProjectSaving(false)
+    }
+  }
+
+  const loadAgentDesignProject=async(project)=>{
+    const snapshot=project?.snapshot&&typeof project.snapshot==='object'?project.snapshot:{}
+    startNewProject()
+    setDesignProjectId(project?.id||null)
+    setDesignProjectSavedAt(project?.updated_at||snapshot?.saved_at||'')
+    setDesignProjectVersion(project?.version_no||snapshot?.design_project_version||1)
+    setDesignFeatureRegistry(Array.isArray(project?.feature_registry)?project.feature_registry:(Array.isArray(snapshot?.feature_registry)?snapshot.feature_registry:[]))
+    setNewAgentName(String(snapshot?.agent_name||project?.name||''))
+    setNewAgentProjectRoot(String(snapshot?.project_root||project?.project_root||''))
+    setWorkflowReq(String(snapshot?.workflow_request||''))
+    const restoredChat=Array.isArray(snapshot?.chat)&&snapshot.chat.length?snapshot.chat:[{
+      role:'assistant',
+      content:'저장된 Agent 설계 프로젝트를 불러왔습니다. 마지막 설계 상태부터 이어서 진행해 주세요.'
+    }]
+    setChat(restoredChat)
+    setBuilderStarted(restoredChat.some(item=>item?.role==='user'))
+    setConfirmedInterviewRequirements(snapshot?.confirmed_requirements&&typeof snapshot.confirmed_requirements==='object'?snapshot.confirmed_requirements:{})
+    setTargetWorkflowPreview(snapshot?.workflow_preview||null)
+    setPreviousTargetWorkflowPreview(snapshot?.workflow_preview||null)
+    setTargetWorkflowQuality(snapshot?.workflow_quality||null)
+    setAgentBuildStage(snapshot?.agent_build_stage||project?.current_stage||'REQUIREMENTS')
+    setInterviewAttachmentMemory(snapshot?.attachment_memory||'')
+    setInterviewAttachmentSummary(snapshot?.attachment_summary||'')
+    setInterviewAttachmentSummaryFiles(Array.isArray(snapshot?.attachment_summary_files)?snapshot.attachment_summary_files:[])
+    setInterviewAttachmentRequirements(Array.isArray(snapshot?.attachment_requirements)?snapshot.attachment_requirements:[])
+    setInterviewAttachmentRequirementCoverage(snapshot?.attachment_requirement_coverage&&typeof snapshot.attachment_requirement_coverage==='object'?snapshot.attachment_requirement_coverage:{})
+    setRequirementManualOverrides(snapshot?.manual_requirement_overrides&&typeof snapshot.manual_requirement_overrides==='object'?snapshot.manual_requirement_overrides:{})
+    setUiLayoutConfig(snapshot?.ui_layout&&typeof snapshot.ui_layout==='object'?snapshot.ui_layout:null)
+    setRequirementDraftRestored(true)
+    setRequirementDraftSavedAt(project?.updated_at||snapshot?.saved_at||'')
+    setAgentBuildMessage(`설계 프로젝트 #${project?.id||''}을 불러왔습니다. 이전 인터뷰와 기능 정의를 이어서 진행합니다.`)
+  }
+
+  const handleDesignFeatureChange=async(action,item,payload={})=>{
+    const now=new Date().toISOString()
+    const existingName=String(item?.name||'').trim()
+    const nextName=String(payload?.name||existingName||'').trim()
+    if(!nextName) return
+
+    if(action==='REMOVE'&&designProjectId){
+      await saveAgentDesignProject({
+        createVersion:true,
+        versionLabel:`${existingName||nextName} 기능 삭제 전 자동 Snapshot`
+      })
+    }else if(['ADD','MODIFY','DISABLE'].includes(action)&&designProjectId){
+      await saveAgentDesignProject({
+        createVersion:true,
+        versionLabel:`${existingName||nextName} 기능 ${action==='ADD'?'추가':action==='MODIFY'?'수정':'비활성화'} 전 Snapshot`
+      })
+    }
+
+    setDesignFeatureRegistry(prev=>{
+      const list=Array.isArray(prev)?[...prev]:[]
+      const targetName=String(existingName||nextName).trim().toLowerCase()
+      const index=list.findIndex(feature=>String(feature?.name||'').trim().toLowerCase()===targetName)
+      const base=index>=0?list[index]:{
+        id:`feature_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
+        name:existingName||nextName,
+        source:item?.source==='DISCOVERED'?'DISCOVERED':'MANUAL',
+        created_at:now,
+      }
+      const status=action==='REMOVE'?'REMOVED':action==='DISABLE'?'DISABLED':'ACTIVE'
+      const changed={
+        ...base,
+        original_name:base.original_name||existingName||nextName,
+        name:nextName,
+        description:String(payload?.description??base.description??''),
+        status,
+        change_type:action,
+        impact:Array.isArray(payload?.impact)?payload.impact:base.impact||[],
+        updated_at:now,
+      }
+      if(index>=0) list[index]=changed
+      else list.push(changed)
+      return list
+    })
+
+    const actionLabel={ADD:'기능 추가',MODIFY:'기능 수정/재정의',DISABLE:'기능 비활성화',REMOVE:'기능 삭제',RESTORE:'기능 복원'}[action]||'기능 변경'
+    const impactText=Array.isArray(payload?.impact)&&payload.impact.length?` 영향 영역: ${payload.impact.join(', ')}.`:''
+    setChat(prev=>[...prev,{
+      role:'user',
+      content:`${actionLabel} - ${nextName}${payload?.description?`: ${payload.description}`:''}.${impactText} 이 변경을 최신 요구사항으로 적용하고, 관련 UI/API/DB/권한/Workflow/테스트에 미치는 영향만 추가로 확인해 주세요. 기존에 확정된 다른 요구사항은 유지해 주세요.`,
+      feature_change:true,
+      feature_name:nextName,
+      feature_action:action,
+    }])
+    setConfirmedInterviewRequirements(prev=>({
+      ...(prev||{}),
+      feature_registry:[...(designFeatureRegistry||[])]
+    }))
+    invalidateRequirementWorkflowAfterEdit(`${nextName} ${actionLabel}이 반영되었습니다. 변경된 기능의 영향도를 기준으로 Workflow를 증분 재설계할 수 있습니다.`)
+  }
+
+  useEffect(()=>{
+    if(!designProjectId||designProjectSaving||requirementDraftDecisionPending) return undefined
+    const timer=setTimeout(()=>{
+      void saveAgentDesignProject()
+    },1200)
+    return()=>clearTimeout(timer)
+  },[
+    designProjectId,
+    chat,
+    designFeatureRegistry,
+    confirmedInterviewRequirements,
+    targetWorkflowPreview,
+    targetWorkflowQuality,
+    agentBuildStage,
+    newAgentName,
+    newAgentProjectRoot,
+    uiLayoutConfig,
+    requirementManualOverrides
+  ])
+
   const buildRequirementRequestFromCollectedInfo=()=>{
     const userMessages=(chat||[])
       .filter(item=>item?.role==='user')
@@ -9303,6 +9824,24 @@ function IDE() {
     if(manualRows.length){
       rows.push(
         '[사용자가 직접 재정의한 최신 요구사항 - 이전 대화보다 우선]\n'+manualRows.join('\n')
+      )
+    }
+
+    const featureRows=(designFeatureRegistry||[])
+      .map(feature=>{
+        const name=String(feature?.name||'').trim()
+        if(!name) return ''
+        const status=String(feature?.status||'ACTIVE').toUpperCase()
+        const action=String(feature?.change_type||'BASE').toUpperCase()
+        const description=String(feature?.description||'').trim()
+        return `- ${name} | 상태=${status} | 변경=${action}${description?` | ${description}`:''}`
+      })
+      .filter(Boolean)
+    if(featureRows.length){
+      rows.push(
+        '[기능 관리 Registry - 최신 기능 추가/수정/비활성화/삭제 상태, 이전 요구사항보다 우선]\n'
+        +featureRows.join('\n')
+        +'\nREMOVED 기능은 신규 설계/생성 대상에서 제거하고, DISABLED 기능은 코드/DB 삭제 없이 비활성화 상태로 유지합니다. 관련 없는 기존 기능은 변경하지 않습니다.'
       )
     }
 
@@ -9394,7 +9933,8 @@ function IDE() {
       interviewAttachmentSummary||'',
       ...(interviewAttachmentRequirements||[]).map(item=>String(item?.text||'')),
       uiLayoutConfig?.template_id?uiLayoutSummary(uiLayoutConfig):'',
-      ...manualRequirementLines
+      ...manualRequirementLines,
+      ...(designFeatureRegistry||[]).map(feature=>`${feature?.name||''} ${feature?.description||''} ${feature?.status||''} ${feature?.change_type||''}`)
     ].join('\n').toLowerCase()
 
     const has=(...values)=>values.some(value=>
@@ -9522,7 +10062,8 @@ function IDE() {
       attachment_summary:interviewAttachmentSummary||'',
       attachment_requirements:(interviewAttachmentRequirements||[]).slice(0,120),
       attachment_requirement_coverage:interviewAttachmentRequirementCoverage||{},
-      manual_overrides:{...(requirementManualOverrides||{})}
+      manual_overrides:{...(requirementManualOverrides||{})},
+      feature_registry:(designFeatureRegistry||[]).map(feature=>({...feature}))
     }
 
     setConfirmedInterviewRequirements(requirements)
@@ -11170,6 +11711,20 @@ function IDE() {
     </aside>
 
     <section className="builder-chat">
+      <AgentDesignProjectToolbar
+        designProjectId={designProjectId}
+        projectName={newAgentName||leftSummary.purpose}
+        savedAt={designProjectSavedAt||requirementDraftSavedAt}
+        status={designProjectProgressInfo().status}
+        progress={designProjectProgressInfo().progress}
+        onNew={()=>{
+          const hasWork=(chat||[]).some(item=>item?.role==='user')||Boolean(designProjectId)
+          if(hasWork&&!window.confirm('현재 Agent 설계를 종료하고 새 설계 프로젝트를 시작할까요?\n\n저장하지 않은 변경이 있다면 먼저 프로젝트 저장을 눌러주세요.')) return
+          startNewProject()
+        }}
+        onSave={()=>saveAgentDesignProject({createVersion:true,versionLabel:'사용자 수동 저장 Snapshot'})}
+        onLoad={loadAgentDesignProject}
+      />
       <div className="builder-chat-head">
         <div><span className="ai-avatar">AI</span><div><strong>Agent 설계 인터뷰</strong><small>{aiInterviewLabel}</small></div></div>
         <div className="builder-head-actions">
@@ -11340,6 +11895,11 @@ function IDE() {
           </div>
         </details>
       </div>
+      <AgentFeatureManager
+        detectedFeatures={getDetectedAgentFeatureNames()}
+        features={designFeatureRegistry}
+        onChange={handleDesignFeatureChange}
+      />
       <div className={`ui-layout-choice-card ${uiLayoutConfig?.template_id?'selected':''}`}>
         <div className="ui-layout-choice-head"><div><strong>UI / Layout</strong><small>썸네일을 보고 웹/웹앱 화면 구조를 선택합니다.</small></div><span>{uiLayoutConfig?.template_id?'선택됨':'선택 전'}</span></div>
         {uiLayoutConfig?.template_id?<><UILayoutWireframe config={uiLayoutConfig} compact={true}/><b>{uiLayoutSummary(uiLayoutConfig)}</b></>:<div className="ui-layout-choice-empty">좌측 메뉴, 상단 메뉴, Footer, 사용자 메뉴, Dashboard/Chat/Search Layout 등을 시각적으로 고를 수 있습니다.</div>}
@@ -14809,6 +15369,20 @@ function IDE() {
       }>
         {workspaceTab==='DESIGN'&&<div className="unified-agent-design">
           <section className="unified-design-chat">
+            <AgentDesignProjectToolbar
+              designProjectId={designProjectId}
+              projectName={newAgentName||getBuilderConversationSummary().purpose}
+              savedAt={designProjectSavedAt||requirementDraftSavedAt}
+              status={designProjectProgressInfo().status}
+              progress={designProjectProgressInfo().progress}
+              onNew={()=>{
+                const hasWork=(chat||[]).some(item=>item?.role==='user')||Boolean(designProjectId)
+                if(hasWork&&!window.confirm('현재 Agent 설계를 종료하고 새 설계 프로젝트를 시작할까요?\n\n저장하지 않은 변경이 있다면 먼저 프로젝트 저장을 눌러주세요.')) return
+                startNewProject()
+              }}
+              onSave={()=>saveAgentDesignProject({createVersion:true,versionLabel:'사용자 수동 저장 Snapshot'})}
+              onLoad={loadAgentDesignProject}
+            />
             <div className="builder-chat-head">
               <div>
                 <span className="ai-avatar">AI</span>
@@ -16682,7 +17256,13 @@ function IDE() {
             </div>
           </div>
 
-
+          <div className="unified-feature-manager-shell">
+            <AgentFeatureManager
+              detectedFeatures={getDetectedAgentFeatureNames()}
+              features={designFeatureRegistry}
+              onChange={handleDesignFeatureChange}
+            />
+          </div>
 
           <div className={`ui-layout-choice-card ${uiLayoutConfig?.template_id?'selected':''}`}>
             <div className="ui-layout-choice-head">
