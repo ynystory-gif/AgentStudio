@@ -12589,9 +12589,48 @@ display:none은 React DOM을 unmount하지 않습니다.
 }
 
 
-/* ===== v5.368 Agent UI Layout Template Gallery ===== */
+/* ===== v5.369 Agent UI Layout Template Gallery ===== */
 .builder-layout-button{border:1px solid #2c6f8f!important;background:#0b2634!important;color:#9fe0ff!important;font-weight:700}
 .ui-layout-choice-card{margin:0 0 12px;padding:10px;border:1px solid #294255;border-radius:9px;background:#09141d;display:grid;gap:8px}.ui-layout-choice-card.selected{border-color:#387aa3;background:#0a1823}.ui-layout-choice-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.ui-layout-choice-head>div{display:grid;gap:2px}.ui-layout-choice-head strong{font-size:11px;color:#e8f5ff}.ui-layout-choice-head small{font-size:8px;color:#7690a6;line-height:1.35}.ui-layout-choice-head>span{font-size:8px;padding:3px 6px;border:1px solid #31516a;border-radius:999px;color:#7fc5eb}.ui-layout-choice-card>b{font-size:9px;color:#acd9f2;line-height:1.4}.ui-layout-choice-card>button{width:100%;border:1px solid #2c6284;background:#10283a;color:#b9e4ff;font-size:10px}.ui-layout-choice-empty{border:1px dashed #294155;border-radius:7px;padding:9px;color:#738ca1;font-size:9px;line-height:1.5}
 .ui-layout-gallery-backdrop{position:fixed;inset:0;z-index:10050;background:rgba(1,6,12,.78);backdrop-filter:blur(5px);display:flex;align-items:center;justify-content:center;padding:24px}.ui-layout-gallery-modal{width:min(1460px,96vw);height:min(880px,92vh);border:1px solid #2c4660;border-radius:16px;background:#071019;box-shadow:0 28px 90px rgba(0,0,0,.55);display:grid;grid-template-rows:auto auto minmax(0,1fr);overflow:hidden}.ui-layout-gallery-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:18px 20px 13px;border-bottom:1px solid #1d3042;background:linear-gradient(135deg,#0b1723,#0a1120)}.ui-layout-gallery-head>div{display:grid;gap:3px}.ui-layout-gallery-head span{font-size:9px;letter-spacing:.16em;color:#50b7e9}.ui-layout-gallery-head strong{font-size:22px;color:#f1f8ff}.ui-layout-gallery-head small{font-size:10px;color:#8298ac}.ui-layout-gallery-head>button{width:34px;height:34px;border-radius:9px;border:1px solid #31465a;background:#101a25;color:#aab9c6;font-size:22px;padding:0}.ui-layout-gallery-toolbar{display:flex;gap:6px;overflow:auto;padding:10px 14px;border-bottom:1px solid #1d2c3a;background:#09121b}.ui-layout-gallery-toolbar button{flex:none;border:1px solid #283b4d;border-radius:999px;background:#0c1823;color:#8196aa;padding:6px 10px;font-size:10px}.ui-layout-gallery-toolbar button.active{border-color:#3184b5;background:#103149;color:#bfeaff}.ui-layout-gallery-body{min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 390px}.ui-layout-gallery-grid{min-height:0;overflow:auto;padding:14px;display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));align-content:start;gap:12px}.ui-layout-template-card{position:relative;text-align:left;padding:8px;border:1px solid #22384a;border-radius:12px;background:#0a141e;color:#dfeef8;display:grid;gap:8px;cursor:pointer;min-width:0}.ui-layout-template-card:hover{border-color:#3d718f;transform:translateY(-1px)}.ui-layout-template-card.selected{border-color:#3aa6df;box-shadow:0 0 0 1px rgba(58,166,223,.35),0 12px 30px rgba(0,0,0,.22)}.ui-layout-template-card>div:last-of-type{display:grid;gap:3px}.ui-layout-template-card strong{font-size:11px}.ui-layout-template-card small{font-size:9px;line-height:1.4;color:#7890a5}.ui-layout-recommended{position:absolute;top:13px;right:13px;padding:3px 6px;border-radius:999px;background:#0b664e;color:#b9ffe7;border:1px solid #248369;font-size:8px;font-weight:800}.ui-layout-config-panel{min-height:0;overflow:auto;border-left:1px solid #213447;background:#09131c;padding:14px;display:flex;flex-direction:column;gap:12px}.ui-layout-config-preview{border:1px solid #293f53;border-radius:12px;background:#0c1721;padding:9px}.ui-layout-config-title{display:grid;gap:3px}.ui-layout-config-title strong{font-size:14px;color:#eef7ff}.ui-layout-config-title small{font-size:9px;color:#8095a9;line-height:1.45}.ui-layout-toggle-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.ui-layout-toggle-grid label{display:flex;align-items:center;gap:6px;border:1px solid #223649;border-radius:7px;background:#0a1721;padding:7px;font-size:9px;color:#b3c7d8}.ui-layout-toggle-grid input{accent-color:#2fa2df}.ui-layout-select-field{display:grid;grid-template-columns:112px minmax(0,1fr);gap:8px;align-items:center}.ui-layout-select-field span{font-size:9px;color:#7f96aa}.ui-layout-select-field select{width:100%;border:1px solid #29445b;border-radius:7px;background:#0c1924;color:#d6e8f6;padding:7px;font-size:10px}.ui-layout-component-tags{display:flex;flex-wrap:wrap;gap:5px}.ui-layout-component-tags span{border:1px solid #2b4660;border-radius:999px;background:#0c1c29;color:#8ccbed;padding:3px 7px;font-size:8px}.ui-layout-config-actions{margin-top:auto;display:grid;grid-template-columns:1fr 1.4fr;gap:7px}.ui-layout-config-actions button{padding:9px}.ui-layout-config-actions .primary{background:#1e70a1;border-color:#2e91c7;color:#fff;font-weight:800}
 .ui-layout-wireframe{position:relative;width:100%;aspect-ratio:16/9;border:1px solid #b8cee0;border-radius:8px;background:#f3f8fc;overflow:hidden;display:flex;flex-direction:column;box-sizing:border-box}.ui-layout-wireframe.dark{background:#101825;border-color:#36516b}.ui-layout-wireframe.compact{border-radius:7px}.ui-layout-wf-header{height:15%;background:#d8edf9;border-bottom:1px solid #acc8dc;display:grid;grid-template-columns:18% 1fr auto;align-items:center;gap:6px;padding:0 4%;box-sizing:border-box}.dark .ui-layout-wf-header{background:#17273a;border-color:#35506a}.ui-layout-wf-header>i{height:35%;border-radius:999px;background:#43a7d9}.ui-layout-wf-nav{display:flex;justify-content:center;gap:5%}.ui-layout-wf-nav span{width:16%;height:3px;border-radius:99px;background:#88bcd6}.ui-layout-wf-header>b{width:10px;height:10px;border-radius:50%;background:#657cf1}.ui-layout-wf-body{min-height:0;flex:1;display:flex}.ui-layout-wf-sidebar{width:18%;border-right:1px solid #c5d8e6;background:#e7f2f8;padding:6% 3%;display:flex;flex-direction:column;gap:8%;box-sizing:border-box}.dark .ui-layout-wf-sidebar{background:#121f30;border-color:#32495f}.ui-layout-wf-sidebar i{height:5%;min-height:3px;border-radius:999px;background:#77aaca}.ui-layout-wf-main{flex:1;padding:5%;display:flex;flex-direction:column;gap:7%;min-width:0}.ui-layout-wf-main.two_column .ui-layout-wf-content{grid-template-columns:repeat(2,1fr)}.ui-layout-wf-main.three_column .ui-layout-wf-content{grid-template-columns:repeat(2,1fr)}.ui-layout-wf-main.grid .ui-layout-wf-content,.ui-layout-wf-main.dashboard .ui-layout-wf-content{grid-template-columns:repeat(3,1fr)}.ui-layout-wf-main.landing .ui-layout-wf-search{height:25%;border-radius:6px}.ui-layout-wf-search{height:8%;min-height:5px;border-radius:999px;background:#b8dff2}.dark .ui-layout-wf-search{background:#254866}.ui-layout-wf-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:4%}.ui-layout-wf-kpis span{height:14px;border-radius:4px;background:#cde8f5}.dark .ui-layout-wf-kpis span{background:#1f3850}.ui-layout-wf-content{flex:1;display:grid;grid-template-columns:1fr;gap:5%;min-height:0}.ui-layout-wf-content span{border-radius:4px;background:linear-gradient(135deg,#d9ecf7,#b9d9ee);min-height:12px}.dark .ui-layout-wf-content span{background:linear-gradient(135deg,#1c3046,#263f59)}.ui-layout-wf-context{width:20%;border-left:1px solid #c5d8e6;background:#eef6fa;padding:5%;display:flex;flex-direction:column;gap:8%;box-sizing:border-box}.dark .ui-layout-wf-context{background:#111d2b;border-color:#32495f}.ui-layout-wf-context span{height:13%;border-radius:4px;background:#c7e4f2}.dark .ui-layout-wf-context span{background:#20384f}.ui-layout-wf-footer{height:10%;border-top:1px solid #c3d7e6;background:#e4f1f7;display:flex;align-items:center;justify-content:center;gap:6%}.dark .ui-layout-wf-footer{background:#132235;border-color:#32495f}.ui-layout-wf-footer span{width:10%;height:3px;border-radius:99px;background:#87afc7}
 @media(max-width:1180px){.ui-layout-gallery-body{grid-template-columns:minmax(0,1fr) 330px}.ui-layout-gallery-grid{grid-template-columns:repeat(2,minmax(210px,1fr))}}@media(max-width:850px){.ui-layout-gallery-backdrop{padding:8px}.ui-layout-gallery-modal{height:96vh}.ui-layout-gallery-body{grid-template-columns:1fr}.ui-layout-config-panel{display:none}.ui-layout-gallery-grid{grid-template-columns:1fr 1fr}.builder-shell{grid-template-columns:200px minmax(0,1fr)}.builder-summary{grid-column:1/-1}}
+
+/* ===== v5.369 Failed Build Redevelopment Checkpoint ===== */
+.shared-build-buttons{
+  grid-template-columns:repeat(4,minmax(0,1fr));
+}
+.shared-build-buttons .redevelopment-start-button.active{
+  border-color:#c9782d;
+  background:linear-gradient(180deg,#4b2b13,#2d190d);
+  color:#ffd7a6;
+  box-shadow:0 0 0 1px rgba(230,142,62,.08) inset;
+}
+.shared-build-buttons .redevelopment-start-button.active:hover:not(:disabled){
+  border-color:#efa050;
+  color:#fff0d7;
+}
+.shared-redevelopment-info{
+  margin-top:6px;
+  padding:7px 9px;
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:5px 8px;
+  border:1px solid rgba(211,125,45,.42);
+  border-radius:7px;
+  background:rgba(76,40,16,.34);
+  color:#cda984;
+  font-size:8px;
+}
+.shared-redevelopment-info strong{color:#ffc27e;font-size:8px;}
+.shared-redevelopment-info span{overflow-wrap:anywhere;}
+.right-agent-build-card .shared-build-buttons button:last-child{
+  grid-column:auto;
+}
+.right-agent-build-card .shared-build-buttons .execution-stop-button{
+  grid-column:1 / -1;
+}
+@media (max-width: 1050px){
+  .shared-build-buttons{grid-template-columns:repeat(2,minmax(0,1fr));}
+}

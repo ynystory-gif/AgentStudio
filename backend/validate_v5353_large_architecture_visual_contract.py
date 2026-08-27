@@ -22,9 +22,9 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-require("AGENTSTUDIO_FRONTEND_VERSION='5.368'" in APP, "frontend version must be 5.368")
-require('version="5.368"' in MAIN or "version='5.368'" in MAIN, "backend version must be 5.368")
-require('"version": "5.368"' in ROUTES, "health version must be 5.368")
+require("AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP, "frontend version must be 5.369")
+require('version="5.369"' in MAIN or "version='5.369'" in MAIN, "backend version must be 5.369")
+require('"version": "5.369"' in ROUTES, "health version must be 5.369")
 require("_ICON_RULES" in SERVICE and "_add_large_visual" in SERVICE, "large visual icon registry missing")
 require("_add_project_stack_slide" in SERVICE, "project adaptive stack visual slide missing")
 
@@ -76,11 +76,11 @@ payload = {
         },
     },
 }
-content, _ = build_agentstudio_presentation(payload, "5.368")
+content, _ = build_agentstudio_presentation(payload, "5.369")
 prs = Presentation(BytesIO(content))
 require(len(prs.slides) == 6, f"Agent ALL export must contain 6 target-only adaptive slides, got {len(prs.slides)}")
 picture_counts = [sum(1 for shape in slide.shapes if shape.shape_type == MSO_SHAPE_TYPE.PICTURE) for slide in prs.slides]
 require(picture_counts[4] >= 10, f"design architecture must contain large visual pictures, got {picture_counts[4]}")
 require(picture_counts[5] >= 8, f"project technology/runtime slide must contain large visual pictures, got {picture_counts[5]}")
 
-print("PASS v5.368 Large Architecture Visual Asset contract")
+print("PASS v5.369 Large Architecture Visual Asset contract")

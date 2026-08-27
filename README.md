@@ -1,8 +1,24 @@
-# THEANOVA AgentStudio v5.368
+# THEANOVA AgentStudio v5.369
 
-## v5.368 ReactTypeScriptLegacySourceCleanupFix
+## v5.369 FailedBuildRedevelopmentCheckpoint
 
-### v5.368 changes
+### 핵심 변경
+
+- 프로젝트 이름/경로를 지정하면 `reports/current_run.json`, `workflow_state.json`, `agentstudio_design_checkpoint.json`을 확인해 이전 Agent 개발 실패 이력을 자동 감지합니다.
+- 재개 가능한 실패 기록이 있으면 Agent 제작 진행 영역의 **`↻ 재개발 시작`** 버튼이 자동 활성화됩니다.
+- 실패 이력이 있는 프로젝트에서는 일반 `개발 시작`을 비활성화해 실수로 처음부터 전체 Workflow를 재실행하지 않도록 합니다.
+- `재개발 시작`은 이전 Requirement/Workflow/Architecture/File Plan/Settings/Debug State를 재사용하며 **기록된 실패 단계 직전 Node부터** 새 LangGraph 실행을 시작합니다.
+- 사용자가 실패 후 직접 소스 코드를 수정한 경우, 요구사항 수집/설계/프로젝트 생성 단계는 다시 수행하지 않고 수정된 소스를 실패 직전 검증 단계부터 재검증합니다.
+- 실패 단계 예: `build_artifact_validation` → `settings_validation`, `architecture_conformance` → `as_built_architecture`, `test` → `environment_configuration`.
+- Backend에 `/workflow/redevelop-start-job` 전용 Endpoint를 추가해 브라우저의 오래된 상태가 아니라 프로젝트 폴더의 최신 실패 Checkpoint를 기준으로 재개합니다.
+- 재개발 실행은 새 Run ID를 사용하되 `previous_run_id`, `failure_stage`, `resume_from_node`를 보존하여 실행 결과/진단 추적이 가능합니다.
+- v5.368 Failed Build Resume Checkpoint와 기존 기능을 모두 유지합니다.
+
+---
+
+## v5.369 ReactTypeScriptLegacySourceCleanupFix
+
+### v5.369 changes
 
 - React + TypeScript 확정 Agent에서 `frontend/src/App.jsx`, `main.jsx`, `services/api.js`가 이전 생성/Repair에서 남아 있으면 Build Artifact Validation 전에 AgentStudio가 결정적으로 삭제합니다.
 - LLM이 금지된 JS/JSX 파일을 0-byte 빈 파일로 바꿔도 `Path.is_file()` 검증에 계속 걸리던 `REPAIR_PLAN_INCOMPLETE` 반복을 제거했습니다.
@@ -155,7 +171,7 @@ v5.355 `SeparatedAgentStudioPptExport`를 기준으로 **DB ERD Workspace + Powe
 - 신규 Agent 모드에서는 `selectedProjectId`가 없으므로 Workflow/Report/PPT 상태가 기존 Project Adaptive Report로 fallback하지 않습니다.
 
 
-## v5.368 Failed Build Resume Checkpoint
+## v5.369 Failed Build Resume Checkpoint
 - 신규 Agent 개발 실패 후 요구사항/대화/Workflow/UI Layout/첨부 분석 요약/실패 실행 정보를 프로젝트 `reports/agentstudio_design_checkpoint.json`에 영속 저장합니다.
 - 브라우저 localStorage와 프로젝트 Checkpoint를 함께 조회하고 더 최신 기록을 사용자 승인 후 복원합니다.
 - v5.367 이하 프로젝트도 `reports/requirements_snapshot.json`, `workflow_state.json`, `current_run.json`을 사용해 가능한 범위에서 복원합니다.

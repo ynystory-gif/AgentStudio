@@ -17,7 +17,7 @@ checks = {
     'echo guard': 'def _looks_like_attachment_echo(' in AGENT and 'if fresh_attachment_block and _looks_like_attachment_echo(content, fresh_attachment_block):' in AGENT,
     'safe fallback': 'def _safe_attachment_fallback(' in AGENT,
     'frontend last-resort guard': 'const protectInterviewAssistantAnswer=' in APP and 'const answer=protectInterviewAssistantAnswer(' in APP,
-    'version': "AGENTSTUDIO_FRONTEND_VERSION='5.368'" in APP,
+    'version': "AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP,
 }
 failed = [name for name, ok in checks.items() if not ok]
 for name, ok in checks.items():

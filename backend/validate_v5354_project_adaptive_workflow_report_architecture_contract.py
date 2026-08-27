@@ -86,7 +86,7 @@ payload = {
         "testReturncode": None,
     },
 }
-blob, filename = build_agentstudio_presentation(payload, "5.368")
+blob, filename = build_agentstudio_presentation(payload, "5.369")
 text = slide_text(blob)
 require(blob[:2] == b"PK", "PPTX zip signature missing")
 require("simple_python · General Software Project Workflow" in text, "project-specific workflow must be exported")
@@ -101,11 +101,11 @@ require(filename.endswith(".pptx"), "PPTX filename missing")
 app = (ROOT.parent / "frontend" / "src" / "App.jsx").read_text(encoding="utf-8")
 routes = (ROOT / "app" / "api" / "routes.py").read_text(encoding="utf-8")
 ppt = (ROOT / "app" / "services" / "presentation_export_service.py").read_text(encoding="utf-8")
-require("AGENTSTUDIO_FRONTEND_VERSION='5.368'" in app, "frontend version must be 5.368")
+require("AGENTSTUDIO_FRONTEND_VERSION='5.369'" in app, "frontend version must be 5.369")
 require("/project/adaptive-report" in routes, "adaptive project endpoint missing")
 require("build_project_adaptive_report" in routes, "adaptive export refresh missing")
 require("loadedProjectAnalysis?.adaptive_report?.workflow" in app, "workflow tab adaptive fallback missing")
 require("PROJECT_SOURCE_INFERENCE" in app, "architecture adaptive source handling missing")
 require("_add_project_stack_slide" in ppt, "project-specific PPT stack slide missing")
 
-print("PASS v5.368 Project Adaptive Workflow / Report / Architecture contract")
+print("PASS v5.369 Project Adaptive Workflow / Report / Architecture contract")

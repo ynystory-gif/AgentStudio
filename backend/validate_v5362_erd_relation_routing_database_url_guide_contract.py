@@ -13,7 +13,7 @@ from app.services.presentation_export_service import build_agentstudio_presentat
 
 def require(condition: bool, message: str) -> None:
     if not condition:
-        raise SystemExit("v5.368 contract failed: " + message)
+        raise SystemExit("v5.369 contract failed: " + message)
 
 
 # Version contract.
@@ -23,9 +23,9 @@ routes = (ROOT / "app" / "api" / "routes.py").read_text(encoding="utf-8")
 ppt_service = (ROOT / "app" / "services" / "presentation_export_service.py").read_text(encoding="utf-8")
 workflow_service = (ROOT / "app" / "services" / "agent_workflow.py").read_text(encoding="utf-8")
 
-require("AGENTSTUDIO_FRONTEND_VERSION='5.368'" in app, "frontend version")
-require('version="5.368"' in main or "version='5.368'" in main, "backend version")
-require('"version": "5.368"' in routes, "health version")
+require("AGENTSTUDIO_FRONTEND_VERSION='5.369'" in app, "frontend version")
+require('version="5.369"' in main or "version='5.369'" in main, "backend version")
+require('"version": "5.369"' in routes, "health version")
 
 # Source-level ERD rules.
 require("def _set_erd_badge_text" in ppt_service, "horizontal badge helper missing")
@@ -96,7 +96,7 @@ payload = {
     "report": {},
     "db_erd": db_erd,
 }
-blob, _ = build_agentstudio_presentation(payload, "5.368")
+blob, _ = build_agentstudio_presentation(payload, "5.369")
 require(blob[:2] == b"PK", "PPTX signature")
 prs = Presentation(BytesIO(blob))
 require(len(prs.slides) >= 1, "ERD slide missing")
@@ -124,4 +124,4 @@ require(all(getattr(b.text_frame, "word_wrap", None) is False for b in badges), 
 lane_ys = sorted({round(float(s.top) / 914400.0, 3) for s in horizontal_segments})
 require(len(lane_ys) >= 3, f"relation routes still share too few lanes: {lane_ys}")
 
-print("PASS v5.368 ERD Key Badge + Relation Routing + DATABASE_URL Guide contract")
+print("PASS v5.369 ERD Key Badge + Relation Routing + DATABASE_URL Guide contract")

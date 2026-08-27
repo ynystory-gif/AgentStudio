@@ -126,7 +126,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.368", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.369", lifespan=lifespan)
 
 # Frontend 개발 서버(Vite)와 Backend API 간 CORS 허용
 app.add_middleware(

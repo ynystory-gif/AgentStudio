@@ -87,6 +87,12 @@ class AgentState(TypedDict, total=False):
     status: str
     error: str
 
+    # v5.369 failed-build redevelopment checkpoint routing
+    resume_mode: bool
+    resume_from_node: str
+    resume_run_id: str
+    resume_previous_status: str
+
 
 def _bundle(state: AgentState) -> dict:
     value = state.get("design_bundle")
@@ -3595,7 +3601,7 @@ def _looks_like_placeholder(content: str, suffix: str = "") -> bool:
 
 
 async def build_artifact_validation_node(state: AgentState):
-    # v5.368: React + TypeScript 계약에서는 App.jsx/main.jsx/api.js가 내용이 비어 있어도
+    # v5.369: React + TypeScript 계약에서는 App.jsx/main.jsx/api.js가 내용이 비어 있어도
     # 존재 자체가 Architecture 오류입니다. LLM Repair가 빈 파일로 만드는 우회 대신
     # 검증 전에 legacy entry를 결정적으로 삭제합니다.
     react_ts_cleanup = _cleanup_react_typescript_legacy_sources(state)
@@ -5035,8 +5041,38 @@ async def review_node(state: AgentState):
     }
 
 
+_RESUMABLE_WORKFLOW_NODES = {
+    "requirement_analysis", "analyze_project", "capability_design",
+    "tool_mcp_decision", "agent_architecture", "database_design",
+    "target_workflow_design", "project_file_plan", "requirement_coverage_gate",
+    "settings_requirement_analysis", "settings_schema_design", "settings_ui_design",
+    "checkpoint", "approval", "code_generation", "settings_generator",
+    "settings_validation", "build_artifact_validation", "as_built_architecture",
+    "architecture_conformance", "environment_configuration", "test", "debug",
+    "package_completion", "review",
+}
+
+
+async def resume_entry_router_node(state: AgentState):
+    # No state mutation is required. This explicit node makes START routing
+    # compatible with both fresh builds and failed-build redevelopment.
+    return {}
+
+
+def route_workflow_entry(state: AgentState) -> str:
+    if state.get("resume_mode"):
+        node = str(state.get("resume_from_node") or "").strip()
+        if node in _RESUMABLE_WORKFLOW_NODES:
+            return node
+    return "requirement_analysis"
+
+
 def build_workflow(checkpointer=None):
     graph = StateGraph(AgentState)
+
+    # v5.369: fresh builds and failed-build redevelopment share one graph.
+    # A resumed build skips already-completed requirement/design nodes.
+    graph.add_node("resume_entry_router", resume_entry_router_node)
 
     # AgentStudio 제작 Workflow
     graph.add_node(
@@ -5140,9 +5176,11 @@ def build_workflow(checkpointer=None):
         review_node,
     )
 
-    graph.add_edge(
-        START,
-        "requirement_analysis",
+    graph.add_edge(START, "resume_entry_router")
+    graph.add_conditional_edges(
+        "resume_entry_router",
+        route_workflow_entry,
+        {node: node for node in sorted(_RESUMABLE_WORKFLOW_NODES)},
     )
     graph.add_edge(
         "requirement_analysis",

@@ -26,7 +26,7 @@ import { getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isDatabaseD
 import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSqlCode } from './utils/notebook'
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.368'
+const AGENTSTUDIO_FRONTEND_VERSION='5.369'
 
 const DebouncedProjectSearchInput=memo(function DebouncedProjectSearchInput({value,onCommit,placeholder='프로젝트 검색...'}){
   const [localValue,setLocalValue]=useState(value||'')
@@ -1960,6 +1960,45 @@ function TargetWorkflowDiagram({workflow}){
 }
 
 
+function redevelopmentResumeNodeForFailure(stage='',status=''){
+  const raw=String(stage||'').trim().toLowerCase().replace(/[-/]/g,'_')
+  const previous={
+    requirement_analysis:'requirement_analysis',
+    analyze_project:'requirement_analysis',
+    capability_design:'analyze_project',
+    tool_mcp_decision:'capability_design',
+    agent_architecture:'tool_mcp_decision',
+    database_design:'agent_architecture',
+    target_workflow_design:'database_design',
+    project_file_plan:'target_workflow_design',
+    requirement_coverage_gate:'project_file_plan',
+    settings_requirement_analysis:'requirement_coverage_gate',
+    settings_schema_design:'settings_requirement_analysis',
+    settings_ui_design:'settings_schema_design',
+    checkpoint:'settings_ui_design',
+    approval:'checkpoint',
+    code_generation:'code_generation',
+    settings_generator:'code_generation',
+    settings_validation:'settings_generator',
+    build_artifact_validation:'settings_validation',
+    as_built_architecture:'build_artifact_validation',
+    architecture_conformance:'as_built_architecture',
+    environment_configuration:'architecture_conformance',
+    test:'environment_configuration',
+    debug:'test',
+    package_completion:'test',
+    review:'package_completion',
+  }
+  if(previous[raw]) return previous[raw]
+  const upper=String(status||'').toUpperCase()
+  if(upper.includes('TEST')) return 'environment_configuration'
+  if(upper.includes('ARCHITECTURE')) return 'as_built_architecture'
+  if(upper.includes('SETTINGS')) return 'settings_generator'
+  if(upper.includes('CODE_PLAN')||upper.includes('COVERAGE')) return 'project_file_plan'
+  return 'settings_validation'
+}
+
+
 function AgentBuildActionBar({
   stage='REQUIREMENTS',
   busy=false,
@@ -1968,6 +2007,9 @@ function AgentBuildActionBar({
   onWorkflow,
   onCreateProject,
   onStartDevelopment,
+  onRedevelop,
+  redevelopmentEnabled=false,
+  redevelopmentInfo=null,
   onStop,
   compact=false,
 }){
@@ -2023,14 +2065,33 @@ function AgentBuildActionBar({
       <button
         type="button"
         className={stage==='PROJECT_CREATED'?'primary success':''}
-        disabled={busy||stage!=='PROJECT_CREATED'}
+        disabled={busy||stage!=='PROJECT_CREATED'||redevelopmentEnabled}
         onClick={onStartDevelopment}
+        title={redevelopmentEnabled?'이전 실패 기록이 있으므로 재개발 시작을 사용하세요.':'처음 개발을 시작합니다.'}
       >
         ▶ 개발 시작
+      </button>
+
+      <button
+        type="button"
+        className={redevelopmentEnabled?'redevelopment-start-button active':'redevelopment-start-button'}
+        disabled={busy||!redevelopmentEnabled}
+        onClick={onRedevelop}
+        title={redevelopmentEnabled
+          ? `이전 실패 ${redevelopmentInfo?.failure_stage||'지점'} 직전 단계(${redevelopmentInfo?.resume_from_node||'-'})부터 재개합니다.`
+          : '프로젝트 이름/경로에서 재개 가능한 실패 기록이 확인되면 활성화됩니다.'}
+      >
+        ↻ 재개발 시작
       </button>
       {busy&&onStop&&<button type="button" className="execution-stop-button" onClick={onStop}>■ 실행 정지</button>}
     </div>
 
+    {redevelopmentEnabled&&
+      <div className="shared-redevelopment-info">
+        <strong>이전 개발 실패 기록 발견</strong>
+        <span>{redevelopmentInfo?.status||'FAILED'} · 실패 단계 {redevelopmentInfo?.failure_stage||'-'} · 재개 {redevelopmentInfo?.resume_from_node||'-'}부터</span>
+      </div>
+    }
     {message&&<div className="shared-build-message">{message}</div>}
   </div>
 }
@@ -2449,6 +2510,7 @@ function IDE() {
   const [requirementDraftDecisionPending,setRequirementDraftDecisionPending]=useState(false)
   const requirementDraftDecisionPendingRef=useRef(false)
   const [restoredBuildResume,setRestoredBuildResume]=useState(null)
+  const [redevelopmentInfo,setRedevelopmentInfo]=useState(null)
   const requirementCheckpointSignatureRef=useRef('')
   const builderMessagesEndRef=useRef(null)
   const [workflow,setWorkflow]=useState(null)
@@ -2876,7 +2938,7 @@ function IDE() {
     }
   });return()=>ws.close()},[])
 
-  // v5.368: release browser-side long-lived resources when the SPA unloads.
+  // v5.369: release browser-side long-lived resources when the SPA unloads.
   useEffect(()=>()=>{
     for(const socket of Object.values(terminalSocketsRef.current||{})){
       try{ socket?.close?.(1000,'app_unmount') }catch{}
@@ -2950,7 +3012,7 @@ function IDE() {
   ])
 
   useEffect(()=>{
-    // v5.368: Resume candidates come from both browser localStorage and the
+    // v5.369: Resume candidates come from both browser localStorage and the
     // project folder. A failed build must be recoverable after a browser restart,
     // another PC session, or localStorage cleanup.
     const projectPath=String(newAgentProjectRoot||'').trim()
@@ -2959,6 +3021,7 @@ function IDE() {
       setRequirementDraftDecisionPending(false)
       setRequirementDraftRestored(false)
       setRestoredBuildResume(null)
+      setRedevelopmentInfo(null)
       return
     }
 
@@ -2994,6 +3057,7 @@ function IDE() {
           setRequirementDraftRestored(false)
           setRequirementDraftSavedAt('')
           setRestoredBuildResume(null)
+          setRedevelopmentInfo(null)
           return
         }
 
@@ -3021,10 +3085,15 @@ function IDE() {
           requirements_snapshot:runtime?.requirements_snapshot||{}
         }
 
+        const redevelopment=(serverResult?.redevelopment&&typeof serverResult.redevelopment==='object')
+          ? serverResult.redevelopment
+          : null
+        setRedevelopmentInfo(redevelopment?.available?redevelopment:null)
         setRequirementDraftCandidate({
           key,
           snapshot,
           build_resume:buildResume,
+          redevelopment,
           saved_at:String(snapshot?.saved_at||''),
           agent_name:String(snapshot?.agent_name||''),
           project_root:String(snapshot?.project_root||projectPath),
@@ -3038,6 +3107,7 @@ function IDE() {
         if(!cancelled){
           setRequirementDraftCandidate(null)
           setRequirementDraftDecisionPending(false)
+          setRedevelopmentInfo(null)
         }
       }
     },120)
@@ -3046,7 +3116,7 @@ function IDE() {
       cancelled=true
       clearTimeout(timer)
     }
-  },[newAgentProjectRoot])
+  },[newAgentProjectRoot,newAgentName])
 
   useEffect(()=>{
     requirementDraftDecisionPendingRef.current=requirementDraftDecisionPending
@@ -9509,38 +9579,44 @@ function IDE() {
     }
   }
 
-  const startAgentDevelopment=async()=>{
+  const startAgentDevelopment=async(options={})=>{
+    const redevelopment=options?.redevelopment===true
     const request=(
       workflowReq
       || chat.find(x=>x?.role==='user')?.content
       || ''
     ).trim()
 
-    if(!request){
+    if(!request&&!redevelopment){
       setAgentBuildMessage('개발 요청 내용이 없습니다.')
       return
     }
 
-    if(agentBuildStage==='REQUIREMENTS'){
-      setAgentBuildMessage('먼저 대상 Agent Workflow를 설계합니다...')
-      await previewTargetWorkflow(request)
-      return
-    }
+    if(!redevelopment){
+      if(agentBuildStage==='REQUIREMENTS'){
+        setAgentBuildMessage('먼저 대상 Agent Workflow를 설계합니다...')
+        await previewTargetWorkflow(request)
+        return
+      }
 
-    if(agentBuildStage==='WORKFLOW_READY'){
-      setAgentBuildMessage('개발 전에 프로젝트를 먼저 생성해야 합니다.')
-      return
-    }
+      if(agentBuildStage==='WORKFLOW_READY'){
+        setAgentBuildMessage('개발 전에 프로젝트를 먼저 생성해야 합니다.')
+        return
+      }
 
-    if(agentBuildStage!=='PROJECT_CREATED'){
-      return
-    }
+      if(agentBuildStage!=='PROJECT_CREATED'){
+        return
+      }
 
-    const databasePlan=targetWorkflowPreview?.database_plan||{}
-    if(databasePlan?.enabled&&!databasePlan?.finalized){
-      setAgentBuildMessage('DB 설계가 확정되지 않아 개발을 시작하지 않습니다. Workflow 화면에서 DB 설계를 확인/확정해 주세요.')
-      setWorkspaceTab('WORKFLOW')
-      setWorkflowView('TARGET')
+      const databasePlan=targetWorkflowPreview?.database_plan||{}
+      if(databasePlan?.enabled&&!databasePlan?.finalized){
+        setAgentBuildMessage('DB 설계가 확정되지 않아 개발을 시작하지 않습니다. Workflow 화면에서 DB 설계를 확인/확정해 주세요.')
+        setWorkspaceTab('WORKFLOW')
+        setWorkflowView('TARGET')
+        return
+      }
+    }else if(!redevelopmentInfo?.available){
+      setAgentBuildMessage('재개발 가능한 이전 실패 기록을 찾지 못했습니다. 프로젝트 이름과 경로를 다시 확인해 주세요.')
       return
     }
 
@@ -9582,10 +9658,15 @@ function IDE() {
     setAgentBuildBusy(true)
     setAgentBuildStage('BUILDING')
     setDevelopmentFinalStatus(null)
-    setAgentBuildMessage('Agent Factory 개발 Workflow를 시작합니다...')
+    setAgentBuildMessage(
+      redevelopment
+        ? `재개발 시작 · 이전 실패 ${redevelopmentInfo?.failure_stage||'-'} 직전 단계(${redevelopmentInfo?.resume_from_node||'-'})부터 이어서 검증합니다...`
+        : 'Agent Factory 개발 Workflow를 시작합니다...'
+    )
 
     const startedAt=Date.now()
-    const workflowThreadId=`agent-${Date.now()}`
+    const workflowThreadId=`${redevelopment?'redevelop':'agent'}-${Date.now()}`
+    let effectiveWorkflowThreadId=workflowThreadId
 
     setDevelopmentProgress({
       active:true,
@@ -9604,8 +9685,10 @@ function IDE() {
       setDevelopmentProgress(prev=>({
         ...prev,
         percent:10,
-        stage:'Agent Factory 시작',
-        detail:'설계 결과와 등록된 Coding Style을 개발 Workflow에 전달했습니다.'
+        stage:redevelopment?'재개발 Checkpoint 복원':'Agent Factory 시작',
+        detail:redevelopment
+          ? `완료된 요구사항/설계는 재사용하고 ${redevelopmentInfo?.resume_from_node||'실패 직전 단계'}부터 이어서 실행합니다.`
+          : '설계 결과와 등록된 Coding Style을 개발 Workflow에 전달했습니다.'
       }))
 
       /*
@@ -9657,49 +9740,61 @@ function IDE() {
         })
       },900)
 
-      const workflowJob=await api('/workflow/start-job',{
-        method:'POST',
-        body:JSON.stringify({
-          thread_id:workflowThreadId,
-          project_root:projectRoot,
-          request,
-          target_files:[],
-          test_command:'python -m compileall .',
-          provider,
-          design_bundle:{
-            ...(targetWorkflowPreview||{}),
-            confirmed_requirements:buildConfirmedRequirementsFromChat(),
-            interview_messages:(chat||[]).map(item=>({
-              role:item?.role||'',
-              content:item?.content||''
-            })),
-            interview_context:buildRequirementRequestFromCollectedInfo(),
-            previous_build_state:(()=>{
-              const restoredState=(restoredBuildResume?.workflow_state&&typeof restoredBuildResume.workflow_state==='object')
-                ? restoredBuildResume.workflow_state
-                : {}
-              if(Object.keys(restoredState).length && String(restoredBuildResume?.project_root||projectRoot||'')===String(projectRoot||'')){
-                return restoredState
+      const workflowJob=redevelopment
+        ? await api('/workflow/redevelop-start-job',{
+            method:'POST',
+            body:JSON.stringify({
+              project_root:projectRoot,
+              request,
+              test_command:'python -m compileall .',
+              provider,
+              agent_name:newAgentName||''
+            })
+          })
+        : await api('/workflow/start-job',{
+            method:'POST',
+            body:JSON.stringify({
+              thread_id:workflowThreadId,
+              project_root:projectRoot,
+              request,
+              target_files:[],
+              test_command:'python -m compileall .',
+              provider,
+              design_bundle:{
+                ...(targetWorkflowPreview||{}),
+                confirmed_requirements:buildConfirmedRequirementsFromChat(),
+                interview_messages:(chat||[]).map(item=>({
+                  role:item?.role||'',
+                  content:item?.content||''
+                })),
+                interview_context:buildRequirementRequestFromCollectedInfo(),
+                previous_build_state:(()=>{
+                  const restoredState=(restoredBuildResume?.workflow_state&&typeof restoredBuildResume.workflow_state==='object')
+                    ? restoredBuildResume.workflow_state
+                    : {}
+                  if(Object.keys(restoredState).length && String(restoredBuildResume?.project_root||projectRoot||'')===String(projectRoot||'')){
+                    return restoredState
+                  }
+                  return (
+                    ['FULL_REUSE','PARTIAL_REVISE'].includes(String(targetWorkflowPreview?.design_runtime?.incremental_revision?.mode||''))
+                    && String(workflow?.state?.project_root||'')===String(projectRoot||'')
+                  )?(workflow?.state||{}):{}
+                })(),
+                resume_context:restoredBuildResume?{
+                  run_id:restoredBuildResume.run_id||'',
+                  status:restoredBuildResume.status||'',
+                  failure_stage:restoredBuildResume.failure_stage||'',
+                  failure_reason:restoredBuildResume.failure_reason||'',
+                  continue_failed_build:true
+                }:{}
               }
-              return (
-                ['FULL_REUSE','PARTIAL_REVISE'].includes(String(targetWorkflowPreview?.design_runtime?.incremental_revision?.mode||''))
-                && String(workflow?.state?.project_root||'')===String(projectRoot||'')
-              )?(workflow?.state||{}):{}
-            })(),
-            resume_context:restoredBuildResume?{
-              run_id:restoredBuildResume.run_id||'',
-              status:restoredBuildResume.status||'',
-              failure_stage:restoredBuildResume.failure_stage||'',
-              failure_reason:restoredBuildResume.failure_reason||'',
-              continue_failed_build:true
-            }:{}
-          }
-        })
-      })
+            })
+          })
 
       if(!workflowJob?.id){
         throw new Error('Agent Factory Background Job ID를 받지 못했습니다.')
       }
+      effectiveWorkflowThreadId=String(workflowJob?.thread_id||workflowThreadId)
       setActiveWorkflowJobId(workflowJob.id)
 
       let jobState=workflowJob
@@ -9784,7 +9879,7 @@ function IDE() {
       setDevelopmentFinalStatus(finalStatus)
       const completedResume={
         source:'AGENT_BUILD',
-        run_id:String(result?.thread_id||workflowThreadId||''),
+        run_id:String(result?.thread_id||effectiveWorkflowThreadId||''),
         status:String(finalStatus?.status||workflowState?.status||''),
         failure_stage:String(workflowState?.diagnostic_failure_stage||''),
         failure_reason:String(workflowState?.diagnostic_failure_reason||workflowState?.error||''),
@@ -9792,6 +9887,19 @@ function IDE() {
         workflow_state:workflowState
       }
       setRestoredBuildResume(completedResume)
+      if(finalStatus.kind==='success'){
+        setRedevelopmentInfo(null)
+      }else if(finalStatus.kind==='failure'||finalStatus.kind==='action'){
+        const failureStage=String(workflowState?.diagnostic_failure_stage||'')
+        setRedevelopmentInfo({
+          available:true,
+          status:String(finalStatus?.status||workflowState?.status||''),
+          run_id:String(result?.thread_id||effectiveWorkflowThreadId||''),
+          failure_stage:failureStage,
+          failure_reason:String(workflowState?.diagnostic_failure_reason||workflowState?.error||''),
+          resume_from_node:redevelopmentResumeNodeForFailure(failureStage,finalStatus?.status||workflowState?.status||'')
+        })
+      }
       saveRequirementDraft(completedResume)
 
       setAgentBuildMessage(
@@ -9872,7 +9980,7 @@ function IDE() {
       // 프로젝트에 이미 생성된 진단 파일을 즉시 복구 조회합니다.
       try{
         recoveredDiagnostics=await api(
-          `/workflow/diagnostics?project_root=${encodeURIComponent(projectRoot)}&run_id=${encodeURIComponent(workflowThreadId)}`
+          `/workflow/diagnostics?project_root=${encodeURIComponent(projectRoot)}&run_id=${encodeURIComponent(effectiveWorkflowThreadId)}`
         )
       }catch(diagError){
         console.error(
@@ -9887,7 +9995,7 @@ function IDE() {
       const syntheticDiagnostics=recoveredDiagnostics
         ? {
             project_root:recoveredDiagnostics.project_root||projectRoot,
-            run_id:recoveredDiagnostics.run_id||workflowThreadId,
+            run_id:recoveredDiagnostics.run_id||effectiveWorkflowThreadId,
             run_started_at:recoveredDiagnostics.run_started_at||'',
             diagnostic_generated_at:recoveredDiagnostics.diagnostic_generated_at||'',
             diagnostics_fresh:recoveredDiagnostics.diagnostics_fresh===true,
@@ -9913,7 +10021,7 @@ function IDE() {
           }
         : {
             project_root:projectRoot,
-            run_id:workflowThreadId,
+            run_id:effectiveWorkflowThreadId,
             run_started_at:new Date(startedAt).toISOString(),
             diagnostic_generated_at:'',
             diagnostics_fresh:false,
@@ -10001,7 +10109,7 @@ function IDE() {
 
       const failedResume={
         source:'AGENT_BUILD_FAILURE',
-        run_id:String(recoveredDiagnostics?.run_id||workflowThreadId||''),
+        run_id:String(recoveredDiagnostics?.run_id||effectiveWorkflowThreadId||''),
         status:String(failureStatus.status||''),
         failure_stage:String(recoveredDiagnostics?.failure_stage||'network/fetch'),
         failure_reason:String(recoveredDiagnostics?.failure_reason||transportErrorMessage||''),
@@ -10011,13 +10119,24 @@ function IDE() {
           : {
               project_root:projectRoot,
               request,
-              thread_id:workflowThreadId,
+              thread_id:effectiveWorkflowThreadId,
               diagnostic_status:failureStatus.status,
               diagnostic_failure_stage:recoveredDiagnostics?.failure_stage||'network/fetch',
               diagnostic_failure_reason:recoveredDiagnostics?.failure_reason||transportErrorMessage
             }
       }
       setRestoredBuildResume(failedResume)
+      setRedevelopmentInfo({
+        available:!recoveredStillRunning,
+        status:String(failureStatus.status||''),
+        run_id:String(recoveredDiagnostics?.run_id||effectiveWorkflowThreadId||''),
+        failure_stage:String(recoveredDiagnostics?.failure_stage||'network/fetch'),
+        failure_reason:String(recoveredDiagnostics?.failure_reason||transportErrorMessage||''),
+        resume_from_node:redevelopmentResumeNodeForFailure(
+          recoveredDiagnostics?.failure_stage||'network/fetch',
+          failureStatus.status||''
+        )
+      })
       saveRequirementDraft(failedResume)
 
       setWorkflow({
@@ -10764,6 +10883,9 @@ function IDE() {
         onWorkflow={()=>previewTargetWorkflow()}
         onCreateProject={createAgentProjectSmart}
         onStartDevelopment={startAgentDevelopment}
+        onRedevelop={()=>startAgentDevelopment({redevelopment:true})}
+        redevelopmentEnabled={Boolean(redevelopmentInfo?.available)}
+        redevelopmentInfo={redevelopmentInfo}
         onStop={cancelAgentDevelopment}
       />
 
@@ -16205,6 +16327,9 @@ function IDE() {
             }}
             onCreateProject={createAgentProjectSmart}
             onStartDevelopment={startAgentDevelopment}
+            onRedevelop={()=>startAgentDevelopment({redevelopment:true})}
+            redevelopmentEnabled={Boolean(redevelopmentInfo?.available)}
+            redevelopmentInfo={redevelopmentInfo}
             onStop={cancelAgentDevelopment}
             compact
           />
@@ -16508,6 +16633,9 @@ function IDE() {
           }}
           onCreateProject={createAgentProjectSmart}
           onStartDevelopment={startAgentDevelopment}
+          onRedevelop={()=>startAgentDevelopment({redevelopment:true})}
+          redevelopmentEnabled={Boolean(redevelopmentInfo?.available)}
+          redevelopmentInfo={redevelopmentInfo}
           onStop={cancelAgentDevelopment}
           compact
         />

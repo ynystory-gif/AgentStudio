@@ -15,7 +15,7 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-require("AGENTSTUDIO_FRONTEND_VERSION='5.368'" in APP, "frontend version must be 5.368")
+require("AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP, "frontend version must be 5.369")
 require("ast.PyCF_ALLOW_TOP_LEVEL_AWAIT if notebook_mode else 0" in SERVICE, "Notebook compile flag missing")
 require("_agentstudio_run_awaitable" in SERVICE, "awaitable runner missing")
 require("loop.run_until_complete(value)" in SERVICE, "persistent asyncio execution missing")
@@ -70,4 +70,4 @@ with tempfile.TemporaryDirectory(prefix="agentstudio-v5349-") as tmp:
         manager.stop(str(project), session_id)
         manager.stop(str(project), "plain-script-contract")
 
-print("PASS v5.368 Notebook Top-Level Await contract")
+print("PASS v5.369 Notebook Top-Level Await contract")

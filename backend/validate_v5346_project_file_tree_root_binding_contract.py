@@ -8,7 +8,7 @@ def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
 
-require("AGENTSTUDIO_FRONTEND_VERSION='5.368'" in APP, 'frontend version must be 5.368')
+require("AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP, 'frontend version must be 5.369')
 require("const fileTreeRootRef=useRef('')" in APP, 'file tree root ref is required')
 require("const editorFileRootRef=useRef({})" in APP, 'per-editor root map is required')
 require("const resolveWorkspaceRoot=(preferredRoot='')=>" in APP, 'workspace resolver must accept preferred root')
@@ -28,4 +28,4 @@ require("root:workspaceRoot,\n            instruction:prompt" in APP, 'project L
 require("root:workspaceRoot,\n          path:targetPath" in APP, 'file LLM edit must use resolved workspace root')
 require("fileTreeRootRef.current=''" in APP and 'editorFileRootRef.current={}' in APP, 'new Agent must clear stale root caches')
 
-print('PASS v5.368 Project File Tree Root Binding contract')
+print('PASS v5.369 Project File Tree Root Binding contract')

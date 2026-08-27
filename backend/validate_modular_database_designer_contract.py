@@ -88,7 +88,7 @@ with tempfile.TemporaryDirectory() as tmp:
     )
 
 checks.update({
-    "frontend version 5.341": "AGENTSTUDIO_FRONTEND_VERSION='5.368'" in APP,
+    "frontend version 5.341": "AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP,
     "workflow DB design card": "DB 자동 설계" in APP and "finalizeDatabaseDesign" in APP,
     "project create carries database plan": "database_plan:targetWorkflowPreview?.database_plan||{}" in APP,
     "database confirmation gate": "databasePlan?.enabled&&!databasePlan?.finalized" in APP,

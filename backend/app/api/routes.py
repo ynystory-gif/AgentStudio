@@ -483,6 +483,19 @@ class WorkflowStartRequest(BaseModel):
     provider: str | None = None
     thread_id: str | None = None
     design_bundle: dict = {}
+    # v5.369: failed Agent builds can restart from a persisted checkpoint
+    # instead of replaying requirement/design nodes from START.
+    resume_mode: bool = False
+    resume_from_node: str = ""
+    resume_run_id: str = ""
+
+
+class WorkflowRedevelopRequest(BaseModel):
+    project_root: str
+    request: str = ""
+    test_command: str = "python -m compileall ."
+    provider: str | None = None
+    agent_name: str = ""
 
 class WorkflowResumeRequest(BaseModel):
     thread_id: str
@@ -2715,7 +2728,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.368", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.369", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -3311,7 +3324,7 @@ async def export_agentstudio_presentation(payload: PresentationExportRequest):
         content, filename = await asyncio.to_thread(
             build_agentstudio_presentation,
             data,
-            "5.368",
+            "5.369",
         )
     except Exception as exc:
         raise HTTPException(
@@ -5622,6 +5635,129 @@ def _read_json_dict(path: Path) -> dict:
         return {}
 
 
+# v5.369 Failed Build Redevelopment
+_FAILURE_RESUME_PREVIOUS_NODE = {
+    "requirement_analysis": "requirement_analysis",
+    "analyze_project": "requirement_analysis",
+    "capability_design": "analyze_project",
+    "tool_mcp_decision": "capability_design",
+    "agent_architecture": "tool_mcp_decision",
+    "database_design": "agent_architecture",
+    "target_workflow_design": "database_design",
+    "project_file_plan": "target_workflow_design",
+    "requirement_coverage_gate": "project_file_plan",
+    "settings_requirement_analysis": "requirement_coverage_gate",
+    "settings_schema_design": "settings_requirement_analysis",
+    "settings_ui_design": "settings_schema_design",
+    "checkpoint": "settings_ui_design",
+    "approval": "checkpoint",
+    # A code-generation failure must not re-run approval/requirements.
+    "code_generation": "code_generation",
+    "settings_generator": "code_generation",
+    "settings_validation": "settings_generator",
+    "build_artifact_validation": "settings_validation",
+    "as_built_architecture": "build_artifact_validation",
+    "architecture_conformance": "as_built_architecture",
+    "environment_configuration": "architecture_conformance",
+    "test": "environment_configuration",
+    "debug": "test",
+    "package_completion": "test",
+    "review": "package_completion",
+}
+
+
+def _is_failed_agent_build_status(status: str) -> bool:
+    value = str(status or "").strip().upper()
+    if not value:
+        return False
+    if value in {"SUCCESS", "COMPLETED", "TEST_PASSED"}:
+        return False
+    return any(token in value for token in ("FAILED", "INCOMPLETE", "EXCEPTION", "ERROR"))
+
+
+def _normalize_failure_stage_to_node(stage: str, state: dict | None = None) -> str:
+    raw = str(stage or "").strip().lower().replace("-", "_").replace("/", "_")
+    aliases = {
+        "build_artifact": "build_artifact_validation",
+        "artifact_validation": "build_artifact_validation",
+        "architecture": "architecture_conformance",
+        "conformance": "architecture_conformance",
+        "environment": "environment_configuration",
+        "tests": "test",
+        "testing": "test",
+        "repair": "debug",
+        "debug_repair": "debug",
+        "settings": "settings_validation",
+        "coverage": "requirement_coverage_gate",
+    }
+    raw = aliases.get(raw, raw)
+    if raw in _FAILURE_RESUME_PREVIOUS_NODE:
+        return raw
+
+    # Older diagnostics sometimes only persisted a status, not a node name.
+    current = state or {}
+    status = str(current.get("diagnostic_status") or current.get("status") or "").upper()
+    status_map = (
+        ("BUILD_ARTIFACT", "build_artifact_validation"),
+        ("ARCHITECTURE_CONFORMANCE", "architecture_conformance"),
+        ("AS_BUILT", "as_built_architecture"),
+        ("SETTINGS_VALIDATION", "settings_validation"),
+        ("SETTINGS_GENERATION", "settings_generator"),
+        ("TEST_", "test"),
+        ("TEST", "test"),
+        ("CODE_PLAN", "project_file_plan"),
+        ("COVERAGE", "requirement_coverage_gate"),
+        ("CODE_GENERATION", "code_generation"),
+    )
+    for token, node in status_map:
+        if token in status:
+            return node
+    return "build_artifact_validation"
+
+
+def _redevelopment_descriptor(root: Path, workflow_state: dict, current_run: dict, checkpoint: dict | None = None) -> dict:
+    checkpoint = checkpoint or {}
+    build_resume = checkpoint.get("build_resume") if isinstance(checkpoint, dict) else {}
+    if not isinstance(build_resume, dict):
+        build_resume = {}
+    status = str(
+        current_run.get("status")
+        or workflow_state.get("diagnostic_status")
+        or workflow_state.get("status")
+        or build_resume.get("status")
+        or ""
+    )
+    failure_stage = str(
+        workflow_state.get("diagnostic_failure_stage")
+        or build_resume.get("failure_stage")
+        or ""
+    )
+    failure_node = _normalize_failure_stage_to_node(failure_stage, workflow_state)
+    resume_from = _FAILURE_RESUME_PREVIOUS_NODE.get(failure_node, failure_node)
+    run_id = str(
+        current_run.get("run_id")
+        or workflow_state.get("diagnostic_run_id")
+        or workflow_state.get("thread_id")
+        or build_resume.get("run_id")
+        or ""
+    )
+    available = bool(root.exists() and workflow_state and _is_failed_agent_build_status(status))
+    return {
+        "available": available,
+        "status": status,
+        "run_id": run_id,
+        "failure_stage": failure_stage or failure_node,
+        "failure_node": failure_node,
+        "resume_from_node": resume_from,
+        "failure_reason": str(
+            workflow_state.get("diagnostic_failure_reason")
+            or workflow_state.get("error")
+            or build_resume.get("failure_reason")
+            or ""
+        ),
+    }
+
+
 @router.post("/workflow/design-checkpoint")
 async def save_workflow_design_checkpoint(req: AgentDesignCheckpointRequest):
     root = Path(req.project_root).expanduser().resolve()
@@ -5671,7 +5807,7 @@ async def load_workflow_design_checkpoint(project_root: str):
         "requirements_snapshot": _safe_resume_value(requirements_snapshot),
     }
 
-    # Legacy v5.368-and-earlier projects may have failure diagnostics but no
+    # Legacy v5.369-and-earlier projects may have failure diagnostics but no
     # persisted UI checkpoint. Build a conservative fallback so the user can
     # still continue from the failed project's design instead of starting over.
     legacy_snapshot = {}
@@ -5711,6 +5847,12 @@ async def load_workflow_design_checkpoint(project_root: str):
         legacy_snapshot = _safe_resume_value(legacy_snapshot)
 
     chosen = checkpoint or legacy_snapshot
+    redevelopment = _redevelopment_descriptor(
+        root,
+        workflow_state,
+        current_run,
+        checkpoint or legacy_snapshot,
+    )
     return {
         "ok": True,
         "available": bool(chosen or workflow_state or requirements_snapshot),
@@ -5718,6 +5860,7 @@ async def load_workflow_design_checkpoint(project_root: str):
         "checkpoint": chosen,
         "checkpoint_source": "SAVED_CHECKPOINT" if checkpoint else ("PROJECT_DIAGNOSTICS" if legacy_snapshot else ""),
         "runtime": runtime,
+        "redevelopment": redevelopment,
     }
 
 
@@ -5887,7 +6030,7 @@ async def workflow_diagnostics(project_root: str, run_id: str = ""):
 
 
 def _workflow_initial_state(req: WorkflowStartRequest, thread_id: str) -> dict:
-    return {
+    base = {
         "thread_id": thread_id,
         "project_root": req.project_root,
         "request": req.request,
@@ -5898,6 +6041,26 @@ def _workflow_initial_state(req: WorkflowStartRequest, thread_id: str) -> dict:
         "debug_iteration": 0,
         "debug_history": [],
     }
+
+    # v5.369: for redevelopment, carry forward the last persisted build state
+    # and jump into the node immediately before the recorded failure. Completed
+    # requirement/design/code-plan work is reused; only the failure suffix runs.
+    if req.resume_mode:
+        previous = (req.design_bundle or {}).get("previous_build_state") or {}
+        if isinstance(previous, dict) and previous:
+            merged = dict(previous)
+            merged.update(base)
+            merged["debug_iteration"] = int(previous.get("debug_iteration") or 0)
+            merged["debug_history"] = list(previous.get("debug_history") or [])
+            merged["patch_result"] = list(previous.get("patch_result") or [])
+            merged["resume_mode"] = True
+            merged["resume_from_node"] = str(req.resume_from_node or "")
+            merged["resume_run_id"] = str(req.resume_run_id or "")
+            merged["resume_previous_status"] = str(previous.get("diagnostic_status") or previous.get("status") or "")
+            merged.pop("error", None)
+            return merged
+
+    return base
 
 
 # v5.349: Actual LangGraph node-boundary progress. This replaces synthetic-only
@@ -6087,6 +6250,96 @@ async def workflow_start_job(req: WorkflowStartRequest):
     payload = vars(job).copy()
     payload["thread_id"] = thread_id
     payload["project_root"] = req.project_root
+    return payload
+
+
+@router.post("/workflow/redevelop-start-job")
+async def workflow_redevelop_start_job(req: WorkflowRedevelopRequest):
+    """Resume a failed generated-Agent build from the checkpoint before failure.
+
+    The project source may have been edited after the failure. We therefore reuse
+    completed requirement/design/code-plan state, but start a fresh LangGraph run
+    from the node immediately before the recorded failing node. This avoids
+    replaying the interview/design pipeline while still re-validating the edited
+    source before moving forward.
+    """
+    root = Path(req.project_root).expanduser().resolve()
+    reports = root / "reports"
+    workflow_state = _read_json_dict(reports / "workflow_state.json")
+    current_run = _read_json_dict(reports / "current_run.json")
+    checkpoint = _read_json_dict(_agent_design_checkpoint_path(root))
+    requirements_snapshot = _read_json_dict(reports / "requirements_snapshot.json")
+
+    redevelopment = _redevelopment_descriptor(root, workflow_state, current_run, checkpoint)
+    if not redevelopment.get("available"):
+        raise HTTPException(
+            status_code=409,
+            detail="재개발 가능한 이전 실패 기록을 찾지 못했습니다.",
+        )
+
+    prior_request = str(
+        req.request
+        or workflow_state.get("request")
+        or requirements_snapshot.get("request")
+        or checkpoint.get("workflow_request")
+        or ""
+    )
+    if not prior_request:
+        raise HTTPException(status_code=422, detail="이전 개발 요청 내용을 복원할 수 없습니다.")
+
+    previous_bundle = workflow_state.get("design_bundle")
+    if not isinstance(previous_bundle, dict):
+        previous_bundle = {}
+    confirmed_requirements = checkpoint.get("confirmed_requirements")
+    if not isinstance(confirmed_requirements, dict):
+        confirmed_requirements = previous_bundle.get("confirmed_requirements") or {}
+
+    design_bundle = {
+        **previous_bundle,
+        "confirmed_requirements": confirmed_requirements,
+        "previous_build_state": workflow_state,
+        "resume_context": {
+            "run_id": redevelopment.get("run_id") or "",
+            "status": redevelopment.get("status") or "",
+            "failure_stage": redevelopment.get("failure_stage") or "",
+            "failure_reason": redevelopment.get("failure_reason") or "",
+            "continue_failed_build": True,
+            "redevelopment": True,
+            "resume_from_node": redevelopment.get("resume_from_node") or "",
+        },
+    }
+
+    thread_id = f"redevelop-{uuid.uuid4().hex}"
+    start_req = WorkflowStartRequest(
+        project_root=str(root),
+        request=prior_request,
+        target_files=[],
+        test_command=req.test_command or str(workflow_state.get("test_command") or "python -m compileall ."),
+        provider=req.provider or workflow_state.get("provider"),
+        thread_id=thread_id,
+        design_bundle=design_bundle,
+        resume_mode=True,
+        resume_from_node=str(redevelopment.get("resume_from_node") or "build_artifact_validation"),
+        resume_run_id=str(redevelopment.get("run_id") or ""),
+    )
+
+    async def runner(job):
+        return await _execute_workflow_with_diagnostics(
+            req=start_req,
+            thread_id=thread_id,
+            job=job,
+        )
+
+    job = job_manager.create("AGENT_REDEVELOP", runner)
+    payload = vars(job).copy()
+    payload.update({
+        "thread_id": thread_id,
+        "project_root": str(root),
+        "redevelopment": True,
+        "previous_run_id": redevelopment.get("run_id") or "",
+        "failure_stage": redevelopment.get("failure_stage") or "",
+        "resume_from_node": redevelopment.get("resume_from_node") or "",
+    })
     return payload
 
 

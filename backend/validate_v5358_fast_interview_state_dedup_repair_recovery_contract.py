@@ -17,9 +17,9 @@ APP = APP_PATH.read_text(encoding='utf-8')
 MAIN = MAIN_PATH.read_text(encoding='utf-8')
 
 checks = {
-    'frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.368'" in APP,
-    'backend version': 'version="5.368"' in MAIN or "version='5.368'" in MAIN,
-    'health version': '"version": "5.368"' in ROUTES,
+    'frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.369'" in APP,
+    'backend version': 'version="5.369"' in MAIN or "version='5.369'" in MAIN,
+    'health version': '"version": "5.369"' in ROUTES,
     'fast interview classifier': 'def _is_fast_interview_turn(' in AGENT,
     'fast interview deterministic response': 'def _fast_interview_message(' in AGENT,
     'asked slot tracking': 'def _asked_question_slots(' in AGENT,
@@ -36,7 +36,7 @@ failed = [name for name, ok in checks.items() if not ok]
 for name, ok in checks.items():
     print(('PASS' if ok else 'FAIL'), name)
 if failed:
-    raise SystemExit('v5.368 contract failed: ' + ', '.join(failed))
+    raise SystemExit('v5.369 contract failed: ' + ', '.join(failed))
 
 # Dependency-light behavioral checks for deterministic interview logic.
 lc = types.ModuleType('langchain_core')
@@ -83,4 +83,4 @@ assert module._attachment_ack_already_sent(history) is True
 assert module._is_fast_interview_turn('추가로 필요한 사항이 있는가?', history, '') is True
 assert module._is_fast_interview_turn('추가로 필요한 사항이 있는가?', history, 'fresh attachment body') is False
 
-print('PASS v5.368 Fast Interview State Dedup + Repair Recovery contract')
+print('PASS v5.369 Fast Interview State Dedup + Repair Recovery contract')
