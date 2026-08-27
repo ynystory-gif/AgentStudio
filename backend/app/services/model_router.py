@@ -87,6 +87,21 @@ def provider_candidates_for(task: LLMTask, provider_override: str | None = None)
             return ["ollama"]
         if explicit == "codex" and not s.codex_enabled:
             return ["ollama"]
+        if explicit == "codex" and task in {
+            LLMTask.CODE_GENERATION,
+            LLMTask.PATCH_GENERATION,
+            LLMTask.MULTI_FILE_CODE_CHANGE,
+            LLMTask.EXECUTION_DEBUG_REPAIR,
+        }:
+            # v5.392: a Windows Codex sandbox-helper outage is provider
+            # infrastructure, not a project-code defect. Keep Codex first, but
+            # preserve a repair/generation fallback so the whole workflow does
+            # not stop solely because codex-windows-sandbox-setup.exe failed.
+            candidates = ["codex"]
+            if s.openai_enabled:
+                candidates.append("openai")
+            candidates.append("ollama")
+            return candidates
         return [explicit]
 
     strategy = (s.ai_provider_strategy or "ollama_first").strip().lower()

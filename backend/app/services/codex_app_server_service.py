@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -16,7 +17,7 @@ from typing import Any
 
 AGENTSTUDIO_CODEX_CLIENT_NAME = "theanova_agentstudio"
 AGENTSTUDIO_CODEX_CLIENT_TITLE = "THEANOVA AgentStudio"
-AGENTSTUDIO_CODEX_CLIENT_VERSION = "5.390"
+AGENTSTUDIO_CODEX_CLIENT_VERSION = "5.392"
 CODEX_APPROVAL_POLICY = "untrusted"
 CODEX_THREAD_SANDBOX = "workspace-write"
 
@@ -64,6 +65,9 @@ class CodexAppServerManager:
         self._rate_limits_error = ""
         self._rate_limits_refreshed_at = 0.0
         self._completion_lock = threading.Lock()
+        self._last_runtime_error: dict[str, Any] = {}
+        self._runtime_error_history: list[dict[str, Any]] = []
+        self._last_command: list[str] = []
 
     # ------------------------------------------------------------------
     # Discovery / process lifecycle
@@ -126,6 +130,7 @@ class CodexAppServerManager:
     def _read_version(self, executable: str) -> str:
         try:
             cmd = self._command_for(executable)
+            self._last_command = list(cmd)
             # replace app-server arguments with --version
             if os.name == "nt" and Path(executable).suffix.casefold() in {".cmd", ".bat"}:
                 cmd = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", f'"{executable}" --version']
@@ -462,6 +467,68 @@ class CodexAppServerManager:
         with self._lock:
             self._subscribers.pop(sid, None)
 
+
+    @staticmethod
+    def _looks_like_sandbox_infrastructure_failure(value: str) -> bool:
+        text = str(value or "").casefold()
+        markers = (
+            "codex-windows-sandbox-setup",
+            "windows sandbox helper",
+            "sandbox helper",
+            "sandbox setup",
+            "failed to setup sandbox",
+            "failed to set up sandbox",
+            "sandbox initialization",
+        )
+        return any(marker in text for marker in markers)
+
+    def _sandbox_helper_details(self, message: str) -> dict[str, Any]:
+        raw = "\n".join([str(message or ""), *[str(x) for x in self._stderr_tail[-40:]]])
+        paths = re.findall(
+            r'(?i)([A-Z]:[\\/][^\r\n"<>|]*?codex-windows-sandbox-setup\.exe)',
+            raw,
+        )
+        helper_path = str(paths[-1]).strip() if paths else ""
+        if not helper_path and self._codex_path:
+            base = Path(self._codex_path).resolve().parent
+            candidates = [
+                base / "codex-windows-sandbox-setup.exe",
+                base.parent / "codex-windows-sandbox-setup.exe",
+                base / "bin" / "windows-x86_64" / "codex-windows-sandbox-setup.exe",
+            ]
+            found = next((path for path in candidates if path.is_file()), None)
+            if found:
+                helper_path = str(found)
+        winerror_match = re.search(r'(?i)winerror\s*[:=]?\s*(\d+)', raw)
+        exit_match = re.search(r'(?i)(?:exit\s*code|exitcode)\s*[:=]?\s*(-?\d+)', raw)
+        return {
+            "path": helper_path,
+            "exists": bool(helper_path and Path(helper_path).is_file()),
+            "winerror": int(winerror_match.group(1)) if winerror_match else None,
+            "exit_code": int(exit_match.group(1)) if exit_match else None,
+            "raw_error": raw[-8000:],
+        }
+
+    def _record_runtime_error(self, operation: str, message: str, cwd: str = "", **extra: Any) -> dict[str, Any]:
+        sandbox_failure = bool(extra.get("sandbox_infrastructure_failure")) or self._looks_like_sandbox_infrastructure_failure(message)
+        row = {
+            "timestamp": time.time(),
+            "operation": str(operation or "codex"),
+            "message": str(message or ""),
+            "cwd": str(cwd or self._started_cwd or ""),
+            "codex_path": self._codex_path,
+            "codex_version": self._codex_version,
+            "command": list(self._last_command or []),
+            "stderr_tail": list(self._stderr_tail[-40:]),
+            "sandbox_infrastructure_failure": sandbox_failure,
+            "sandbox_helper": self._sandbox_helper_details(message) if sandbox_failure else {},
+            **extra,
+        }
+        self._last_runtime_error = row
+        self._runtime_error_history.append(row)
+        self._runtime_error_history = self._runtime_error_history[-20:]
+        return row
+
     # ------------------------------------------------------------------
     # Codex high level operations
     # ------------------------------------------------------------------
@@ -606,7 +673,16 @@ class CodexAppServerManager:
                     except queue.Empty:
                         continue
                     if event.get("type") == "codex/error":
-                        raise RuntimeError(str(event.get("message") or "Codex 실행 오류"))
+                        message = str(event.get("message") or "Codex 실행 오류")
+                        self._record_runtime_error(
+                            "text_completion_event",
+                            message,
+                            cwd,
+                            thread_id=thread_id,
+                            turn_id=turn_id,
+                            sandbox_infrastructure_failure=self._looks_like_sandbox_infrastructure_failure(message),
+                        )
+                        raise RuntimeError(message)
                     if event.get("type") != "codex/event":
                         continue
                     method = str(event.get("method") or "")
@@ -631,12 +707,42 @@ class CodexAppServerManager:
                         completed = params.get("turn") or {}
                         if str(completed.get("status") or "").lower() == "failed":
                             err = completed.get("error") or {}
-                            raise RuntimeError(str(err.get("message") or "Codex turn 실패"))
+                            message = str(err.get("message") or "Codex turn 실패")
+                            self._record_runtime_error(
+                                "text_completion_turn",
+                                message,
+                                cwd,
+                                thread_id=thread_id,
+                                turn_id=turn_id,
+                                sandbox_infrastructure_failure=self._looks_like_sandbox_infrastructure_failure(message),
+                            )
+                            raise RuntimeError(message)
                         answer = final_text or "".join(chunks).strip()
                         if not answer:
-                            raise RuntimeError("Codex가 빈 응답을 반환했습니다.")
+                            message = "Codex가 빈 응답을 반환했습니다."
+                            self._record_runtime_error("text_completion_empty", message, cwd, thread_id=thread_id, turn_id=turn_id)
+                            raise RuntimeError(message)
+                        # Some Codex Windows sandbox failures are returned as an assistant
+                        # message instead of a protocol error. Treat those as provider
+                        # infrastructure failures so model_router can transparently fall
+                        # through to OpenAI/Ollama instead of accepting an empty Patch plan.
+                        if self._looks_like_sandbox_infrastructure_failure(answer):
+                            self._record_runtime_error(
+                                "text_completion_answer",
+                                answer[:4000],
+                                cwd,
+                                thread_id=thread_id,
+                                turn_id=turn_id,
+                                sandbox_infrastructure_failure=True,
+                            )
+                            raise RuntimeError(
+                                "Codex Windows sandbox helper를 사용할 수 없어 Codex 결과를 채택하지 않았습니다. "
+                                + answer[:1200]
+                            )
                         return answer
-                raise TimeoutError("Codex 텍스트 응답 대기 시간이 초과되었습니다.")
+                message = "Codex 텍스트 응답 대기 시간이 초과되었습니다."
+                self._record_runtime_error("text_completion_timeout", message, cwd, thread_id=thread_id, turn_id=turn_id)
+                raise TimeoutError(message)
             finally:
                 self.unsubscribe(subscriber_id)
 
@@ -815,6 +921,9 @@ class CodexAppServerManager:
             "rate_limits_refreshed_at": self._rate_limits_refreshed_at,
             "last_error": self._last_error,
             "stderr_tail": self._stderr_tail[-20:],
+            "last_command": list(self._last_command or []),
+            "last_runtime_error": dict(self._last_runtime_error or {}),
+            "runtime_error_history": list(self._runtime_error_history[-10:]),
             "last_event_at": self._last_event_at,
         }
 

@@ -99,6 +99,15 @@ def _patch_files(state):
 
 def _stage(state):
     status=str(state.get("status") or "UNKNOWN").upper()
+    if status == "VALIDATION_BLOCKED":
+        history=state.get("debug_history") or []
+        latest=history[-1] if history and isinstance(history[-1],dict) else {}
+        source=str(latest.get("source_status") or "").upper()
+        if source == "SETTINGS_VALIDATION_FAILED":
+            return "settings_validation"
+        if source == "TEST_FAILED":
+            return "test"
+        return "debug/repair"
     for token,stage in [
         ("LAUNCHER_GENERATION","package/launcher"),
         ("FILE_APPLY","file_apply"),
@@ -188,6 +197,18 @@ def _reason(state,actual):
             parts.append(f"Architecture 계약 오류 {len(art['architecture_errors'])}개")
         if parts:
             return ", ".join(parts)
+    fallback=state.get("validation_fallback") or {}
+    if str(state.get("status") or "").upper()=="VALIDATION_BLOCKED":
+        codex=(fallback.get("codex") or {}) if isinstance(fallback,dict) else {}
+        runtime=(codex.get("last_runtime_error") or {}) if isinstance(codex,dict) else {}
+        message=str(runtime.get("message") or codex.get("last_error") or "")
+        if fallback.get("sandbox_infrastructure_blocked"):
+            return (
+                "Agent 코드 실패가 아니라 생성 후 검증 인프라가 차단되었습니다. "
+                "Codex Windows sandbox helper 실행 문제를 감지했고 로컬 fallback 검증을 수행했습니다."
+                + (f" 원문: {message[:900]}" if message else "")
+            )
+        return "Agent 파일은 생성되었지만 검증을 완료할 근거가 부족하여 VALIDATION_BLOCKED로 중단했습니다."
     tr=state.get("test_result") or {}
     if tr.get("returncode") not in (None,0):
         detail = _test_failure_summary(str(tr.get("output") or ""))
@@ -400,6 +421,7 @@ def create_failure_diagnostics(project_root:str,state:dict,request:str="",thread
         "code_plan_validation":state.get("code_plan_validation") or {},
         "build_artifact_validation":state.get("build_artifact_validation") or {},
         "settings_validation":state.get("settings_validation_result") or {},
+        "validation_fallback":state.get("validation_fallback") or {},
     }
     hist=state.get("debug_history") or []
     dbg={
@@ -414,6 +436,7 @@ def create_failure_diagnostics(project_root:str,state:dict,request:str="",thread
         "code_plan_validation":state.get("code_plan_validation") or {},
         "patch_result":state.get("patch_result") or [],
         "test_result":state.get("test_result") or {},
+        "validation_fallback":state.get("validation_fallback") or {},
     }
     steps=[
         "reports/failure_report.md에서 실패 단계와 원인을 확인합니다.",
@@ -517,6 +540,43 @@ def create_failure_diagnostics(project_root:str,state:dict,request:str="",thread
             )
             if attempt.get("error"):
                 lines.append(f"  - 오류: {attempt.get('error')}")
+    fallback=state.get("validation_fallback") or {}
+    if fallback:
+        lines += ["","## 검증 Fallback 진단",""]
+        lines += [
+            f"- 프로젝트 존재: **{bool(fallback.get('project_exists'))}**",
+            f"- 실제 파일 수: **{fallback.get('actual_file_count', 0)}개**",
+            f"- Sandbox 인프라 차단: **{bool(fallback.get('sandbox_infrastructure_blocked'))}**",
+        ]
+        codex=fallback.get("codex") or {}
+        runtime=codex.get("last_runtime_error") or {}
+        if codex.get("path"):
+            lines.append(f"- Codex 실행 파일: `{codex.get('path')}`")
+        if codex.get("last_command"):
+            lines.append(f"- Codex 실행 명령: `{codex.get('last_command')}`")
+        if runtime.get("message"):
+            lines.append(f"- Codex 원본 오류: `{str(runtime.get('message'))[:1800].replace('`', "'")}`")
+        helper=runtime.get("sandbox_helper") or {}
+        if helper:
+            if helper.get("path"):
+                lines.append(f"- Sandbox Helper: `{helper.get('path')}` · exists={bool(helper.get('exists'))}")
+            if helper.get("winerror") is not None:
+                lines.append(f"- Windows WinError: `{helper.get('winerror')}`")
+            if helper.get("exit_code") is not None:
+                lines.append(f"- Helper ExitCode: `{helper.get('exit_code')}`")
+        for row in fallback.get("commands") or []:
+            if not isinstance(row,dict):
+                continue
+            lines.append(
+                f"- Local Validation: `{row.get('command')}` · ReturnCode={row.get('returncode')}"
+            )
+            if row.get("execution_error"):
+                lines.append(f"  - 실행 오류: `{row.get('execution_error')}`")
+            elif row.get("output"):
+                summary=_test_failure_summary(str(row.get("output") or ""),limit=1200)
+                if summary:
+                    lines.append(f"  - 결과: `{summary.replace('`', "'")}`")
+
     lines += ["","## 다음 조치",""]+[f"{i}. {x}" for i,x in enumerate(steps,1)]
     lines += ["","## 관련 파일","",
               "- `reports/workflow_state.json`","- `reports/requirements_snapshot.json`",
@@ -560,6 +620,8 @@ def create_failure_diagnostics(project_root:str,state:dict,request:str="",thread
         _write_text(logs/"test.log",str((state.get("test_result") or {}).get("output") or state.get("test_result")))
     if hist:
         _write_json(logs/"debug.log",hist)
+    if state.get("validation_fallback"):
+        _write_json(logs/"validation_fallback.json",state.get("validation_fallback"))
 
     _update_run_marker(root,run_id,status,generated_at)
 
@@ -575,6 +637,7 @@ def create_failure_diagnostics(project_root:str,state:dict,request:str="",thread
         "workflow_execution_log": logs/"workflow_execution.log",
         "test_log": logs/"test.log",
         "debug_log": logs/"debug.log",
+        "validation_fallback": logs/"validation_fallback.json",
     }
     file_info={}
     for key,path in diagnostic_paths.items():
@@ -616,6 +679,7 @@ def create_failure_diagnostics(project_root:str,state:dict,request:str="",thread
             "executed":bool(state.get("debug_history")),
             "count":len(state.get("debug_history") or []),
         },
+        "validation_fallback":state.get("validation_fallback") or {},
         "code_plan_validation":state.get("code_plan_validation") or {},
         "missing_required_paths":((state.get("code_plan_validation") or {}).get("missing_required_paths") or []),
         "failure_report":str(reports/"failure_report.md"),

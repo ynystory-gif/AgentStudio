@@ -28,7 +28,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.390'
+const AGENTSTUDIO_FRONTEND_VERSION='5.392'
 
 const DebouncedProjectSearchInput=memo(function DebouncedProjectSearchInput({value,onCommit,placeholder='프로젝트 검색...'}){
   const [localValue,setLocalValue]=useState(value||'')
@@ -389,6 +389,12 @@ const buildImageThemeRules=(tokens={})=>{
       input:{background:colors.surface||'#ffffff',border:colors.border||'#dbe4ee',radius:radius.input??8},
       header:{background:colors.surface||'#ffffff',accent:colors.primary||'#2563eb'},
       sidebar:{background:colors.background||'#f8fafc',active:colors.primary||'#2563eb'},
+      menu:{
+        normal:{background:colors.surface||colors.background||'#ffffff',color:colors.textPrimary||'#0f172a',border:colors.border||'#dbe4ee',radius:radius.button??8},
+        hover:{background:colors.primary||'#2563eb',color:'#ffffff',border:colors.primary||'#2563eb',radius:radius.button??8},
+        active:{background:colors.primary||'#2563eb',color:'#ffffff',border:colors.primary||'#2563eb',radius:radius.button??8},
+        source:'IMAGE_INFERRED'
+      },
     },
     layout_rules:{headerHeight:64,sidebarWidth:240,contentMaxWidth:1440,contentGap:20},
   }
@@ -412,17 +418,21 @@ const extractThemeTokensFromImage=async(file)=>{
     if(!ctx) throw new Error('브라우저 Canvas를 사용할 수 없어 이미지를 분석하지 못했습니다.')
     ctx.drawImage(image,0,0,width,height)
     const data=ctx.getImageData(0,0,width,height).data
-    const buckets=new Map()
+    const buckets=new Map(),menuBuckets=new Map()
     for(let i=0;i<data.length;i+=16){
       if(data[i+3]<180) continue
       const r=Math.round(data[i]/32)*32,g=Math.round(data[i+1]/32)*32,b=Math.round(data[i+2]/32)*32
       const key=[Math.min(255,r),Math.min(255,g),Math.min(255,b)].join(',')
       buckets.set(key,(buckets.get(key)||0)+1)
+      const pixelIndex=Math.floor(i/4),x=pixelIndex%width,y=Math.floor(pixelIndex/width)
+      if(x<=width*.32||y<=height*.20) menuBuckets.set(key,(menuBuckets.get(key)||0)+1)
     }
-    const palette=[...buckets.entries()].sort((a,b)=>b[1]-a[1]).slice(0,18).map(([key])=>{
+    const toPalette=(source,limit)=>[...source.entries()].sort((a,b)=>b[1]-a[1]).slice(0,limit).map(([key])=>{
       const [r,g,b]=key.split(',').map(Number)
       return '#'+[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('')
     })
+    const palette=toPalette(buckets,18)
+    const menuPalette=toPalette(menuBuckets,12)
     const rgb=(hex)=>[parseInt(hex.slice(1,3),16),parseInt(hex.slice(3,5),16),parseInt(hex.slice(5,7),16)]
     const lum=(hex)=>{const [r,g,b]=rgb(hex);return(.2126*r+.7152*g+.0722*b)/255}
     const sat=(hex)=>{const a=rgb(hex).map(v=>v/255),hi=Math.max(...a),lo=Math.min(...a);return hi===lo?0:(hi-lo)/Math.max(hi,.001)}
@@ -440,7 +450,20 @@ const extractThemeTokensFromImage=async(file)=>{
       typography:{fontFamily:"system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",headingWeight:700,bodyWeight:400},
       radius:{button:8,card:12,input:8},shadow:{card:'0 8px 24px rgba(15,23,42,.10)'},spacing:{unit:4,density:'comfortable'}
     }
-    return {tokens,preview_colors:list.slice(0,6),...buildImageThemeRules(tokens)}
+    const rules=buildImageThemeRules(tokens)
+    const menuList=menuPalette.length?menuPalette:list
+    const menuBackground=menuList[0]||background
+    const menuHover=menuList.find(color=>color!==menuBackground&&sat(color)>=.24&&lum(color)>.08&&lum(color)<.92)||primary
+    const menuText=lum(menuBackground)>.55?darkest:lightest
+    const menuHoverText=lum(menuHover)>.55?darkest:lightest
+    rules.component_rules.menu={
+      ...(rules.component_rules.menu||{}),
+      normal:{...(rules.component_rules.menu?.normal||{}),background:menuBackground,color:menuText},
+      hover:{...(rules.component_rules.menu?.hover||{}),background:menuHover,color:menuHoverText,border:menuHover},
+      active:{...(rules.component_rules.menu?.active||{}),background:menuHover,color:menuHoverText,border:menuHover},
+      source:'IMAGE_MENU_REGION_INFERRED'
+    }
+    return {tokens,preview_colors:list.slice(0,6),menu_preview_colors:menuList.slice(0,5),...rules}
   }finally{ URL.revokeObjectURL(imageUrl) }
 }
 
@@ -491,10 +514,10 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
   const [frontendThemeTargets,setFrontendThemeTargets]=useState([])
   const [frontendThemeListOpen,setFrontendThemeListOpen]=useState(false)
   const [themeImportOpen,setThemeImportOpen]=useState(false)
-  const [themeImportMode,setThemeImportMode]=useState('url')
   const [themeImportName,setThemeImportName]=useState('')
   const [themeImportUrl,setThemeImportUrl]=useState('')
-  const [themeImportFile,setThemeImportFile]=useState(null)
+  const [themeImportFiles,setThemeImportFiles]=useState([])
+  const [themeImportAnalyses,setThemeImportAnalyses]=useState([])
   const [themeImportPreview,setThemeImportPreview]=useState(null)
   const [themeImportBusy,setThemeImportBusy]=useState(false)
   const [themeImportError,setThemeImportError]=useState('')
@@ -545,33 +568,120 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
     }
     patch({theme:value,theme_id:null,theme_name:'',theme_tokens:{},theme_component_rules:{},theme_layout_rules:{},theme_source_type:'',theme_source_url:''})
   }
+  const mergeThemeImageAnalyses=(analyses=[])=>{
+    const rows=(analyses||[]).filter(Boolean)
+    if(!rows.length) return null
+    const colorKeys=['primary','secondary','background','surface','textPrimary','textSecondary','border','success','danger']
+    const chooseMostCommon=(values=[])=>{
+      const counts=new Map()
+      values.filter(Boolean).forEach(value=>counts.set(String(value),(counts.get(String(value))||0)+1))
+      return [...counts.entries()].sort((a,b)=>b[1]-a[1])[0]?.[0]||''
+    }
+    const colors={}
+    colorKeys.forEach(key=>{
+      const value=chooseMostCommon(rows.map(row=>row?.tokens?.colors?.[key]))
+      if(value) colors[key]=value
+    })
+    const numericMedian=(values=[],fallback)=>{
+      const nums=values.map(Number).filter(Number.isFinite).sort((a,b)=>a-b)
+      if(!nums.length) return fallback
+      return nums[Math.floor(nums.length/2)]
+    }
+    const first=rows[0]||{}
+    const tokens={
+      colors:{...(first.tokens?.colors||{}),...colors},
+      typography:{...(first.tokens?.typography||{})},
+      radius:{
+        button:numericMedian(rows.map(row=>row?.tokens?.radius?.button),first.tokens?.radius?.button??8),
+        card:numericMedian(rows.map(row=>row?.tokens?.radius?.card),first.tokens?.radius?.card??12),
+        input:numericMedian(rows.map(row=>row?.tokens?.radius?.input),first.tokens?.radius?.input??8),
+      },
+      shadow:{...(first.tokens?.shadow||{})},
+      spacing:{...(first.tokens?.spacing||{})},
+    }
+    const rules=buildImageThemeRules(tokens)
+    const menuNormal=chooseMostCommon(rows.map(row=>row?.component_rules?.menu?.normal?.background))
+    const hoverCandidates=rows.flatMap(row=>[row?.component_rules?.menu?.hover?.background,row?.component_rules?.menu?.active?.background]).filter(Boolean)
+    const menuHover=chooseMostCommon(hoverCandidates.filter(color=>color!==menuNormal))||chooseMostCommon(hoverCandidates)||colors.primary
+    const menuNormalText=chooseMostCommon(rows.map(row=>row?.component_rules?.menu?.normal?.color))||tokens.colors?.textPrimary
+    const menuHoverText=chooseMostCommon(rows.map(row=>row?.component_rules?.menu?.hover?.color))||'#ffffff'
+    rules.component_rules.menu={
+      ...(rules.component_rules.menu||{}),
+      normal:{...(rules.component_rules.menu?.normal||{}),...(menuNormal?{background:menuNormal}:{}) ,...(menuNormalText?{color:menuNormalText}:{})},
+      hover:{...(rules.component_rules.menu?.hover||{}),...(menuHover?{background:menuHover,border:menuHover}:{}) ,...(menuHoverText?{color:menuHoverText}:{})},
+      active:{...(rules.component_rules.menu?.active||{}),...(menuHover?{background:menuHover,border:menuHover}:{}) ,...(menuHoverText?{color:menuHoverText}:{})},
+      source:rows.length>1?'IMAGE_MULTI_REFERENCE':'IMAGE_MENU_REGION_INFERRED'
+    }
+    const preview=[...new Set(rows.flatMap(row=>row?.preview_colors||[]))].slice(0,8)
+    return {tokens,preview_colors:preview,...rules}
+  }
   const importTheme=async()=>{
     setThemeImportBusy(true); setThemeImportError('')
     try{
       const name=String(themeImportName||'').trim()
       if(!name) throw new Error('Theme 이름을 입력하세요.')
-      let result
-      if(themeImportMode==='url'){
-        const url=String(themeImportUrl||'').trim()
-        if(!url) throw new Error('웹사이트 URL을 입력하세요.')
-        result=await api('/ui-themes/import-url',{method:'POST',body:JSON.stringify({name,url,scope:'GLOBAL'})})
-      }else{
-        if(!themeImportFile) throw new Error('화면 캡처 이미지를 선택하세요.')
-        const analysis=themeImportPreview||await extractThemeTokensFromImage(themeImportFile)
-        result=await api('/ui-themes/import-image',{method:'POST',body:JSON.stringify({name,file_name:themeImportFile.name,tokens:analysis.tokens,component_rules:analysis.component_rules,layout_rules:analysis.layout_rules,preview_colors:analysis.preview_colors,scope:'GLOBAL'})})
+      const url=String(themeImportUrl||'').trim()
+      const files=Array.isArray(themeImportFiles)?themeImportFiles:[]
+      if(!url&&!files.length) throw new Error('웹사이트 URL 또는 화면 캡처 이미지를 하나 이상 입력하세요.')
+      if(files.length>3) throw new Error('화면 캡처 이미지는 최대 3개까지 선택할 수 있습니다.')
+
+      let analyses=themeImportAnalyses
+      if(files.length&&(!Array.isArray(analyses)||analyses.length!==files.length)){
+        analyses=[]
+        for(const file of files) analyses.push(await extractThemeTokensFromImage(file))
+        setThemeImportAnalyses(analyses)
+        setThemeImportPreview(mergeThemeImageAnalyses(analyses))
       }
+      const result=await api('/ui-themes/import',{method:'POST',body:JSON.stringify({
+        name,
+        url,
+        images:files.map((file,index)=>({
+          file_name:file.name,
+          tokens:analyses?.[index]?.tokens||{},
+          component_rules:analyses?.[index]?.component_rules||{},
+          layout_rules:analyses?.[index]?.layout_rules||{},
+          preview_colors:analyses?.[index]?.preview_colors||[],
+        })),
+        scope:'GLOBAL'
+      })})
       const theme=result?.theme
       if(!theme) throw new Error('Theme 저장 결과를 확인할 수 없습니다.')
+      if(Array.isArray(result?.warnings)&&result.warnings.length){
+        setThemeBackendWarning(`Theme 저장 완료 · 일부 참고 소스 제외: ${result.warnings.join(' / ')}`)
+      }else{
+        setThemeBackendWarning('')
+      }
       setCustomThemes(prev=>[theme,...prev.filter(item=>Number(item.id)!==Number(theme.id))])
       patch({theme:'custom',theme_id:theme.id,theme_name:theme.name,theme_tokens:theme.tokens||{},theme_component_rules:theme.component_rules||{},theme_layout_rules:theme.layout_rules||{},theme_source_type:theme.source_type||'',theme_source_url:theme.source_url||''})
-      setThemeImportOpen(false); setThemeImportName(''); setThemeImportUrl(''); setThemeImportFile(null); setThemeImportPreview(null)
+      setThemeImportOpen(false); setThemeImportName(''); setThemeImportUrl(''); setThemeImportFiles([]); setThemeImportAnalyses([]); setThemeImportPreview(null)
     }catch(error){setThemeImportError(String(error?.message||error))}finally{setThemeImportBusy(false)}
   }
-  const chooseThemeImage=async(file)=>{
-    setThemeImportFile(file||null); setThemeImportPreview(null); setThemeImportError('')
-    if(!file) return
-    if(!String(file.type||'').startsWith('image/')){setThemeImportError('이미지 파일을 선택하세요.');return}
-    try{setThemeImportPreview(await extractThemeTokensFromImage(file))}catch(error){setThemeImportError(String(error?.message||error))}
+  const chooseThemeImages=async(fileList)=>{
+    setThemeImportError('')
+    const files=Array.from(fileList||[]).filter(Boolean)
+    if(files.length>3){
+      setThemeImportError('화면 캡처 이미지는 최대 3개까지 선택할 수 있습니다.')
+      return
+    }
+    for(const file of files){
+      if(!String(file.type||'').startsWith('image/')){setThemeImportError('이미지 파일만 선택할 수 있습니다.');return}
+      if(file.size>25*1024*1024){setThemeImportError(`'${file.name}' 파일은 25MB를 초과합니다.`);return}
+    }
+    setThemeImportFiles(files); setThemeImportAnalyses([]); setThemeImportPreview(null)
+    if(!files.length) return
+    try{
+      const analyses=[]
+      for(const file of files) analyses.push(await extractThemeTokensFromImage(file))
+      setThemeImportAnalyses(analyses)
+      setThemeImportPreview(mergeThemeImageAnalyses(analyses))
+    }catch(error){setThemeImportError(String(error?.message||error))}
+  }
+  const removeThemeImage=(index)=>{
+    const nextFiles=themeImportFiles.filter((_,i)=>i!==index)
+    const nextAnalyses=themeImportAnalyses.filter((_,i)=>i!==index)
+    setThemeImportFiles(nextFiles)
+    setThemeImportAnalyses(nextAnalyses)
+    setThemeImportPreview(mergeThemeImageAnalyses(nextAnalyses))
   }
   const deleteCustomTheme=async(theme)=>{
     if(!theme?.id) return
@@ -633,23 +743,30 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
                 <button type="button" onClick={()=>setFrontendThemeListOpen(true)}>지원 목록 보기</button>
               </div>
             </div>
-            {themeBackendWarning&&<div className="ui-layout-theme-backend-warning"><b>Theme Backend 확인 필요</b><span>{themeBackendWarning}</span><small>SYSTEM_ADMIN에서 Backend까지 완전히 재시작하면 Frontend/Backend 버전 불일치도 함께 해소됩니다.</small></div>}
+            {themeBackendWarning&&<div className="ui-layout-theme-backend-warning"><b>Theme 알림</b><span>{themeBackendWarning}</span><small>SYSTEM_ADMIN에서 Backend까지 완전히 재시작하면 Frontend/Backend 버전 불일치도 함께 해소됩니다.</small></div>}
             {draft.theme==='custom'&&<div className="ui-layout-selected-theme">
               <div className="ui-layout-theme-palette">{(draft.theme_tokens?.colors?Object.values(draft.theme_tokens.colors).slice(0,5):[]).map((color,index)=><i key={`${color}-${index}`} style={{background:String(color)}}></i>)}</div>
-              <div><strong>{draft.theme_name||'Custom Theme'}</strong><small>{draft.theme_source_type==='URL'?'URL 분석 Theme':draft.theme_source_type==='IMAGE'?'화면 캡처 Theme':'사용자 Theme'} · 선택된 Frontend 기술의 native Theme 방식으로 자동 변환 적용</small></div>
+              <div><strong>{draft.theme_name||'Custom Theme'}</strong><small>{draft.theme_source_type==='COMBINED'?'URL + 화면 캡처 통합 Theme':draft.theme_source_type==='URL'?'URL 분석 Theme':draft.theme_source_type==='IMAGE'?'화면 캡처 Theme':'사용자 Theme'} · 선택된 Frontend 기술의 native Theme 방식으로 자동 변환 적용</small></div>
               <button type="button" onClick={()=>deleteCustomTheme(customThemes.find(item=>Number(item.id)===Number(draft.theme_id)))}>삭제</button>
             </div>}
-            {themeImportOpen&&<div className="ui-layout-theme-import-panel">
-              <div className="ui-layout-theme-import-tabs"><button type="button" className={themeImportMode==='url'?'active':''} onClick={()=>{setThemeImportMode('url');setThemeImportError('')}}>웹사이트 URL</button><button type="button" className={themeImportMode==='image'?'active':''} onClick={()=>{setThemeImportMode('image');setThemeImportError('')}}>화면 캡처 이미지</button></div>
+            {themeImportOpen&&<div className="ui-layout-theme-import-panel unified-source">
+              <div className="ui-layout-theme-import-source-head">
+                <div><strong>스타일 참고 자료</strong><small>URL과 캡처 이미지를 함께 넣을 수 있습니다. 하나만 입력해도 되고, 둘 다 있으면 통합 분석합니다.</small></div>
+                <span>{themeImportFiles.length}/3 이미지</span>
+              </div>
               <label><span>Theme 이름</span><input value={themeImportName} onChange={e=>setThemeImportName(e.target.value)} placeholder="예: 쇼핑몰 A 스타일"/></label>
-              {themeImportMode==='url'
-                ?<label><span>URL</span><input value={themeImportUrl} onChange={e=>setThemeImportUrl(e.target.value)} placeholder="https://example.com"/></label>
-                :<label className="ui-layout-theme-file"><span>화면 캡처</span><input type="file" accept="image/*" onChange={e=>chooseThemeImage(e.target.files?.[0]||null)}/></label>}
+              <label><span>웹사이트 URL</span><input value={themeImportUrl} onChange={e=>setThemeImportUrl(e.target.value)} placeholder="선택 입력 · https://example.com"/></label>
+              <label className="ui-layout-theme-file"><span>화면 캡처</span><input type="file" accept="image/*" multiple onChange={e=>chooseThemeImages(e.target.files)}/></label>
+              {themeImportFiles.length>0&&<div className="ui-layout-theme-file-list">{themeImportFiles.map((file,index)=><div key={`${file.name}-${file.size}-${index}`}><span title={file.name}>{index+1}. {file.name}</span><button type="button" onClick={()=>removeThemeImage(index)}>×</button></div>)}</div>}
               {themeImportPreview&&<div className="ui-layout-theme-import-palette">{(themeImportPreview.preview_colors||[]).map((color,index)=><i key={`${color}-${index}`} style={{background:color}} title={color}></i>)}</div>}
-              <small className="ui-layout-theme-import-help">URL은 HTML/CSS의 색상·폰트·Radius·Shadow를 분석합니다. 캡처 이미지는 색상 중심으로 Design Token을 추정합니다. 저장된 Theme은 등록된 Frontend/스타일 Adapter에 맞게 자동 변환되고, 목록에 없는 Frontend도 Generic Adapter를 사용합니다. 지원 목록은 Theme 바로 아래의 ‘지원 Frontend/스타일 목록 보기’에서 확인할 수 있습니다. 로고·문구·이미지·고유 콘텐츠는 복제하지 않습니다.</small>
-              {customThemes.length>0&&<div className="ui-layout-theme-library"><strong>저장된 Theme</strong>{customThemes.slice(0,8).map(theme=><div key={theme.id}><span className="ui-layout-theme-library-palette">{(theme.preview_colors||[]).slice(0,4).map((color,index)=><i key={`${color}-${index}`} style={{background:color}}></i>)}</span><b>{theme.name}</b><em>{theme.source_type==='URL'?'URL':theme.source_type==='IMAGE'?'이미지':'Custom'}</em><button type="button" onClick={()=>{selectThemeValue(`custom:${theme.id}`);setThemeImportOpen(false)}}>적용</button><button type="button" className="danger" onClick={()=>deleteCustomTheme(theme)}>삭제</button></div>)}</div>}
+              <div className="ui-layout-theme-menu-state-note">
+                <b>메뉴 상태까지 분석</b>
+                <span>URL CSS의 메뉴/Navigation 기본·Hover·Active 스타일을 추출합니다. 캡처 이미지는 최대 3장을 함께 비교하여 메뉴 색상과 상태 차이를 Theme 규칙에 보완합니다.</span>
+              </div>
+              <small className="ui-layout-theme-import-help">URL에서는 HTML/CSS의 색상·폰트·Radius·Shadow·Navigation/Menu 상태를 분석하고, 이미지는 색상과 화면 스타일을 추정합니다. URL과 이미지가 모두 있으면 URL의 CSS 상태 규칙과 이미지의 실제 화면 색감을 합쳐 하나의 Design Token Theme으로 저장합니다. 로고·문구·이미지·고유 콘텐츠는 복제하지 않습니다.</small>
+              {customThemes.length>0&&<div className="ui-layout-theme-library"><strong>저장된 Theme</strong>{customThemes.slice(0,8).map(theme=><div key={theme.id}><span className="ui-layout-theme-library-palette">{(theme.preview_colors||[]).slice(0,4).map((color,index)=><i key={`${color}-${index}`} style={{background:color}}></i>)}</span><b>{theme.name}</b><em>{theme.source_type==='COMBINED'?'URL+이미지':theme.source_type==='URL'?'URL':theme.source_type==='IMAGE'?'이미지':'Custom'}</em><button type="button" onClick={()=>{selectThemeValue(`custom:${theme.id}`);setThemeImportOpen(false)}}>적용</button><button type="button" className="danger" onClick={()=>deleteCustomTheme(theme)}>삭제</button></div>)}</div>}
               {themeImportError&&<div className="ui-layout-theme-import-error">{themeImportError}</div>}
-              <div className="ui-layout-theme-import-actions"><button type="button" onClick={()=>setThemeImportOpen(false)}>취소</button><button type="button" className="primary" disabled={themeImportBusy} onClick={importTheme}>{themeImportBusy?'분석·저장 중...':'분석 후 Theme 저장'}</button></div>
+              <div className="ui-layout-theme-import-actions"><button type="button" onClick={()=>setThemeImportOpen(false)}>취소</button><button type="button" className="primary" disabled={themeImportBusy} onClick={importTheme}>{themeImportBusy?'통합 분석·저장 중...':'분석 후 Theme 저장'}</button></div>
             </div>}
             <label className="ui-layout-select-field"><span>사용자 메뉴 위치</span><select value={draft.user_menu_position||'header_right'} disabled={!draft.user_menu} onChange={e=>patch({user_menu_position:e.target.value})}><option value="header_right">상단 우측</option><option value="sidebar_bottom">Sidebar 하단</option><option value="profile_page">Profile 페이지</option></select></label>
           </section>
@@ -10771,7 +10888,7 @@ function IDE() {
           : finalStatus.kind==='failure'
             ? 'Agent 개발 실패'
             : finalStatus.kind==='action'
-              ? '디버그 조치 필요'
+              ? (finalStatus.status==='VALIDATION_BLOCKED'?'검증 재실행 필요':'디버그 조치 필요')
               : finalStatus.kind==='waiting'
                 ? '사용자 조치 대기'
                 : `개발 Workflow 종료 · 상태: ${status}`
@@ -10805,7 +10922,7 @@ function IDE() {
             : finalStatus.kind==='failure'
               ? 'Agent 개발 실패'
               : finalStatus.kind==='action'
-                ? '디버그 조치 필요'
+                ? (finalStatus.status==='VALIDATION_BLOCKED'?'검증 재실행 필요':'디버그 조치 필요')
                 : finalStatus.kind==='waiting'
                   ? '사용자 조치 대기'
                   : 'Agent Factory 실행 종료',
@@ -14208,7 +14325,8 @@ function IDE() {
       'CHECKPOINT',
       'PAUSED',
       'WAITING',
-      'REVIEW_REQUIRED'
+      'REVIEW_REQUIRED',
+      'VALIDATION_BLOCKED'
     ])
 
     if(successfulFinalStatuses.has(status)){
@@ -14286,6 +14404,25 @@ function IDE() {
     }
 
     if(waitingStatuses.has(status)){
+      if(status==='VALIDATION_BLOCKED'){
+        const fallback=workflowState?.validation_fallback||{}
+        const primary=fallback?.primary_result||{}
+        const files=Number(fallback?.actual_file_count||appliedFiles||0)
+        const localSummary=primary?.returncode===0
+          ? '로컬 fallback 검증은 통과했습니다.'
+          : primary?.returncode>0
+            ? `로컬 fallback 검증에서 ReturnCode=${primary.returncode} 오류를 확보했습니다.`
+            : '실제 테스트 실패 로그는 확보되지 않았습니다.'
+        return {
+          kind:'action',
+          title:'Agent 생성 후 검증이 중단되었습니다.',
+          detail:
+            `Agent 파일 ${files}개가 존재하며 코드 생성 자체를 실패로 판정하지 않습니다. `
+            +`${localSummary} `
+            +'Codex/Windows sandbox helper 등 검증 인프라 상태를 확인한 뒤 검증을 다시 실행하세요.',
+          status
+        }
+      }
       return {
         kind:status==='DEBUG_PATCH_READY'?'action':'waiting',
         title:
@@ -14664,6 +14801,18 @@ function IDE() {
           <small>
             이 상태에서는 개발이 완료된 것으로 판단하지 않습니다.
           </small>
+        }
+        {item.status==='VALIDATION_BLOCKED'&&
+          <div className="development-final-status-actions">
+            <button
+              type="button"
+              onClick={()=>startAgentDevelopment({redevelopment:true})}
+              disabled={agentBuildBusy||!redevelopmentInfo?.available}
+              title="기존 생성 파일은 유지하고 검증/디버그 단계부터 다시 실행합니다."
+            >
+              ↻ 검증 다시 실행
+            </button>
+          </div>
         }
       </div>
 
@@ -15369,20 +15518,6 @@ function IDE() {
       }>
         {workspaceTab==='DESIGN'&&<div className="unified-agent-design">
           <section className="unified-design-chat">
-            <AgentDesignProjectToolbar
-              designProjectId={designProjectId}
-              projectName={newAgentName||getBuilderConversationSummary().purpose}
-              savedAt={designProjectSavedAt||requirementDraftSavedAt}
-              status={designProjectProgressInfo().status}
-              progress={designProjectProgressInfo().progress}
-              onNew={()=>{
-                const hasWork=(chat||[]).some(item=>item?.role==='user')||Boolean(designProjectId)
-                if(hasWork&&!window.confirm('현재 Agent 설계를 종료하고 새 설계 프로젝트를 시작할까요?\n\n저장하지 않은 변경이 있다면 먼저 프로젝트 저장을 눌러주세요.')) return
-                startNewProject()
-              }}
-              onSave={()=>saveAgentDesignProject({createVersion:true,versionLabel:'사용자 수동 저장 Snapshot'})}
-              onLoad={loadAgentDesignProject}
-            />
             <div className="builder-chat-head">
               <div>
                 <span className="ai-avatar">AI</span>
@@ -17256,13 +17391,6 @@ function IDE() {
             </div>
           </div>
 
-          <div className="unified-feature-manager-shell">
-            <AgentFeatureManager
-              detectedFeatures={getDetectedAgentFeatureNames()}
-              features={designFeatureRegistry}
-              onChange={handleDesignFeatureChange}
-            />
-          </div>
 
           <div className={`ui-layout-choice-card ${uiLayoutConfig?.template_id?'selected':''}`}>
             <div className="ui-layout-choice-head">
@@ -17376,6 +17504,29 @@ function IDE() {
           />
           {renderDevelopmentFinalStatus()}
           {renderDevelopmentProgress()}
+
+          <div className="agent-build-secondary-tools">
+            <AgentDesignProjectToolbar
+              designProjectId={designProjectId}
+              projectName={newAgentName||getBuilderConversationSummary().purpose}
+              savedAt={designProjectSavedAt||requirementDraftSavedAt}
+              status={designProjectProgressInfo().status}
+              progress={designProjectProgressInfo().progress}
+              showNew={false}
+              panelMode
+              onSave={()=>saveAgentDesignProject({createVersion:true,versionLabel:'사용자 수동 저장 Snapshot'})}
+              onLoad={loadAgentDesignProject}
+            />
+
+            <div className="agent-build-feature-tools">
+              <AgentFeatureManager
+                detectedFeatures={getDetectedAgentFeatureNames()}
+                features={designFeatureRegistry}
+                onChange={handleDesignFeatureChange}
+                panelMode
+              />
+            </div>
+          </div>
         </div>
 
         <div className="info-card live-database-preview-card">

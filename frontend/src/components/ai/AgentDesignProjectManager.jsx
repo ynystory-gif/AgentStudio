@@ -55,6 +55,8 @@ export function AgentDesignProjectToolbar({
   onNew,
   onSave,
   onLoad,
+  showNew=true,
+  panelMode=false,
 }){
   const [listOpen,setListOpen]=useState(false)
   const [loading,setLoading]=useState(false)
@@ -80,14 +82,14 @@ export function AgentDesignProjectToolbar({
   },[listOpen])
 
   return <>
-    <div className="agent-design-project-toolbar">
+    <div className={`agent-design-project-toolbar ${panelMode?'panel-mode':''}`}>
       <div className="agent-design-project-identity">
         <span>설계 프로젝트</span>
         <strong>{projectName||'이름 미정'}</strong>
         <small>{designProjectId?`#${designProjectId} · ${statusLabel(status)} · ${Math.max(0,Math.min(100,Number(progress)||0))}%`:'아직 DB에 저장되지 않음'}</small>
       </div>
       <div className="agent-design-project-actions">
-        <button type="button" className="agent-design-new-button" onClick={onNew}>＋ 새 프로젝트</button>
+        {showNew&&<button type="button" className="agent-design-new-button" onClick={onNew}>＋ 새 프로젝트</button>}
         <button type="button" className="primary agent-design-save-button" onClick={onSave}>💾 프로젝트 저장</button>
         <button type="button" className="agent-design-load-button" onClick={()=>setListOpen(true)}>📂 프로젝트 로드</button>
         <span className="agent-design-save-state">{savedAt?`✓ 저장됨 ${formatDate(savedAt)}`:'저장 대기'}</span>
@@ -130,7 +132,7 @@ export function AgentDesignProjectToolbar({
   </>
 }
 
-export function AgentFeatureManager({detectedFeatures=[],features=[],onChange}){
+export function AgentFeatureManager({detectedFeatures=[],features=[],onChange,panelMode=false}){
   const [editing,setEditing]=useState(null)
   const [name,setName]=useState('')
   const [description,setDescription]=useState('')
@@ -189,7 +191,7 @@ export function AgentFeatureManager({detectedFeatures=[],features=[],onChange}){
     await onChange?.(action,item,{impact:impacts,label})
   }
 
-  return <div className="agent-feature-manager">
+  return <div className={`agent-feature-manager ${panelMode?'panel-mode':''}`}>
     <div className="agent-feature-manager-head">
       <div><strong>기능 관리</strong><small>현재 설계가 진행된 뒤에도 기능을 추가·수정·비활성화·삭제할 수 있습니다.</small></div>
       <button type="button" className="primary" onClick={openAdd}>＋ 기능 추가</button>

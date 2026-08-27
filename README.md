@@ -1,4 +1,22 @@
-> Latest patch: **v5.390 UnifiedDesignProjectControlsAndThemeRegistryUX**
+> Latest patch: **v5.392 ValidationInfrastructureFallback**
+
+## v5.392 ValidationInfrastructureFallback
+
+- Codex Windows sandbox helper 실패를 Agent 코드 실패와 분리합니다.
+- Codex debug/code generation이 sandbox 인프라 문제로 실패하면 OpenAI/Ollama provider fallback을 시도합니다.
+- 실제 프로젝트 파일 목록, git status, 안전한 local validation 명령 결과를 자동 수집합니다.
+- `codex-windows-sandbox-setup.exe` 관련 오류 원문, Codex 경로/명령/stderr tail을 진단 자료에 저장합니다.
+- 실제 테스트가 실행되지 못한 경우 `FAILED`가 아니라 `VALIDATION_BLOCKED`로 표시합니다.
+- `logs/validation_fallback.json`에 fallback 진단을 남깁니다.
+
+## v5.391 DesignPanelControlsUnifiedThemeSources
+
+- Agent 설계 프로젝트 저장/로드와 기능 관리 UI를 우측 **Agent 제작 진행** 카드 아래로 이동했습니다. 새 프로젝트 버튼은 이 위치에서 제거했습니다.
+- **프로젝트 구성** 카드는 자체 스크롤을 만들지 않으며, DESIGN 우측 패널은 휠 스크롤은 유지하되 영구 스크롤바를 숨깁니다.
+- Theme 가져오기를 URL/이미지 탭 방식에서 **통합 소스 입력** 방식으로 변경했습니다. URL 또는 이미지 중 하나만 사용하거나 둘을 함께 분석할 수 있습니다.
+- 화면 캡처 이미지는 최대 3개까지 선택할 수 있고, URL CSS와 이미지 Design Token을 병합해 하나의 Theme으로 저장합니다.
+- URL CSS에서 Navigation/Menu의 normal/hover/active 상태를 분석하고 `component_rules.menu`에 저장합니다. 이미지 기반 Theme에도 메뉴 상태 규칙을 보완합니다.
+- 저장된 메뉴 상태 Theme 규칙은 React/TypeScript에 한정하지 않고 등록된 모든 Frontend Adapter 및 Generic Adapter의 native styling 방식으로 생성 Agent에 적용됩니다.
 
 # THEANOVA AgentStudio v5.388
 

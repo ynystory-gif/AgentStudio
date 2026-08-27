@@ -13074,3 +13074,228 @@ small{font-size:var(--agentstudio-min-readable-font-size);}
   .ui-layout-theme-target-modal-stats small{grid-column:1/-1;justify-self:start}
   .ui-layout-theme-target-list.modal-list .ui-layout-theme-target-group{grid-template-columns:1fr}
 }
+
+/* ===== v5.391 Design Panel Controls + Unified Theme Source Import ===== */
+/* DESIGN chat no longer reserves a top project-toolbar row. */
+.unified-design-chat{
+  grid-template-rows:58px minmax(0,1fr) auto!important;
+}
+
+/* Project configuration itself must never create a nested scrollbar. */
+.unified-project-config{
+  max-height:none!important;
+  overflow:visible!important;
+}
+
+/* Keep the DESIGN right panel wheel-scrollable, but do not show a permanent scrollbar. */
+.workspace-info-panel.design-info-panel{
+  scrollbar-width:none!important;
+  -ms-overflow-style:none;
+  padding-right:12px!important;
+}
+.workspace-info-panel.design-info-panel::-webkit-scrollbar{
+  width:0!important;
+  height:0!important;
+  display:none!important;
+}
+
+/* Save/Load and feature lifecycle controls now live below Agent 제작 진행. */
+.agent-build-secondary-tools{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  margin-top:12px;
+  padding-top:12px;
+  border-top:1px solid #24364a;
+}
+.right-agent-build-card .agent-design-project-toolbar.panel-mode{
+  min-height:0!important;
+  padding:10px!important;
+  border:1px solid #2a4158!important;
+  border-radius:9px!important;
+  background:#0b1622!important;
+  flex-direction:column!important;
+  align-items:stretch!important;
+  gap:8px!important;
+}
+.right-agent-build-card .agent-design-project-toolbar.panel-mode .agent-design-project-identity{
+  width:100%;
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr);
+  align-items:center;
+  gap:3px 8px;
+}
+.right-agent-build-card .agent-design-project-toolbar.panel-mode .agent-design-project-identity>span{
+  grid-column:1;
+  font-size:10px;
+  color:#80a0be;
+}
+.right-agent-build-card .agent-design-project-toolbar.panel-mode .agent-design-project-identity>strong{
+  grid-column:2;
+  max-width:none;
+  font-size:11px;
+  color:#e4f0fb;
+}
+.right-agent-build-card .agent-design-project-toolbar.panel-mode .agent-design-project-identity>small{
+  grid-column:1 / -1;
+  font-size:9.5px;
+  color:#7188a0;
+  white-space:normal;
+}
+.right-agent-build-card .agent-design-project-toolbar.panel-mode .agent-design-project-actions{
+  width:100%;
+  display:grid!important;
+  grid-template-columns:1fr 1fr;
+  gap:6px;
+}
+.right-agent-build-card .agent-design-project-toolbar.panel-mode .agent-design-project-actions button{
+  min-width:0!important;
+  width:100%;
+  min-height:31px;
+  font-size:10px;
+  font-weight:800;
+}
+.right-agent-build-card .agent-design-project-toolbar.panel-mode .agent-design-save-state{
+  grid-column:1 / -1;
+  text-align:left;
+  font-size:9.5px;
+  color:#73c999;
+  padding:2px 1px 0;
+}
+.agent-build-feature-tools .agent-feature-manager.panel-mode{
+  margin:0;
+  border-color:#2a4158;
+  background:#0b1622;
+}
+.agent-build-feature-tools .agent-feature-manager.panel-mode .agent-feature-manager-head{
+  background:#0e1b28;
+  padding:10px;
+}
+.agent-build-feature-tools .agent-feature-manager.panel-mode .agent-feature-manager-head>div{
+  min-width:0;
+}
+.agent-build-feature-tools .agent-feature-manager.panel-mode .agent-feature-manager-head small{
+  white-space:normal;
+}
+.agent-build-feature-tools .agent-feature-manager.panel-mode .agent-feature-list{
+  max-height:340px;
+}
+.agent-build-feature-tools .agent-feature-row{
+  align-items:flex-start;
+  flex-direction:column;
+  gap:7px;
+}
+.agent-build-feature-tools .agent-feature-info,
+.agent-build-feature-tools .agent-feature-actions{
+  width:100%;
+}
+.agent-build-feature-tools .agent-feature-info small{
+  max-width:none;
+  white-space:normal;
+  line-height:1.35;
+}
+.agent-build-feature-tools .agent-feature-actions{
+  justify-content:flex-end;
+}
+.agent-build-feature-tools .agent-feature-actions button.danger{
+  background:#28151b;
+  border-color:#7b3947;
+  color:#ffb0ba;
+}
+
+/* Unified URL + up to 3 screenshot source import. */
+.ui-layout-theme-import-panel.unified-source{
+  gap:9px;
+}
+.ui-layout-theme-import-source-head{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:10px;
+  padding:8px 9px;
+  border:1px solid #29485f;
+  border-radius:7px;
+  background:#0d1d29;
+}
+.ui-layout-theme-import-source-head>div{
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+  min-width:0;
+}
+.ui-layout-theme-import-source-head strong{
+  font-size:10.5px;
+  color:#d9efff;
+}
+.ui-layout-theme-import-source-head small{
+  font-size:9.5px;
+  line-height:1.4;
+  color:#7e9aae;
+}
+.ui-layout-theme-import-source-head>span{
+  flex:0 0 auto;
+  border:1px solid #2d6381;
+  border-radius:999px;
+  background:#0d2a3c;
+  color:#86d4fb;
+  font-size:9px;
+  font-weight:800;
+  padding:4px 7px;
+}
+.ui-layout-theme-file-list{
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+  padding:6px 7px;
+  border:1px solid #223d51;
+  border-radius:6px;
+  background:#08131d;
+}
+.ui-layout-theme-file-list>div{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 24px;
+  align-items:center;
+  gap:6px;
+}
+.ui-layout-theme-file-list span{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-size:9.5px;
+  color:#9fb8ca;
+}
+.ui-layout-theme-file-list button{
+  width:24px;
+  height:22px;
+  padding:0;
+  border:1px solid #533843;
+  border-radius:4px;
+  background:#24151b;
+  color:#e791a5;
+  cursor:pointer;
+}
+.ui-layout-theme-menu-state-note{
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+  padding:7px 8px;
+  border:1px solid #28536b;
+  border-radius:6px;
+  background:#0b2030;
+}
+.ui-layout-theme-menu-state-note b{
+  font-size:10px;
+  color:#aee5ff;
+}
+.ui-layout-theme-menu-state-note span{
+  font-size:9.5px;
+  line-height:1.4;
+  color:#7fa0b5;
+}
+
+
+/* ===== v5.392 Validation Infrastructure Fallback ===== */
+.development-final-status-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px}
+.development-final-status-actions button{padding:6px 10px;border:1px solid #8c6529;border-radius:7px;background:#33230d;color:#ffd18a;font-size:12px;font-weight:800}
+.development-final-status-actions button:disabled{opacity:.45;cursor:not-allowed}

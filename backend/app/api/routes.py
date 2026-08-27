@@ -10,7 +10,7 @@ import asyncio
 import json
 from app.models.entities import Project, ProjectAnalysis, AgentDesignProject, AgentDesignProjectVersion, UITheme
 from app.services.project_paths import resolve_project_paths
-from app.services.ui_theme_service import analyze_theme_from_url, build_rules
+from app.services.ui_theme_service import analyze_theme_from_url, build_rules, merge_theme_analyses
 from app.services.frontend_theme_registry import list_frontend_theme_targets
 from app.services.database_provisioning import provision_agentstudio_database
 from app.services.database_schema_design import build_database_plan, finalize_database_plan, materialize_database_plan
@@ -740,6 +740,21 @@ class UIThemeImportImageRequest(BaseModel):
     component_rules: dict = {}
     layout_rules: dict = {}
     preview_colors: list[str] = []
+    scope: str = "GLOBAL"
+
+
+class UIThemeImportImageReference(BaseModel):
+    file_name: str = ""
+    tokens: dict = {}
+    component_rules: dict = {}
+    layout_rules: dict = {}
+    preview_colors: list[str] = []
+
+
+class UIThemeImportCombinedRequest(BaseModel):
+    name: str = ""
+    url: str = ""
+    images: list[UIThemeImportImageReference] = []
     scope: str = "GLOBAL"
 
 
@@ -1528,6 +1543,100 @@ async def list_ui_themes():
             )
         ).scalars().all()
     return {"ok": True, "themes": [_ui_theme_payload(row) for row in rows]}
+
+
+@router.post("/ui-themes/import")
+async def import_ui_theme_from_sources(req: UIThemeImportCombinedRequest):
+    """Import one Theme from an optional public URL and up to three screenshot analyses.
+
+    Either source is sufficient. When both are provided, URL CSS semantics (including
+    menu hover/active states) and screenshot visual tokens are merged before persistence.
+    """
+    await _ensure_ui_theme_storage()
+    name = (req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Theme 이름을 입력하세요.")
+    url = (req.url or "").strip()
+    images = list(req.images or [])
+    if len(images) > 3:
+        raise HTTPException(status_code=400, detail="화면 캡처 이미지는 최대 3개까지 사용할 수 있습니다.")
+    if not url and not images:
+        raise HTTPException(status_code=400, detail="웹사이트 URL 또는 화면 캡처 이미지를 하나 이상 입력하세요.")
+
+    analyses: list[dict] = []
+    source_url = ""
+    warnings: list[str] = []
+    url_applied = False
+    source_meta: dict = {"images": [], "url": bool(url), "content_copied": False}
+    if url:
+        try:
+            url_analysis = await analyze_theme_from_url(url)
+            analyses.append(url_analysis)
+            url_applied = True
+            source_url = str(url_analysis.get("source_url") or url).strip()
+            source_meta["url_meta"] = url_analysis.get("source_meta") or {}
+        except ValueError as exc:
+            if not images:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            warnings.append(f"URL 분석 제외: {exc}")
+        except Exception as exc:
+            if not images:
+                raise HTTPException(status_code=502, detail=f"웹사이트 Theme 분석 실패: {exc}") from exc
+            warnings.append(f"URL 분석 제외: {exc}")
+
+    for image in images:
+        tokens = image.tokens or {}
+        colors = tokens.get("colors") if isinstance(tokens, dict) else None
+        if not isinstance(colors, dict) or not colors.get("primary") or not colors.get("background"):
+            raise HTTPException(status_code=400, detail=f"'{image.file_name or '화면 캡처'}' 이미지의 Theme 색상 정보가 없습니다.")
+        component_rules = image.component_rules or {}
+        layout_rules = image.layout_rules or {}
+        if not component_rules or not layout_rules:
+            default_components, default_layout = build_rules(tokens)
+            component_rules = component_rules or default_components
+            layout_rules = layout_rules or default_layout
+        analyses.append({
+            "analysis_source": "IMAGE",
+            "tokens": tokens,
+            "component_rules": component_rules,
+            "layout_rules": layout_rules,
+            "preview_colors": image.preview_colors or [],
+        })
+        source_meta["images"].append((image.file_name or "화면 캡처 이미지").strip())
+
+    if not analyses:
+        raise HTTPException(status_code=400, detail="Theme으로 사용할 수 있는 참고 소스를 분석하지 못했습니다.")
+    merged = merge_theme_analyses(analyses)
+    source_type = "COMBINED" if url_applied and images else ("URL" if url_applied else "IMAGE")
+    source_meta["warnings"] = warnings
+    source_meta["analysis"] = (
+        "URL HTML/CSS + screenshot design-token merge"
+        if source_type == "COMBINED"
+        else "HTML/CSS design-token extraction"
+        if source_type == "URL"
+        else "Screenshot design-token extraction"
+    )
+    now = datetime.utcnow()
+    async with SessionLocal() as session:
+        row = UITheme(
+            pc_name=current_pc_name(),
+            name=name,
+            theme_type="IMPORTED",
+            source_type=source_type,
+            source_url=source_url,
+            source_label=json.dumps(source_meta, ensure_ascii=False)[:1000],
+            scope=(req.scope or "GLOBAL").strip().upper(),
+            tokens=merged.get("tokens") or {},
+            component_rules=merged.get("component_rules") or {},
+            layout_rules=merged.get("layout_rules") or {},
+            preview_colors=merged.get("preview_colors") or [],
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+    return {"ok": True, "theme": _ui_theme_payload(row), "sources": source_meta, "warnings": warnings}
 
 
 @router.post("/ui-themes/import-url")
@@ -3137,7 +3246,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.390", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.392", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -3733,7 +3842,7 @@ async def export_agentstudio_presentation(payload: PresentationExportRequest):
         content, filename = await asyncio.to_thread(
             build_agentstudio_presentation,
             data,
-            "5.390",
+            "5.392",
         )
     except Exception as exc:
         raise HTTPException(
@@ -6085,7 +6194,7 @@ def _is_failed_agent_build_status(status: str) -> bool:
         return False
     if value in {"SUCCESS", "COMPLETED", "TEST_PASSED"}:
         return False
-    return any(token in value for token in ("FAILED", "INCOMPLETE", "EXCEPTION", "ERROR"))
+    return any(token in value for token in ("FAILED", "INCOMPLETE", "EXCEPTION", "ERROR", "BLOCKED"))
 
 
 def _normalize_failure_stage_to_node(stage: str, state: dict | None = None) -> str:
