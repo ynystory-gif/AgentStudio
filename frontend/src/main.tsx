@@ -5,12 +5,14 @@ import { AuthGate } from './components/auth/AuthGate'
 import { LlmLearningCenter } from './components/learning/LlmLearningCenter'
 import { LayoutThemeDynamicSourceEnhancer } from './components/layout/LayoutThemeDynamicSourceEnhancer'
 import { ImportedThemePreviewEnhancer } from './components/layout/ImportedThemePreviewEnhancer'
+import { LargeLayoutPreviewEnhancer } from './components/layout/LargeLayoutPreviewEnhancer'
 import './styles.css'
 import './components/learning/llm-learning.css'
 import './components/learning/nav-order-fix.css'
+import './components/layout/large-layout-preview.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <AuthGate><App /><LlmLearningCenter /><LayoutThemeDynamicSourceEnhancer /><ImportedThemePreviewEnhancer /></AuthGate>
+    <AuthGate><App /><LlmLearningCenter /><LayoutThemeDynamicSourceEnhancer /><ImportedThemePreviewEnhancer /><LargeLayoutPreviewEnhancer /></AuthGate>
   </React.StrictMode>
 )
