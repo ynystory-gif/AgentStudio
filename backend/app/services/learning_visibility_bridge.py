@@ -7,6 +7,11 @@ exact Dataset.source_case_id guard. It makes the UI contract explicit: items ret
 by /learning/misjudgments are current-PC *unlearned* items only.
 """
 
+# Load first so AgentStudio's own Teacher/Validator/problem-generation telemetry can
+# never feed back into the user misjudgment queue. It also quarantines legacy polluted
+# rows on the next sync/list request.
+import app.services.learning_internal_call_filter_bridge  # noqa: F401
+
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
@@ -57,6 +62,11 @@ async def list_aggregated_misjudgment_cases_current_pc_unlearned_only(
         item_id = str(item.get("id") or "")
         group_ids = {str(value) for value in (item.get("group_case_ids") or []) if value}
 
+        # Rejected/quarantined records are diagnostic history, not actionable learning
+        # items. In particular, internal Teacher/Validator calls are quarantined here.
+        if str(item.get("status") or "").strip().lower() == "rejected":
+            continue
+
         # Exact source rows that are already represented by an enabled+installed
         # Dataset on this PC must never reappear in the collection list.
         if item_id in applied_source_ids:
@@ -69,6 +79,11 @@ async def list_aggregated_misjudgment_cases_current_pc_unlearned_only(
             exact_hidden += 1
             continue
 
+        # The visible queue is intentionally high-confidence only. Lower-confidence
+        # candidates remain in DB history but are not actionable in this screen.
+        if float(item.get("confidence") or 0.0) < 0.75:
+            continue
+
         item["current_pc_learning_state"] = "unlearned"
         item["current_pc_learning_label"] = "현재 PC 미학습"
         visible.append(item)
@@ -79,6 +94,7 @@ async def list_aggregated_misjudgment_cases_current_pc_unlearned_only(
     result["current_pc_applied_source_count"] = len(applied_source_ids)
     result["visible_scope"] = "current_pc_unlearned_only"
     result["visible_scope_label"] = "현재 PC 미학습 오판만 표시"
+    result["visible_confidence_min"] = 0.75
     return result
 
 
