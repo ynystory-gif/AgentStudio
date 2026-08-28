@@ -11,9 +11,13 @@ Datasets are backfilled from their representative source and application cutoff.
 backfill can run both at AgentStudio startup and lazily during list reads, so existing
 Datasets do not need to be regenerated or relearned.
 
-Important: an existing mapping is not assumed to be complete.  Every applied Dataset is
-reconciled against historical same-family cases up to its application time.  This repairs
+Important: an existing mapping is not assumed to be complete. Every applied Dataset is
+reconciled against historical same-family cases up to its application time. This repairs
 partial mappings created by older builds without treating a later recurrence as learned.
+
+The visible misjudgment rows are also enriched with learning-data status so the UI can
+show whether the error family already has Dataset/problem data and whether that Dataset
+is applied on the current PC.
 """
 
 # Block internal Teacher/Validator/problem-generation telemetry before it can re-enter
@@ -53,12 +57,20 @@ def _group_key(case_ids: set[str]) -> str:
     return "misgrp:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
+def _problem_count(dataset: LlmLearningDataset) -> int:
+    """Return the most useful problem count for display."""
+    problems = list(dataset.problems_json or [])
+    if problems:
+        return len([item for item in problems if isinstance(item, dict)])
+    return int(dataset.problem_count or 0)
+
+
 async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
     """Return exact learned case ids and family metadata for current PC.
 
-    For modern Datasets the group snapshot comes from deployment_json.  For every applied
+    For modern Datasets the group snapshot comes from deployment_json. For every applied
     Dataset we additionally reconcile that snapshot against same-family historical cases
-    that occurred on or before the application time.  This means partial legacy mappings
+    that occurred on or before the application time. This means partial legacy mappings
     are repaired even when ``source_group_case_ids`` already exists.
     """
     pc_name = current_pc_name()
@@ -109,6 +121,8 @@ async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
                 continue
 
             applied_at = app.applied_at or app.updated_at or datetime.utcnow()
+            if applied_at.tzinfo is not None:
+                applied_at = applied_at.replace(tzinfo=None)
             deployment = dict(dataset.deployment_json or {})
             mapped_ids = {
                 str(value)
@@ -199,12 +213,39 @@ async def list_aggregated_misjudgment_cases_current_pc_unlearned_only(
         ids = item.get("group_case_ids") or [item.get("id")]
         all_group_ids.update(str(value) for value in ids if value)
 
+    pc_name = current_pc_name()
     async with SessionLocal() as session:
         member_rows = (
             await session.execute(
                 select(LlmMisjudgmentCase).where(LlmMisjudgmentCase.id.in_(all_group_ids))
             )
         ).scalars().all() if all_group_ids else []
+
+        # Learning data is shared across PCs. Load it once and correlate every visible
+        # error group using explicit case mapping first, then same-family compatibility
+        # matching for legacy Datasets.
+        all_datasets = (
+            await session.execute(select(LlmLearningDataset))
+        ).scalars().all()
+        dataset_source_ids = {
+            str(row.source_case_id) for row in all_datasets if row.source_case_id
+        }
+        dataset_source_rows = (
+            await session.execute(
+                select(LlmMisjudgmentCase).where(LlmMisjudgmentCase.id.in_(dataset_source_ids))
+            )
+        ).scalars().all() if dataset_source_ids else []
+        dataset_source_by_id = {str(row.id): _case_dict(row) for row in dataset_source_rows}
+
+        pc_apps = (
+            await session.execute(
+                select(LlmLearningPcApplication).where(
+                    LlmLearningPcApplication.pc_name == pc_name
+                )
+            )
+        ).scalars().all()
+        pc_app_by_dataset = {str(row.dataset_id): row for row in pc_apps if row.dataset_id}
+
     members_by_id = {str(row.id): _case_dict(row) for row in member_rows}
 
     visible: list[dict] = []
@@ -267,6 +308,54 @@ async def list_aggregated_misjudgment_cases_current_pc_unlearned_only(
             "학습 후 재발 · 현재 PC 미학습" if related_learned_family else "현재 PC 미학습"
         )
         representative["learning_group_key"] = str((related_learned_family or {}).get("source_group_key") or "")
+
+        # Determine whether reusable learning data already exists for this error family.
+        # Exact group membership is preferred. Same-family matching keeps old Datasets
+        # useful until group_id becomes a first-class relational key.
+        original_group_ids = set(group_ids)
+        matched_datasets: list[LlmLearningDataset] = []
+        for dataset in all_datasets:
+            deployment = dict(dataset.deployment_json or {})
+            mapped_case_ids = {
+                str(value)
+                for value in (deployment.get("source_group_case_ids") or [])
+                if value
+            }
+            exact_match = bool(
+                (dataset.source_case_id and str(dataset.source_case_id) in original_group_ids)
+                or mapped_case_ids.intersection(original_group_ids)
+            )
+            source_dict = dataset_source_by_id.get(str(dataset.source_case_id or "")) or {}
+            family_match = bool(
+                source_dict and collection._same_family(source_dict, representative)
+            )
+            if exact_match or family_match:
+                matched_datasets.append(dataset)
+
+        dataset_ids = [str(row.id) for row in matched_datasets]
+        problem_count = sum(_problem_count(row) for row in matched_datasets)
+        applied_apps = [
+            pc_app_by_dataset[dataset_id]
+            for dataset_id in dataset_ids
+            if dataset_id in pc_app_by_dataset
+            and bool(pc_app_by_dataset[dataset_id].installed)
+            and bool(pc_app_by_dataset[dataset_id].enabled)
+        ]
+        representative["learning_data_exists"] = bool(matched_datasets and problem_count > 0)
+        representative["learning_dataset_exists"] = bool(matched_datasets)
+        representative["learning_dataset_count"] = len(matched_datasets)
+        representative["learning_problem_count"] = problem_count
+        representative["learning_dataset_ids"] = dataset_ids
+        representative["learning_data_current_pc_applied"] = bool(applied_apps)
+        representative["learning_data_label"] = (
+            f"학습 데이터 있음 · Dataset {len(matched_datasets)}개 · 문제 {problem_count}개"
+            if matched_datasets and problem_count > 0
+            else (
+                f"Dataset 있음 · 문제 0개"
+                if matched_datasets
+                else "학습 데이터 없음"
+            )
+        )
         visible.append(representative)
 
     visible.sort(
