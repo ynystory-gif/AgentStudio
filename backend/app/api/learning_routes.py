@@ -20,6 +20,10 @@ from app.services.llm_learning_pc_application_service import (
     list_pc_applications,
     set_current_pc_application_enabled,
 )
+from app.services.ollama_model_manager_service import (
+    download_and_apply_recommended_model,
+    get_recommended_model_status,
+)
 
 router = APIRouter(prefix="/learning", tags=["LLM Learning"])
 
@@ -83,7 +87,23 @@ async def summary():
     applications = await list_pc_applications(include_all_pcs=True)
     result["pc_applications"] = applications.get("items", [])
     result["application_scope"] = "per_pc"
+    result["recommended_ollama"] = await get_recommended_model_status()
     return result
+
+
+@router.get("/recommended-ollama")
+async def recommended_ollama_status():
+    return await get_recommended_model_status()
+
+
+@router.post("/recommended-ollama/download-apply")
+async def recommended_ollama_download_apply():
+    try:
+        return await download_and_apply_recommended_model()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/misjudgments/sync")
