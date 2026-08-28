@@ -1,13 +1,110 @@
 body.agentstudio-large-preview-open{overflow:hidden!important}
-.agentstudio-large-preview-button{margin-left:auto!important;white-space:nowrap!important;background:#133c61!important;border-color:#2c6b9b!important;color:#e8f5ff!important;font-weight:700!important}
-.agentstudio-large-layout-preview{position:fixed!important;inset:12px!important;width:auto!important;height:auto!important;max-width:none!important;max-height:none!important;z-index:5000!important;background:#071019!important;border:1px solid #31516d!important;border-radius:14px!important;overflow:hidden!important;box-shadow:0 24px 80px rgba(0,0,0,.72)!important}
-.agentstudio-large-layout-preview .agentstudio-large-preview-button{display:none!important}
-.agentstudio-large-preview-exit{position:absolute!important;right:18px!important;top:14px!important;z-index:6!important;background:#172638!important;border-color:#45637f!important;color:#eaf4ff!important;font-weight:700!important}
-.agentstudio-large-layout-preview .ui-layout-wireframe{position:absolute!important;left:50%!important;top:52%!important;width:var(--agentstudio-preview-width)!important;height:var(--agentstudio-preview-height)!important;min-width:var(--agentstudio-preview-width)!important;min-height:var(--agentstudio-preview-height)!important;max-width:none!important;max-height:none!important;transform:translate(-50%,-50%) scale(var(--agentstudio-preview-scale))!important;transform-origin:center center!important;border-radius:10px!important;box-shadow:0 20px 80px rgba(0,0,0,.58)!important;overflow:hidden!important}
-.agentstudio-large-layout-preview .ui-layout-wireframe::before{content:attr(data-agentstudio-viewport-label);position:absolute;left:12px;top:10px;z-index:20;padding:5px 9px;border-radius:6px;background:rgba(8,20,31,.86);color:#dcecff;font:12px/1.2 Consolas,monospace;pointer-events:none}
-.agentstudio-large-layout-preview[data-agentstudio-preview-viewport="desktop"] .ui-layout-wireframe{border-radius:8px!important}
-.agentstudio-large-layout-preview[data-agentstudio-preview-viewport="tablet"] .ui-layout-wireframe{border:12px solid #17202b!important;border-radius:28px!important}
-.agentstudio-large-layout-preview[data-agentstudio-preview-viewport="mobile"] .ui-layout-wireframe{border:14px solid #111923!important;border-radius:44px!important;box-shadow:0 26px 90px rgba(0,0,0,.72)!important}
-.agentstudio-large-layout-preview[data-agentstudio-preview-viewport="mobile"] .ui-layout-wireframe::after{content:'';position:absolute;left:50%;top:8px;z-index:21;width:92px;height:22px;transform:translateX(-50%);border-radius:0 0 14px 14px;background:#111923;pointer-events:none}
-.agentstudio-large-layout-preview>*:not(.ui-layout-wireframe):not(.agentstudio-large-preview-exit){opacity:.08!important;pointer-events:none!important}
-.agentstudio-large-layout-preview .ui-layout-wireframe,.agentstudio-large-layout-preview .agentstudio-large-preview-exit{opacity:1!important;pointer-events:auto!important}
+
+/*
+ * Actual-size preview is the existing Theme 미리보기 -> 전체 미리보기 modal.
+ * Keep its React controls live instead of creating a static/card-level preview.
+ */
+.ui-layout-theme-preview-modal.agentstudio-theme-actual-preview{
+  width:calc(100vw - 24px)!important;
+  height:calc(100vh - 24px)!important;
+  max-width:none!important;
+  max-height:none!important;
+  grid-template-rows:auto auto minmax(0,1fr) auto!important;
+}
+
+.ui-layout-theme-preview-modal.agentstudio-theme-actual-preview .ui-layout-theme-preview-modal-body{
+  position:relative!important;
+  min-height:0!important;
+  overflow:hidden!important;
+  padding:0!important;
+  background:
+    linear-gradient(rgba(76,111,139,.08) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(76,111,139,.08) 1px,transparent 1px),
+    #050d14!important;
+  background-size:24px 24px!important;
+}
+
+.ui-layout-theme-preview-modal.agentstudio-theme-actual-preview .ui-theme-preview{
+  position:absolute!important;
+  left:50%!important;
+  top:50%!important;
+  width:var(--agentstudio-preview-width)!important;
+  height:var(--agentstudio-preview-height)!important;
+  min-width:var(--agentstudio-preview-width)!important;
+  min-height:var(--agentstudio-preview-height)!important;
+  max-width:none!important;
+  transform:translate(-50%,-50%) scale(var(--agentstudio-preview-scale,1))!important;
+  transform-origin:center center!important;
+  display:block!important;
+}
+
+.ui-layout-theme-preview-modal.agentstudio-theme-actual-preview .ui-theme-preview::before{
+  content:attr(data-agentstudio-viewport-label);
+  position:absolute;
+  z-index:80;
+  left:12px;
+  top:10px;
+  padding:5px 9px;
+  border:1px solid rgba(124,179,218,.45);
+  border-radius:6px;
+  background:rgba(5,17,27,.88);
+  color:#dcefff;
+  font:12px/1.2 Consolas,'Courier New',monospace;
+  pointer-events:none;
+}
+
+.ui-layout-theme-preview-modal.agentstudio-theme-actual-preview .ui-theme-preview-browser{
+  width:100%!important;
+  height:100%!important;
+  max-width:none!important;
+  min-height:0!important;
+  display:flex!important;
+  flex-direction:column!important;
+  border-radius:8px!important;
+  box-shadow:0 24px 90px rgba(0,0,0,.58)!important;
+}
+
+.ui-layout-theme-preview-modal.agentstudio-theme-actual-preview .ui-theme-preview-body{
+  flex:1 1 auto!important;
+  min-height:0!important;
+}
+
+.ui-layout-theme-preview-modal.agentstudio-theme-actual-preview .ui-theme-preview-body>main{
+  overflow:auto!important;
+}
+
+.ui-layout-theme-preview-modal.agentstudio-theme-actual-preview[data-agentstudio-preview-viewport="tablet"] .ui-theme-preview-browser{
+  border:12px solid #17202b!important;
+  border-radius:28px!important;
+}
+
+.ui-layout-theme-preview-modal.agentstudio-theme-actual-preview[data-agentstudio-preview-viewport="mobile"] .ui-theme-preview-browser{
+  position:relative!important;
+  border:14px solid #111923!important;
+  border-radius:44px!important;
+  box-shadow:0 28px 96px rgba(0,0,0,.72)!important;
+}
+
+.ui-layout-theme-preview-modal.agentstudio-theme-actual-preview[data-agentstudio-preview-viewport="mobile"] .ui-theme-preview-browser::before{
+  content:'';
+  position:absolute;
+  left:50%;
+  top:-1px;
+  z-index:90;
+  width:92px;
+  height:22px;
+  transform:translateX(-50%);
+  border-radius:0 0 14px 14px;
+  background:#111923;
+  pointer-events:none;
+}
+
+/* Legacy gallery-card actual-size buttons are deliberately retired. */
+.agentstudio-large-preview-button,[data-agentstudio-large-preview-button]{display:none!important}
+
+@media(max-width:720px){
+  .ui-layout-theme-preview-modal.agentstudio-theme-actual-preview{
+    width:calc(100vw - 8px)!important;
+    height:calc(100vh - 8px)!important;
+  }
+}
