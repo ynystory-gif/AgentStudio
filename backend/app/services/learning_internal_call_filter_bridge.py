@@ -44,8 +44,6 @@ def _is_internal_learning_history_row(row: dict) -> bool:
 def _candidate_reason_without_internal_learning(row: dict, next_row: dict | None):
     if _is_internal_learning_history_row(row):
         return None
-    # Do not let an internal Teacher/Validator request act as user correction evidence
-    # for the preceding exchange either.
     safe_next = None if (next_row and _is_internal_learning_history_row(next_row)) else next_row
     return _original_candidate_reason(row, safe_next)
 
@@ -74,17 +72,21 @@ async def _quarantine_existing_internal_learning_cases() -> int:
 
 
 async def sync_misjudgment_candidates_without_internal_learning() -> dict:
+    # The runtime DB may be an older AgentStudio schema. Ensure the relational learning
+    # columns/tables exist before any ORM INSERT/SELECT references group_id.
+    from app.services.learning_relational_schema_service import ensure_learning_relational_schema
+
+    relational = await ensure_learning_relational_schema()
     result = await _original_sync_misjudgment_candidates()
     quarantined = await _quarantine_existing_internal_learning_cases()
     result["internal_learning_quarantined"] = quarantined
+    result["relational_mapping"] = relational
     return result
 
 
 learning._candidate_reason = _candidate_reason_without_internal_learning
 learning.sync_misjudgment_candidates = sync_misjudgment_candidates_without_internal_learning
 
-# learning_collection_service may already be imported by another bridge. Patch its
-# bound reference as well so every collection/list path uses the same safe sync.
 try:
     from app.services import learning_collection_service as collection
     collection.sync_misjudgment_candidates = sync_misjudgment_candidates_without_internal_learning
