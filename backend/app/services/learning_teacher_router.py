@@ -4,7 +4,9 @@ import asyncio
 import json
 import os
 import re
+import time
 import uuid
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -15,7 +17,27 @@ from app.core.machine_identity import current_pc_name
 from app.models.entities import AppSetting
 from app.services.codex_app_server_service import codex_app_server_manager
 from app.services.llm_provider import get_chat_model
-from app.services.llm_usage_service import UsageTrackedChatModel
+from app.services.llm_usage_service import (
+    UsageTrackedChatModel,
+    _safe_record_llm_exchange,
+    usage_context,
+)
+
+
+class _CodexHistoryModel:
+    """Minimal model identity object used by the common LLM history recorder."""
+
+    def __init__(self, model_name: str):
+        self.model_name = str(model_name or "codex-default")
+
+
+class _CodexHistoryResult:
+    """Normalize Codex app-server text so it renders like other LLM responses."""
+
+    def __init__(self, content: str):
+        self.content = str(content or "")
+        self.response_metadata = {"transport": "codex_app_server"}
+        self.usage_metadata = {}
 
 
 async def _pc_settings() -> dict[str, str]:
@@ -114,14 +136,59 @@ def _content_text(result: Any) -> str:
 
 async def _complete_provider(provider: str, prompt: str, model_name: str) -> str:
     if provider == "codex":
-        return await asyncio.to_thread(
-            codex_app_server_manager.run_text_completion,
-            prompt,
-            "",
-            "",
-            "",
-            240.0,
-        )
+        model = _CodexHistoryModel(model_name)
+        request = {
+            "provider": "codex",
+            "model": model.model_name,
+            "task": "llm_learning_teacher_generation",
+            "transport": "codex_app_server",
+            "input": prompt,
+        }
+        started_at = datetime.now().astimezone()
+        started_perf = time.perf_counter()
+        with usage_context(operation="llm_learning_teacher_generation"):
+            try:
+                text = await asyncio.to_thread(
+                    codex_app_server_manager.run_text_completion,
+                    prompt,
+                    "",
+                    "",
+                    "",
+                    240.0,
+                )
+                normalized = str(text or "").strip()
+                if not normalized:
+                    raise RuntimeError("codex가 빈 응답을 반환했습니다.")
+                _safe_record_llm_exchange(
+                    provider="codex",
+                    task="llm_learning_teacher_generation",
+                    model=model,
+                    request=request,
+                    result=_CodexHistoryResult(normalized),
+                    usage_row={
+                        "input_tokens": 0,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                        "cost_usd": 0.0,
+                        "usage_source": "codex_app_server_unavailable",
+                    },
+                    started_at=started_at,
+                    elapsed_ms=round((time.perf_counter() - started_perf) * 1000),
+                )
+                return normalized
+            except Exception as error:
+                _safe_record_llm_exchange(
+                    provider="codex",
+                    task="llm_learning_teacher_generation",
+                    model=model,
+                    request=request,
+                    error=error,
+                    started_at=started_at,
+                    elapsed_ms=round((time.perf_counter() - started_perf) * 1000),
+                )
+                raise
+
     tracked = UsageTrackedChatModel(
         get_chat_model(provider),
         provider,
