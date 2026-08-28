@@ -10,6 +10,10 @@ Users must not have to manually pull/select qwen3.5:4b before applying learning.
 This bridge wraps the existing rebuild job before API routes import the service.
 """
 
+# Keep the Learning Center queue aligned with the auto-confirm threshold.
+# This import patches learning_collection_service before learning_routes imports it.
+import app.services.learning_confidence_filter_bridge  # noqa: F401
+
 from app.services import learning_apply_job_service as apply_service
 from app.services.ollama_model_manager_service import (
     LATEST_RECOMMENDED_MODEL,
