@@ -14,6 +14,35 @@ function codeCell(value, title = '') {
   return td
 }
 
+function datasetTraceCell(dataset) {
+  const td = document.createElement('td')
+  td.setAttribute(mark, '1')
+  td.className = 'learning-dataset-trace-cell'
+
+  const caseBlock = document.createElement('div')
+  caseBlock.className = 'learning-dataset-trace-block'
+  const caseLabel = document.createElement('small')
+  caseLabel.textContent = '오판 ID'
+  const caseCode = document.createElement('code')
+  caseCode.className = 'learning-trace-id'
+  caseCode.textContent = String(dataset?.source_case_id || '-')
+  caseCode.title = `원본 오판 ID: ${dataset?.source_case_id || '-'}`
+  caseBlock.append(caseLabel, caseCode)
+
+  const datasetBlock = document.createElement('div')
+  datasetBlock.className = 'learning-dataset-trace-block'
+  const datasetLabel = document.createElement('small')
+  datasetLabel.textContent = 'Dataset ID'
+  const datasetCode = document.createElement('code')
+  datasetCode.className = 'learning-trace-id'
+  datasetCode.textContent = String(dataset?.id || '-')
+  datasetCode.title = `Dataset ID: ${dataset?.id || '-'}`
+  datasetBlock.append(datasetLabel, datasetCode)
+
+  td.append(caseBlock, datasetBlock)
+  return td
+}
+
 export function LearningDatasetTraceEnhancer() {
   const datasetsRef = useRef([])
 
@@ -35,18 +64,11 @@ export function LearningDatasetTraceEnhancer() {
 
       if (!headRow.querySelector(`[${mark}]`)) {
         const status = headRow.children[0]
-        const datasetTh = document.createElement('th')
-        datasetTh.setAttribute(mark, '1')
-        datasetTh.textContent = 'Dataset ID'
-        const caseTh = document.createElement('th')
-        caseTh.setAttribute(mark, '1')
-        caseTh.textContent = '오판 ID'
-        if (status?.nextSibling) {
-          headRow.insertBefore(caseTh, status.nextSibling)
-          headRow.insertBefore(datasetTh, caseTh)
-        } else {
-          headRow.append(datasetTh, caseTh)
-        }
+        const traceTh = document.createElement('th')
+        traceTh.setAttribute(mark, '1')
+        traceTh.textContent = '오판 / Dataset ID'
+        if (status?.nextSibling) headRow.insertBefore(traceTh, status.nextSibling)
+        else headRow.appendChild(traceTh)
       }
 
       const rows = Array.from(table.querySelectorAll('tbody tr'))
@@ -55,14 +77,9 @@ export function LearningDatasetTraceEnhancer() {
         if (!(row instanceof HTMLTableRowElement) || row.querySelector(`[${mark}]`)) return
         const dataset = datasets[index] || {}
         const status = row.children[0]
-        const datasetTd = codeCell(dataset.id, `Dataset ID: ${dataset.id || '-'}`)
-        const caseTd = codeCell(dataset.source_case_id, `원본 오판 ID: ${dataset.source_case_id || '-'}`)
-        if (status?.nextSibling) {
-          row.insertBefore(caseTd, status.nextSibling)
-          row.insertBefore(datasetTd, caseTd)
-        } else {
-          row.append(datasetTd, caseTd)
-        }
+        const traceTd = datasetTraceCell(dataset)
+        if (status?.nextSibling) row.insertBefore(traceTd, status.nextSibling)
+        else row.appendChild(traceTd)
       })
     }
 
@@ -85,11 +102,11 @@ export function LearningDatasetTraceEnhancer() {
         else viewer.prepend(trace)
       }
       trace.innerHTML = ''
-      const datasetCode = document.createElement('code')
-      datasetCode.textContent = `Dataset ID: ${dataset.id || '-'}`
       const caseCode = document.createElement('code')
       caseCode.textContent = `오판 ID: ${dataset.source_case_id || '-'}`
-      trace.append(datasetCode, caseCode)
+      const datasetCode = document.createElement('code')
+      datasetCode.textContent = `Dataset ID: ${dataset.id || '-'}`
+      trace.append(caseCode, datasetCode)
 
       const headRow = table.querySelector('thead tr')
       if (headRow instanceof HTMLTableRowElement && !headRow.querySelector(`[${mark}]`)) {
