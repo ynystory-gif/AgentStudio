@@ -125,6 +125,16 @@ _PUBLIC_API_PATHS = {
     "/api/auth/register",
 }
 
+# A signed-in user may need these endpoints before the current PC has been
+# registered to the account. They authenticate their own Bearer token inside
+# auth_routes, but do not require an existing member↔PC assignment.
+_AUTH_BOOTSTRAP_PATHS = {
+    "/api/auth/me",
+    "/api/auth/logout",
+    "/api/auth/current-pc",
+    "/api/auth/current-pc/register",
+}
+
 @app.middleware("http")
 async def _agentstudio_auth_guard(request: Request, call_next):
     path = request.url.path
@@ -143,7 +153,7 @@ async def _agentstudio_auth_guard(request: Request, call_next):
             },
         )
 
-    if request.method == "OPTIONS" or not path.startswith("/api/") or path in _PUBLIC_API_PATHS:
+    if request.method == "OPTIONS" or not path.startswith("/api/") or path in _PUBLIC_API_PATHS or path in _AUTH_BOOTSTRAP_PATHS:
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
@@ -151,8 +161,8 @@ async def _agentstudio_auth_guard(request: Request, call_next):
     if not member:
         return JSONResponse(status_code=401, content={"detail": "로그인이 필요합니다."})
     pc_name = current_pc_name()
-    if member.get("role") != "ADMIN" and pc_name not in set(member.get("pcs") or []):
-        return JSONResponse(status_code=403, content={"detail": f"현재 PC '{pc_name}' 사용 권한이 없습니다."})
+    if pc_name not in set(member.get("pcs") or []):
+        return JSONResponse(status_code=403, content={"detail": f"현재 PC '{pc_name}'가 이 사용자 계정에 등록되어 있지 않습니다. 우측 사용자 메뉴에서 '현재 PC 등록'을 먼저 실행하세요."})
     request.state.member = member
     return await call_next(request)
 
