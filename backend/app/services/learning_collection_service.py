@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.core.machine_identity import current_pc_name
-from app.models.learning_entities import LlmLearningDataset, LlmMisjudgmentCase
+from app.models.learning_entities import LlmLearningDataset, LlmLearningPcApplication, LlmMisjudgmentCase
 from app.services.llm_learning_service import (
     _case_dict,
     _dataset_dict,
@@ -20,6 +20,7 @@ from app.services.llm_learning_service import (
 )
 
 AUTO_CONFIRM_THRESHOLD = 0.75
+_PROBLEM_JOBS: dict[str, dict] = {}
 
 
 def _normalize(value: str) -> str:
@@ -49,8 +50,11 @@ def _same_family(a: dict, b: dict) -> bool:
     return SequenceMatcher(None, ar, br).ratio() >= 0.88
 
 
-def _date_value(value) -> datetime:
-    return value if isinstance(value, datetime) else datetime.min
+def _parse_iso(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(str(value or "").replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return datetime.min
 
 
 async def _auto_confirm_high_confidence() -> int:
@@ -66,8 +70,6 @@ async def _auto_confirm_high_confidence() -> int:
         ).scalars().all()
         for row in rows:
             row.status = "confirmed"
-            # Automatic confirmation means the signal is trusted as an error case.
-            # Generated answers are still only candidate learning data until Dataset validation.
             row.training_eligible = True
             row.updated_by_pc_name = current_pc_name()
             changed += 1
@@ -76,9 +78,71 @@ async def _auto_confirm_high_confidence() -> int:
     return changed
 
 
+async def _current_pc_applied_families() -> list[dict]:
+    """Return source error cases that were already applied on this PC.
+
+    Items that happened before application are hidden. If the same family fails again after
+    application, that new failure remains visible so AgentStudio can learn the regression.
+    """
+    pc_name = current_pc_name()
+    async with SessionLocal() as session:
+        apps = (
+            await session.execute(
+                select(LlmLearningPcApplication).where(
+                    LlmLearningPcApplication.pc_name == pc_name,
+                    LlmLearningPcApplication.enabled == True,
+                    LlmLearningPcApplication.installed == True,
+                )
+            )
+        ).scalars().all()
+        if not apps:
+            return []
+        dataset_ids = [row.dataset_id for row in apps]
+        datasets = (
+            await session.execute(
+                select(LlmLearningDataset).where(LlmLearningDataset.id.in_(dataset_ids))
+            )
+        ).scalars().all()
+        source_ids = [row.source_case_id for row in datasets if row.source_case_id]
+        sources = (
+            await session.execute(
+                select(LlmMisjudgmentCase).where(LlmMisjudgmentCase.id.in_(source_ids))
+            )
+        ).scalars().all() if source_ids else []
+
+    source_by_id = {row.id: _case_dict(row) for row in sources}
+    dataset_by_id = {row.id: row for row in datasets}
+    result: list[dict] = []
+    for app in apps:
+        dataset = dataset_by_id.get(app.dataset_id)
+        if not dataset:
+            continue
+        source = source_by_id.get(dataset.source_case_id)
+        if not source:
+            continue
+        result.append({
+            "source": source,
+            "applied_at": app.applied_at or app.updated_at or datetime.utcnow(),
+            "dataset_id": dataset.id,
+            "model_name": app.model_name,
+        })
+    return result
+
+
+def _hidden_by_applied_family(item: dict, applied_families: list[dict]) -> bool:
+    occurred = _parse_iso(str(item.get("created_at") or item.get("updated_at") or ""))
+    for applied in applied_families:
+        source = applied.get("source") or {}
+        applied_at = applied.get("applied_at") or datetime.min
+        if _same_family(source, item) and occurred <= applied_at:
+            return True
+    return False
+
+
 async def list_aggregated_misjudgment_cases(provider: str = "", status: str = "", limit: int = 500) -> dict:
     sync_result = await sync_misjudgment_candidates()
     auto_confirmed = await _auto_confirm_high_confidence()
+    applied_families = await _current_pc_applied_families()
     async with SessionLocal() as session:
         stmt = select(LlmMisjudgmentCase)
         if provider:
@@ -87,7 +151,8 @@ async def list_aggregated_misjudgment_cases(provider: str = "", status: str = ""
             stmt = stmt.where(LlmMisjudgmentCase.status == status)
         rows = (await session.execute(stmt.order_by(LlmMisjudgmentCase.updated_at.desc()))).scalars().all()
 
-    raw = [_case_dict(row) for row in rows]
+    raw_all = [_case_dict(row) for row in rows]
+    raw = [item for item in raw_all if not _hidden_by_applied_family(item, applied_families)]
     groups: list[dict] = []
     for item in raw:
         matched = None
@@ -126,7 +191,8 @@ async def list_aggregated_misjudgment_cases(provider: str = "", status: str = ""
         "ok": True,
         "items": items,
         "total": len(items),
-        "raw_total": len(raw),
+        "raw_total": len(raw_all),
+        "hidden_applied_count": len(raw_all) - len(raw),
         "providers": providers,
         "auto_confirmed": auto_confirmed,
         "threshold": AUTO_CONFIRM_THRESHOLD,
@@ -162,22 +228,7 @@ async def _generate_candidate_dataset(case_row: LlmMisjudgmentCase, target_count
     return dataset
 
 
-async def collect_learning_problems(
-    target_per_case: int = 100,
-    max_cases: int = 5,
-    provider: str = "ollama",
-) -> dict:
-    """Generate candidate learning problems from confirmed error families.
-
-    This is intentionally separate from error collection. Generated answers are NOT
-    trusted training truth; datasets stay in review until the existing Validator flow
-    marks them validated.
-    """
-    await sync_misjudgment_candidates()
-    await _auto_confirm_high_confidence()
-    target_per_case = max(10, min(int(target_per_case or 100), 500))
-    max_cases = max(1, min(int(max_cases or 5), 20))
-
+async def _select_problem_sources(max_cases: int) -> list[LlmMisjudgmentCase]:
     async with SessionLocal() as session:
         confirmed = (
             await session.execute(
@@ -186,9 +237,7 @@ async def collect_learning_problems(
                 .order_by(LlmMisjudgmentCase.updated_at.desc())
             )
         ).scalars().all()
-        existing_source_ids = set(
-            (await session.execute(select(LlmLearningDataset.source_case_id))).scalars().all()
-        )
+        existing_source_ids = set((await session.execute(select(LlmLearningDataset.source_case_id))).scalars().all())
         selected: list[LlmMisjudgmentCase] = []
         for row in confirmed:
             if row.id in existing_source_ids:
@@ -199,6 +248,15 @@ async def collect_learning_problems(
             selected.append(row)
             if len(selected) >= max_cases:
                 break
+        return selected
+
+
+async def collect_learning_problems(target_per_case: int = 100, max_cases: int = 20, provider: str = "ollama") -> dict:
+    await sync_misjudgment_candidates()
+    await _auto_confirm_high_confidence()
+    target_per_case = max(10, min(int(target_per_case or 100), 500))
+    max_cases = max(1, min(int(max_cases or 20), 20))
+    selected = await _select_problem_sources(max_cases)
 
     created: list[dict] = []
     errors: list[dict] = []
@@ -219,8 +277,107 @@ async def collect_learning_problems(
         "datasets": created,
         "errors": errors,
         "message": (
-            f"확정 오판 범위 {len(created)}건에서 후보 학습 문제를 수집했습니다. Dataset 검증 전에는 학습에 사용되지 않습니다."
-            if created else
-            "새로 문제를 수집할 확정 오판 범위가 없습니다."
+            f"확정 오판 주제 {len(created)}개에서 후보 학습 문제를 수집했습니다. Dataset 검증 전에는 학습에 사용되지 않습니다."
+            if created else "새로 문제를 수집할 확정 오판 주제가 없습니다."
         ),
     }
+
+
+def _set_problem_job(job_id: str, progress: int, stage: str, message: str, **extra) -> None:
+    job = _PROBLEM_JOBS.setdefault(job_id, {})
+    job.update({
+        "id": job_id,
+        "progress": max(0, min(100, int(progress))),
+        "stage": stage,
+        "message": message,
+        "updated_at": datetime.utcnow().isoformat(),
+        **extra,
+    })
+
+
+async def _run_problem_collection_job(job_id: str, target_per_case: int, max_cases: int, provider: str) -> None:
+    try:
+        _set_problem_job(job_id, 5, "sync", "오판 수집 기록을 공용 DB와 동기화 중...", status="running")
+        await sync_misjudgment_candidates()
+        await _auto_confirm_high_confidence()
+        selected = await _select_problem_sources(max_cases)
+        if not selected:
+            _set_problem_job(job_id, 100, "done", "새로 문제를 수집할 확정 오판 주제가 없습니다.", status="completed", result={"created": 0, "datasets": []})
+            return
+
+        total = len(selected)
+        created: list[dict] = []
+        errors: list[dict] = []
+        for index, row in enumerate(selected, start=1):
+            start_progress = 10 + int(((index - 1) / total) * 80)
+            _set_problem_job(
+                job_id,
+                start_progress,
+                "generate",
+                f"오판 주제 {index}/{total} 분석 및 관련 문제 {target_per_case}개 생성 중...",
+                status="running",
+                current_topic=index,
+                total_topics=total,
+            )
+            try:
+                dataset = await _generate_candidate_dataset(row, target_per_case, provider)
+                async with SessionLocal() as session:
+                    session.add(dataset)
+                    await session.commit()
+                    await session.refresh(dataset)
+                created.append(_dataset_dict(dataset))
+            except Exception as exc:
+                errors.append({"case_id": row.id, "message": str(exc) or type(exc).__name__})
+            end_progress = 10 + int((index / total) * 80)
+            _set_problem_job(
+                job_id,
+                end_progress,
+                "generate",
+                f"오판 주제 {index}/{total} 처리 완료 · Dataset {len(created)}개 생성",
+                status="running",
+                current_topic=index,
+                total_topics=total,
+            )
+
+        result = {"created": len(created), "datasets": created, "errors": errors}
+        if created:
+            _set_problem_job(
+                job_id,
+                100,
+                "done",
+                f"문제 수집 완료 · Dataset {len(created)}개를 생성했습니다.",
+                status="completed" if not errors else "completed",
+                result=result,
+            )
+        else:
+            _set_problem_job(job_id, 100, "failed", "문제 Dataset을 생성하지 못했습니다.", status="failed", error="; ".join(x["message"] for x in errors), result=result)
+    except Exception as exc:
+        _set_problem_job(job_id, int(_PROBLEM_JOBS.get(job_id, {}).get("progress") or 0), "failed", str(exc) or type(exc).__name__, status="failed", error=str(exc) or type(exc).__name__)
+
+
+async def start_problem_collection_job(target_per_case: int = 100, max_cases: int = 20, provider: str = "ollama") -> dict:
+    target = max(10, min(int(target_per_case or 100), 500))
+    maximum = max(1, min(int(max_cases or 20), 20))
+    for job in _PROBLEM_JOBS.values():
+        if job.get("status") == "running":
+            return dict(job)
+    job_id = uuid.uuid4().hex
+    _set_problem_job(
+        job_id,
+        1,
+        "queued",
+        "문제 수집 작업을 준비합니다.",
+        status="running",
+        target_per_topic=target,
+        max_topics=maximum,
+        created_at=datetime.utcnow().isoformat(),
+    )
+    asyncio.create_task(_run_problem_collection_job(job_id, target, maximum, provider))
+    return dict(_PROBLEM_JOBS[job_id])
+
+
+async def get_problem_collection_job(job_id: str) -> dict:
+    job = _PROBLEM_JOBS.get(str(job_id or ""))
+    if not job:
+        raise KeyError("문제 수집 작업을 찾을 수 없습니다.")
+    return dict(job)
