@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Float, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -43,7 +43,11 @@ class LlmMisjudgmentCase(Base):
 
 
 class LlmLearningDataset(Base):
-    """Validated/generated dataset metadata and problems shared across AgentStudio PCs."""
+    """Generated/validated learning data shared across every AgentStudio PC.
+
+    Dataset state is global. Whether a trained model is installed/enabled is intentionally
+    NOT stored here because deployment is machine-specific.
+    """
 
     __tablename__ = "llm_learning_datasets"
 
@@ -65,4 +69,31 @@ class LlmLearningDataset(Base):
     split_json: Mapped[dict] = mapped_column(JSON, default=dict)
     training_json: Mapped[dict] = mapped_column(JSON, default=dict)
     evaluation_json: Mapped[dict] = mapped_column(JSON, default=dict)
-    deployment_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    deployment_json: Mapped[dict] = mapped_column(JSON, default=dict)  # legacy/global history only; new per-PC state is below.
+
+
+class LlmLearningPcApplication(Base):
+    """Per-PC application state for one shared learning dataset/model.
+
+    A and B PCs can read the same dataset while independently installing, enabling,
+    disabling, or selecting different learned Ollama models.
+    """
+
+    __tablename__ = "llm_learning_pc_applications"
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "pc_name", name="uq_llm_learning_dataset_pc"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    dataset_id: Mapped[str] = mapped_column(String(64), index=True)
+    pc_name: Mapped[str] = mapped_column(String(255), index=True)
+    model_name: Mapped[str] = mapped_column(String(300), default="")
+    base_model: Mapped[str] = mapped_column(String(300), default="")
+    adapter_path: Mapped[str] = mapped_column(String(1600), default="")
+    installed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="not_applied", index=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
