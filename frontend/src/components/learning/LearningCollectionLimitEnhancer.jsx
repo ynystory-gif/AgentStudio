@@ -5,6 +5,7 @@ import { useEffect } from 'react'
  *
  * - The number of misjudgment topics is taken from the current list automatically.
  * - At most 10 topics are collected in one run.
+ * - Zero visible cases means zero collection targets; the collection button is disabled.
  * - The learning page itself scrolls vertically so the case list is not squeezed into
  *   the tiny remaining viewport below the header/metrics/toolbars.
  *
@@ -45,8 +46,9 @@ export function LearningCollectionLimitEnhancer() {
     }
 
     const visibleCaseCount = () => {
-      const count = document.querySelectorAll('.llm-case-table tbody tr').length
-      return Math.max(1, Math.min(10, count || 1))
+      const rows = Array.from(document.querySelectorAll('.llm-case-table tbody tr'))
+      const actualRows = rows.filter(row => row.querySelector('td'))
+      return Math.min(10, actualRows.length)
     }
 
     const refreshLabels = () => {
@@ -55,12 +57,26 @@ export function LearningCollectionLimitEnhancer() {
       const problemButton = buttons.find(button => String(button.textContent || '').includes('문제 수집'))
       if (problemButton) {
         problemButton.textContent = `＋ 문제 수집 (오판 ${count}개)`
-        problemButton.title = `현재 오판 목록 기준 ${count}개 주제를 처리합니다. 한 번에 최대 10개까지 처리합니다.`
+        problemButton.title = count > 0
+          ? `현재 오판 목록 기준 ${count}개 주제를 처리합니다. 한 번에 최대 10개까지 처리합니다.`
+          : '현재 문제를 생성할 오판 항목이 없습니다.'
+        // Preserve the learning center's own busy/processing disabled state and add
+        // the zero-target guard without enabling a button React has disabled.
+        if (count === 0) {
+          problemButton.setAttribute('data-learning-zero-target', 'true')
+          problemButton.setAttribute('disabled', '')
+        } else if (problemButton.getAttribute('data-learning-zero-target') === 'true') {
+          problemButton.removeAttribute('data-learning-zero-target')
+          const busy = Boolean(document.querySelector('.llm-job-progress:not(.completed):not(.failed)'))
+          if (!busy) problemButton.removeAttribute('disabled')
+        }
       }
 
       const help = document.querySelector('.llm-problem-help')
       if (help) {
-        help.innerHTML = `<b>문제 수집:</b> 현재 오판 목록의 아이템 수를 자동으로 사용합니다. 한 번에 최대 <b>10개 주제</b>까지 처리하며, 현재 대상은 <b>${count}개</b>입니다. 주제당 생성할 문제 수만 선택하면 됩니다.`
+        help.innerHTML = count > 0
+          ? `<b>문제 수집:</b> 현재 오판 목록의 아이템 수를 자동으로 사용합니다. 한 번에 최대 <b>10개 주제</b>까지 처리하며, 현재 대상은 <b>${count}개</b>입니다. 주제당 생성할 문제 수만 선택하면 됩니다.`
+          : '<b>문제 수집:</b> 현재 문제를 생성할 오판 항목이 없습니다. 오판이 수집되면 목록 개수 기준으로 최대 <b>10개 주제</b>까지 자동 선택합니다.'
       }
     }
 
@@ -76,6 +92,12 @@ export function LearningCollectionLimitEnhancer() {
       if (!button || !String(button.textContent || '').includes('문제 수집')) return
 
       const automaticCount = visibleCaseCount()
+      if (automaticCount <= 0) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
+
       const previousPrompt = window.prompt
       let topicPromptHandled = false
       const patchedPrompt = (message, defaultValue) => {
