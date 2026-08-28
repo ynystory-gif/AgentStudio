@@ -62,8 +62,8 @@ async def lifespan(app: FastAPI):
         try:
             history_prune = prune_llm_history(force=True)
             print(f"[완료되었습니다] LLM 요청/응답 10일 보관 정리: 삭제 {history_prune.get('removed', 0)}개")
-            learning_sync = sync_misjudgment_candidates()
-            print(f"[완료되었습니다] LLM 오판 학습 후보 동기화: 신규 {learning_sync.get('added', 0)}개 · 전체 {learning_sync.get('total', 0)}개")
+            learning_sync = await sync_misjudgment_candidates()
+            print(f"[완료되었습니다] LLM 오판 학습 후보 공용 DB 동기화: 신규 {learning_sync.get('added', 0)}개 · 전체 {learning_sync.get('total', 0)}개")
         except Exception as history_error:
             print(f"[경고] LLM 요청/응답/학습 후보 정리 실패: {history_error}")
     except Exception as e:
