@@ -3,12 +3,15 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from app.services.learning_collection_service import (
+    collect_learning_problems,
+    list_aggregated_misjudgment_cases,
+)
 from app.services.llm_learning_service import (
     add_manual_misjudgment_case,
     generate_problem_dataset,
     learning_summary,
     list_datasets,
-    list_misjudgment_cases,
     prepare_training,
     record_evaluation,
     review_misjudgment_case,
@@ -21,8 +24,9 @@ from app.services.llm_learning_pc_application_service import (
     set_current_pc_application_enabled,
 )
 from app.services.ollama_model_manager_service import (
-    download_and_apply_recommended_model,
+    get_recommended_model_job,
     get_recommended_model_status,
+    start_recommended_model_job,
 )
 
 router = APIRouter(prefix="/learning", tags=["LLM Learning"])
@@ -55,6 +59,12 @@ class ManualMisjudgmentRequest(BaseModel):
 class ProblemGenerationRequest(BaseModel):
     case_id: str
     target_count: int = 100
+    provider: str = "ollama"
+
+
+class ProblemCollectionRequest(BaseModel):
+    target_per_case: int = 100
+    max_cases: int = 5
     provider: str = "ollama"
 
 
@@ -96,19 +106,22 @@ async def recommended_ollama_status():
     return await get_recommended_model_status()
 
 
-@router.post("/recommended-ollama/download-apply")
-async def recommended_ollama_download_apply():
+@router.post("/recommended-ollama/download-job")
+async def recommended_ollama_download_job():
     try:
-        return await download_and_apply_recommended_model()
+        return await start_recommended_model_job()
     except ValueError as exc:
-        detail = str(exc).strip() or repr(exc)
-        raise HTTPException(status_code=422, detail=detail) from exc
-    except Exception as exc:
-        detail = str(exc).strip() or repr(exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"qwen3.5:4b 다운로드/적용 실패: {detail}",
-        ) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc) or type(exc).__name__) from exc
+
+
+@router.get("/recommended-ollama/download-job/{job_id}")
+async def recommended_ollama_download_job_status(job_id: str):
+    try:
+        return await get_recommended_model_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/misjudgments/sync")
@@ -122,7 +135,7 @@ async def misjudgments(
     status: str = Query(default=""),
     limit: int = Query(default=500, ge=1, le=2000),
 ):
-    return await list_misjudgment_cases(provider, status, limit)
+    return await list_aggregated_misjudgment_cases(provider, status, limit)
 
 
 @router.post("/misjudgments/manual")
@@ -140,6 +153,14 @@ async def review_case(case_id: str, req: MisjudgmentReviewRequest):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.post("/problems/collect")
+async def collect_problems(req: ProblemCollectionRequest):
+    try:
+        return await collect_learning_problems(req.target_per_case, req.max_cases, req.provider)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc) or type(exc).__name__) from exc
+
+
 @router.post("/datasets/generate")
 async def generate_dataset(req: ProblemGenerationRequest):
     try:
@@ -149,7 +170,7 @@ async def generate_dataset(req: ProblemGenerationRequest):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"관련 문제 대량 생성 실패: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"관련 문제 대량 생성 실패: {str(exc) or type(exc).__name__}") from exc
 
 
 @router.get("/datasets")
@@ -163,10 +184,7 @@ async def datasets():
     for dataset in result.get("items", []):
         rows = by_dataset.get(str(dataset.get("id") or ""), [])
         dataset["pc_applications"] = rows
-        dataset["current_pc_application"] = next(
-            (row for row in rows if row.get("pc_name") == current_pc),
-            None,
-        )
+        dataset["current_pc_application"] = next((row for row in rows if row.get("pc_name") == current_pc), None)
     result["current_pc_name"] = current_pc
     result["dataset_scope"] = "shared_all_pcs"
     result["application_scope"] = "per_pc"
@@ -213,7 +231,6 @@ async def all_pc_applications(current_pc_only: bool = Query(default=False)):
 
 @router.post("/datasets/{dataset_id}/apply-ollama")
 async def apply(dataset_id: str, req: OllamaApplyRequest):
-    """Apply the shared trained dataset/model only to the PC making this request."""
     try:
         return await apply_to_ollama_for_current_pc(dataset_id, req.model_name, req.adapter_path)
     except KeyError as exc:
