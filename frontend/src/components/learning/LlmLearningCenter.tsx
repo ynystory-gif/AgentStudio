@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { api } from '../../api'
-import { StudioIcon } from '../common/CommonUi'
 
 type CaseRow = Record<string, any>
 type DatasetRow = Record<string, any>
@@ -58,7 +57,7 @@ export function LlmLearningCenter() {
     ])
     setSummary(s||{});setCases(c?.items||[]);setDatasets(d?.items||[])
   }
-  useEffect(()=>{if(open) refresh().catch(e=>setMessage(String(e)))},[open,provider])
+  useEffect(()=>{if(open)refresh().catch(e=>setMessage(String(e)))},[open,provider])
 
   const providers=useMemo(()=>Array.from(new Set(cases.map(x=>String(x.provider||'unknown')))),[cases])
   const run=async(label:string,fn:()=>Promise<any>)=>{setBusy(label);setMessage('');try{const result=await fn();setMessage(result?.message||'완료되었습니다.');await refresh()}catch(e){setMessage(String(e))}finally{setBusy('')}}
@@ -99,9 +98,14 @@ export function LlmLearningCenter() {
   if(onSystemPage||!navHost||!contentHost)return null
 
   const nav=createPortal(
-    <span data-agentstudio-learning-nav="true" className="llm-learning-native-nav-slot">
-      <StudioIcon active={open} onClick={()=>setOpen(v=>!v)} title="LLM 학습">♧</StudioIcon>
-    </span>,
+    <button
+      type="button"
+      data-agentstudio-learning-nav="true"
+      className={open?'studio-nav-icon active':'studio-nav-icon'}
+      onClick={()=>setOpen(v=>!v)}
+      title="LLM 학습"
+      aria-label="LLM 학습"
+    >♧</button>,
     navHost
   )
 
@@ -115,7 +119,7 @@ export function LlmLearningCenter() {
           <div><small>현재 Ollama</small><strong>{summary.current_ollama_model||'-'}</strong></div>
           <div><small>권장 최신 로컬 모델</small><strong>{recommended.recommended_model||'qwen3.5:4b'}</strong></div>
           <div className="llm-learning-model-path"><small>공통 모델 관리 경로</small><code>{recommended.common_models_root||'설정되지 않음'}</code></div>
-          <button disabled={!!busy||summary.current_ollama_model==='qwen3.5:4b'} onClick={downloadRecommended}>{summary.current_ollama_model==='qwen3.5:4b'?'qwen3.5:4b 적용됨':'qwen3.5:4b 다운로드 및 적용'}</button>
+          <button disabled={!!busy||summary.current_ollama_model==='qwen3.5:4b'} onClick={downloadRecommended}>{busy==='qwen3.5:4b 다운로드·적용'?'다운로드/적용 중...':summary.current_ollama_model==='qwen3.5:4b'?'qwen3.5:4b 적용됨':'qwen3.5:4b 다운로드 및 적용'}</button>
         </div>
         <div className="llm-learning-metrics"><div><b>{summary?.cases?.candidate||0}</b><span>검토 대기</span></div><div><b>{summary?.cases?.confirmed||0}</b><span>확정 오판</span></div><div><b>{datasets.length}</b><span>공용 Dataset</span></div><div><b>{summary.current_ollama_model||'-'}</b><span>현재 Ollama</span></div></div>
         <nav><button className={tab==='cases'?'active':''} onClick={()=>setTab('cases')}>1. 오판/문제 생성</button><button className={tab==='datasets'?'active':''} onClick={()=>setTab('datasets')}>2. Dataset 검증</button><button className={tab==='training'?'active':''} onClick={()=>setTab('training')}>3. 학습·평가·PC별 적용</button><span/><button disabled={!!busy} onClick={()=>run('동기화',()=>api('/learning/misjudgments/sync',{method:'POST'}))}>↻ 이 PC 수집 → 공용 DB</button></nav>
