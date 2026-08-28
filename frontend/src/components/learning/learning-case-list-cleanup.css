@@ -1,0 +1,71 @@
+/* LLM learning misjudgment list cleanup.
+   Keep the case list focused on traceable error information. */
+
+/* The learning-data state is already available in Dataset/PC apply tabs.
+   Hide the redundant case-list column and its old explanatory hint. */
+.llm-case-table th:nth-child(8),
+.llm-case-table td:nth-child(8) {
+  display: none !important;
+}
+
+.llm-learning-filter em {
+  display: none !important;
+}
+
+/* Rebalance the 9 visible columns after adding the misjudgment ID column. */
+.llm-case-table {
+  min-width: 1480px !important;
+  table-layout: fixed !important;
+}
+
+.llm-case-table th:nth-child(1) { width: 86px !important; }   /* 상태 */
+.llm-case-table th:nth-child(2) { width: 210px !important; }  /* 오판 ID */
+.llm-case-table th:nth-child(3) { width: 64px !important; }   /* 횟수 */
+.llm-case-table th:nth-child(4) { width: 145px !important; }  /* 최근 발생 */
+.llm-case-table th:nth-child(5) { width: 135px !important; }  /* 수집 PC */
+.llm-case-table th:nth-child(6) { width: 165px !important; }  /* Provider / Model */
+.llm-case-table th:nth-child(7) { width: 190px !important; }  /* 감지 사유 */
+.llm-case-table th:nth-child(9) { width: 400px !important; }  /* 요청 / 결과 */
+.llm-case-table th:nth-child(10) { width: 85px !important; }  /* 작업 */
+
+/* IDs must stay readable without consuming the whole row. */
+.llm-case-table td:nth-child(2) {
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Keep metadata compact and give the actual request/result more room. */
+.llm-case-table td:nth-child(3),
+.llm-case-table td:nth-child(4),
+.llm-case-table td:nth-child(5),
+.llm-case-table td:nth-child(6),
+.llm-case-table td:nth-child(7),
+.llm-case-table td:nth-child(10) {
+  font-size: 11px;
+}
+
+.llm-case-table .case-text-scroll {
+  height: 170px;
+}
+
+/* Use the available page height for the list and let the learning page/body scroll. */
+.llm-learning-page {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+
+.llm-learning-body {
+  flex: none !important;
+  min-height: 520px !important;
+  overflow: auto !important;
+  padding-bottom: 28px !important;
+}
+
+@media (max-height: 850px) {
+  .llm-learning-body {
+    min-height: 430px !important;
+  }
+}
