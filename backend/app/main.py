@@ -36,6 +36,7 @@ from app.core.machine_identity import ensure_pc_name_env, current_pc_name
 from app.services.project_root_registry import restore_registered_project_roots
 from app.services.llm_usage_service import prune_llm_history
 from app.services.llm_learning_service import sync_misjudgment_candidates
+from app.services.learning_visibility_bridge import backfill_current_pc_learning_group_mappings
 from app.services.auth_service import authenticate_token
 from app.services.database_runtime_service import apply_saved_database_provider
 from app.services.chromium_browser_service import chromium_browser_manager
@@ -80,8 +81,15 @@ async def lifespan(app: FastAPI):
             print(f"[완료되었습니다] LLM 요청/응답 10일 보관 정리: 삭제 {history_prune.get('removed', 0)}개")
             learning_sync = await sync_misjudgment_candidates()
             print(f"[완료되었습니다] LLM 오판 학습 후보 공용 DB 동기화: 신규 {learning_sync.get('added', 0)}개 · 전체 {learning_sync.get('total', 0)}개")
+            mapping_backfill = await backfill_current_pc_learning_group_mappings()
+            print(
+                "[완료되었습니다] 기존 학습 Dataset 그룹 키 보정: "
+                f"Dataset {mapping_backfill.get('backfilled_dataset_count', 0)}개 · "
+                f"학습 Case {mapping_backfill.get('learned_case_count', 0)}개 · "
+                f"그룹 {mapping_backfill.get('learned_family_count', 0)}개"
+            )
         except Exception as history_error:
-            print(f"[경고] LLM 요청/응답/학습 후보 정리 실패: {history_error}")
+            print(f"[경고] LLM 요청/응답/학습 후보/그룹 키 정리 실패: {history_error}")
     except Exception as e:
         orig = getattr(e, "orig", None)
         sqlstate = str(getattr(orig, "sqlstate", "") or getattr(orig, "pgcode", "") or "")
