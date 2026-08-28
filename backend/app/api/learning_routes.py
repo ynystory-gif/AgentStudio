@@ -101,9 +101,14 @@ async def recommended_ollama_download_apply():
     try:
         return await download_and_apply_recommended_model()
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        detail = str(exc).strip() or repr(exc)
+        raise HTTPException(status_code=422, detail=detail) from exc
+    except Exception as exc:
+        detail = str(exc).strip() or repr(exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"qwen3.5:4b 다운로드/적용 실패: {detail}",
+        ) from exc
 
 
 @router.post("/misjudgments/sync")
