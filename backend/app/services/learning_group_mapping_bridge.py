@@ -9,11 +9,13 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.models.learning_entities import LlmMisjudgmentCase
+from app.services import learning_apply_job_service as apply_service
 from app.services import learning_collection_service as collection
 from app.services.llm_learning_service import _case_dict
 
 
 _original_generate_candidate_dataset = collection._generate_candidate_dataset
+_original_save_cumulative_applications = apply_service._save_cumulative_applications
 
 
 def _group_key(case_ids: list[str]) -> str:
@@ -51,13 +53,11 @@ async def _generate_candidate_dataset_with_group_mapping(
     target_count: int,
     provider: str,
 ):
-    # Collection starts with relational-schema sync, so case_row.group_id is normally
-    # available here. Re-read it to avoid carrying a stale ORM instance across sessions.
     dataset = await _original_generate_candidate_dataset(case_row, target_count, provider)
     group_case_ids, relational_group_id = await _family_snapshot(str(case_row.id))
     dataset.group_id = relational_group_id
 
-    # Keep legacy JSON during migration, but relational group_id/group-case rows are now
+    # Legacy JSON is retained during migration, but group_id/group-case rows are now
     # authoritative for new data.
     deployment = dict(dataset.deployment_json or {})
     deployment.update({
@@ -72,4 +72,26 @@ async def _generate_candidate_dataset_with_group_mapping(
     return dataset
 
 
+async def _save_cumulative_applications_with_relational_mapping(
+    datasets,
+    base_model,
+    modelfile,
+    problem_counts,
+    include_all,
+):
+    await _original_save_cumulative_applications(
+        datasets,
+        base_model,
+        modelfile,
+        problem_counts,
+        include_all,
+    )
+    # Immediately normalize Dataset -> Problem and Dataset -> PC application group IDs.
+    # No second restart/sync is required before the learned state becomes traceable.
+    from app.services.learning_relational_schema_service import backfill_learning_relational_mappings
+
+    await backfill_learning_relational_mappings()
+
+
 collection._generate_candidate_dataset = _generate_candidate_dataset_with_group_mapping
+apply_service._save_cumulative_applications = _save_cumulative_applications_with_relational_mapping
