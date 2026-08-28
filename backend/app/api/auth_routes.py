@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
-from app.services.auth_service import authenticate_token, list_members, login, logout, register_member, set_member_pcs, update_member_admin
+from app.services.auth_service import authenticate_token, list_members, list_registered_pcs, login, logout, register_member, set_member_pcs, update_member_admin
 router=APIRouter(prefix='/auth',tags=['Auth'])
 
 def _bearer(value:str)->str:
@@ -31,6 +31,8 @@ async def me(authorization:str=Header(default='')):return {'ok':True,'member':aw
 async def do_logout(authorization:str=Header(default='')):return await logout(_bearer(authorization))
 @router.get('/members')
 async def members(authorization:str=Header(default='')):await _admin(authorization);return await list_members()
+@router.get('/pcs')
+async def pcs(authorization:str=Header(default='')):await _admin(authorization);return await list_registered_pcs()
 @router.patch('/members/{member_id}')
 async def update_member(member_id:str,req:MemberUpdateReq,authorization:str=Header(default='')):
     await _admin(authorization)
