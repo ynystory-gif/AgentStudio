@@ -3,9 +3,15 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from app.services.learning_apply_job_service import (
+    get_learning_apply_job,
+    start_learning_apply_job,
+)
 from app.services.learning_collection_service import (
     collect_learning_problems,
+    get_problem_collection_job,
     list_aggregated_misjudgment_cases,
+    start_problem_collection_job,
 )
 from app.services.llm_learning_service import (
     add_manual_misjudgment_case,
@@ -64,7 +70,7 @@ class ProblemGenerationRequest(BaseModel):
 
 class ProblemCollectionRequest(BaseModel):
     target_per_case: int = 100
-    max_cases: int = 5
+    max_cases: int = 20
     provider: str = "ollama"
 
 
@@ -95,9 +101,13 @@ class PcApplicationEnableRequest(BaseModel):
 async def summary():
     result = await learning_summary()
     applications = await list_pc_applications(include_all_pcs=True)
+    recommended = await get_recommended_model_status()
     result["pc_applications"] = applications.get("items", [])
     result["application_scope"] = "per_pc"
-    result["recommended_ollama"] = await get_recommended_model_status()
+    result["recommended_ollama"] = recommended
+    # The PC-specific model selection is the runtime truth. learning_summary's
+    # cached Settings value may still represent an older bootstrap default.
+    result["current_ollama_model"] = str(recommended.get("current_model") or result.get("current_ollama_model") or "")
     return result
 
 
@@ -155,10 +165,29 @@ async def review_case(case_id: str, req: MisjudgmentReviewRequest):
 
 @router.post("/problems/collect")
 async def collect_problems(req: ProblemCollectionRequest):
+    """Backward-compatible synchronous collection endpoint."""
     try:
         return await collect_learning_problems(req.target_per_case, req.max_cases, req.provider)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc) or type(exc).__name__) from exc
+
+
+@router.post("/problems/collect-job")
+async def collect_problems_job(req: ProblemCollectionRequest):
+    try:
+        return await start_problem_collection_job(req.target_per_case, req.max_cases, req.provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc) or type(exc).__name__) from exc
+
+
+@router.get("/problems/collect-job/{job_id}")
+async def collect_problems_job_status(job_id: str):
+    try:
+        return await get_problem_collection_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/datasets/generate")
@@ -189,6 +218,26 @@ async def datasets():
     result["dataset_scope"] = "shared_all_pcs"
     result["application_scope"] = "per_pc"
     return result
+
+
+@router.post("/datasets/{dataset_id}/learning-apply-job")
+async def learning_apply_job(dataset_id: str):
+    try:
+        return await start_learning_apply_job(dataset_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc) or type(exc).__name__) from exc
+
+
+@router.get("/learning-apply-job/{job_id}")
+async def learning_apply_job_status(job_id: str):
+    try:
+        return await get_learning_apply_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/datasets/{dataset_id}/validate")
