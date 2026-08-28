@@ -75,7 +75,7 @@ async def current_pc_status(member_id:str)->dict:
         row=await s.get(AgentStudioMember,member_id)
         if not row: raise KeyError('회원을 찾을 수 없습니다.')
         pcs=list((await s.execute(select(AgentStudioMemberPc.pc_name).where(AgentStudioMemberPc.member_id==member_id))).scalars().all())
-        machine=await s.get(AgentStudioMachine,pc)
+        machine=(await s.execute(select(AgentStudioMachine).where(AgentStudioMachine.pc_name==pc))).scalar_one_or_none()
         return {
             'ok':True,
             'current_pc_name':pc,
