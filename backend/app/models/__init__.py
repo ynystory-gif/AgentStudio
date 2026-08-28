@@ -5,3 +5,8 @@ from app.models.learning_entities import (  # noqa: F401
     LlmLearningPcApplication,
     LlmMisjudgmentCase,
 )
+from app.models.auth_entities import (  # noqa: F401
+    AgentStudioAuthSession,
+    AgentStudioMember,
+    AgentStudioMemberPc,
+)
