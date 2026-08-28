@@ -6,8 +6,10 @@ The key rule is explicit identity mapping, not fuzzy display inference:
 
     misjudgment group case ids -> Dataset.deployment_json -> PC application
 
-New Datasets receive ``source_group_case_ids`` when problems are collected.  Legacy
-Datasets are lazily backfilled from their representative source and application cutoff.
+New Datasets receive ``source_group_case_ids`` when problems are collected. Legacy
+Datasets are backfilled from their representative source and application cutoff. The
+backfill can run both at AgentStudio startup and lazily during list reads, so existing
+Datasets do not need to be regenerated or relearned.
 """
 
 # Block internal Teacher/Validator/problem-generation telemetry before it can re-enter
@@ -111,8 +113,8 @@ async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
             source_dict = _case_dict(source_row) if source_row is not None else {}
 
             if not mapped_ids:
-                # Legacy Dataset: recover the exact historical family snapshot. Never
-                # include occurrences newer than applied_at; those are true recurrences.
+                # Legacy Dataset: recover the historical family snapshot. Never include
+                # occurrences newer than applied_at; those remain true recurrences.
                 if source_row is not None:
                     for row in all_cases:
                         candidate = _case_dict(row)
@@ -133,10 +135,13 @@ async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
                     backfilled += 1
 
             learned_ids.update(mapped_ids)
+            group_key = str(deployment.get("source_group_key") or "")
+            if not group_key and mapped_ids:
+                group_key = _group_key(mapped_ids)
             families.append({
                 "dataset_id": str(dataset.id),
                 "source": source_dict,
-                "source_group_key": str(deployment.get("source_group_key") or _group_key(mapped_ids) if mapped_ids else ""),
+                "source_group_key": group_key,
                 "source_group_case_ids": sorted(mapped_ids),
                 "applied_at": applied_at,
             })
@@ -145,6 +150,22 @@ async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
             await session.commit()
 
     return learned_ids, families, backfilled
+
+
+async def backfill_current_pc_learning_group_mappings() -> dict:
+    """Persist missing group mappings for already-applied legacy Datasets.
+
+    This is intentionally safe to call repeatedly. Existing explicit mappings are left
+    untouched; only legacy Datasets without ``source_group_case_ids`` are repaired.
+    """
+    learned_ids, families, backfilled = await _current_pc_learned_case_ids()
+    return {
+        "ok": True,
+        "pc_name": current_pc_name(),
+        "backfilled_dataset_count": backfilled,
+        "learned_case_count": len(learned_ids),
+        "learned_family_count": len(families),
+    }
 
 
 async def list_aggregated_misjudgment_cases_current_pc_unlearned_only(
