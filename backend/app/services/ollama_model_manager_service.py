@@ -112,6 +112,26 @@ def _persist_windows_ollama_models(path: str) -> None:
         pass
 
 
+async def _restart_local_ollama(ollama_exe: str, model_root: Path, base_url: str) -> bool:
+    parsed=urlparse(base_url)
+    host=(parsed.hostname or "127.0.0.1").lower()
+    port=int(parsed.port or 11434)
+    if host not in {"127.0.0.1","localhost","::1"}:
+        return False
+    env=os.environ.copy()
+    env["OLLAMA_MODELS"]=str(model_root)
+    env["OLLAMA_HOST"]=f"127.0.0.1:{port}"
+    if os.name=="nt":
+        await asyncio.to_thread(subprocess.run,["taskkill","/IM","ollama.exe","/F"],capture_output=True,text=True,timeout=15,check=False)
+        flags=0
+        for name in ("CREATE_NEW_PROCESS_GROUP","DETACHED_PROCESS","CREATE_NO_WINDOW"):
+            flags|=int(getattr(subprocess,name,0))
+        await asyncio.to_thread(subprocess.Popen,[ollama_exe,"serve"],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL,creationflags=flags)
+    else:
+        await asyncio.create_subprocess_exec(ollama_exe,"serve",stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL,env=env,start_new_session=True)
+    return await _wait_ollama(f"http://127.0.0.1:{port}",30)
+
+
 async def get_recommended_model_status() -> dict:
     settings=get_settings()
     common_root=(await _pc_setting("COMMON_MODELS_ROOT") or str(settings.common_models_root or "").strip() or str(os.environ.get("COMMON_MODELS_ROOT","") or "").strip())
@@ -129,17 +149,16 @@ async def download_and_apply_recommended_model() -> dict:
     if not ollama_exe:
         raise RuntimeError("Ollama 실행 파일을 찾을 수 없습니다. Ollama 설치/실행 경로를 확인하세요.")
 
+    settings=get_settings()
     model_root=Path(common_root).expanduser().resolve()
     model_root.mkdir(parents=True,exist_ok=True)
 
-    # A running Ollama server owns the storage path; setting OLLAMA_MODELS only
-    # on the CLI is not enough. Download through a temporary AgentStudio-owned
-    # Ollama server whose model root is explicitly the user's common model path.
+    # A running Ollama server owns the storage path. Download through a temporary
+    # AgentStudio-owned server so qwen3.5:4b is guaranteed to land in the user's
+    # COMMON_MODELS_ROOT rather than a hidden default Ollama directory.
     temp_port=_free_loopback_port()
     temp_base=f"http://127.0.0.1:{temp_port}"
-    temp_env=os.environ.copy()
-    temp_env["OLLAMA_MODELS"]=str(model_root)
-    temp_env["OLLAMA_HOST"]=f"127.0.0.1:{temp_port}"
+    temp_env=os.environ.copy();temp_env["OLLAMA_MODELS"]=str(model_root);temp_env["OLLAMA_HOST"]=f"127.0.0.1:{temp_port}"
     serve=await asyncio.create_subprocess_exec(ollama_exe,"serve",stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL,env=temp_env)
     output=""
     try:
@@ -147,8 +166,7 @@ async def download_and_apply_recommended_model() -> dict:
             raise RuntimeError("공통 모델 경로용 임시 Ollama 서버를 시작하지 못했습니다.")
         pull_env=temp_env.copy();pull_env["OLLAMA_HOST"]=temp_base
         process=await asyncio.create_subprocess_exec(ollama_exe,"pull",LATEST_RECOMMENDED_MODEL,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.STDOUT,env=pull_env)
-        stdout,_=await process.communicate()
-        output=stdout.decode("utf-8",errors="replace") if stdout else ""
+        stdout,_=await process.communicate();output=stdout.decode("utf-8",errors="replace") if stdout else ""
         if process.returncode!=0:
             raise RuntimeError(f"{LATEST_RECOMMENDED_MODEL} 다운로드 실패 (ExitCode={process.returncode}): {output[-4000:]}")
     finally:
@@ -159,15 +177,14 @@ async def download_and_apply_recommended_model() -> dict:
                 try:serve.kill()
                 except Exception:pass
 
-    # Persist both storage root and selected model for this PC. SYSTEM_ADMIN and
-    # future Ollama launches inherit the same model root; runtime LLM creation
-    # immediately switches to qwen3.5:4b after cache refresh.
     await _set_pc_setting("COMMON_MODELS_ROOT",str(model_root))
     await _set_pc_setting("OLLAMA_MODEL",LATEST_RECOMMENDED_MODEL)
-    os.environ["COMMON_MODELS_ROOT"]=str(model_root)
-    os.environ["OLLAMA_MODELS"]=str(model_root)
-    os.environ["OLLAMA_MODEL"]=LATEST_RECOMMENDED_MODEL
+    os.environ["COMMON_MODELS_ROOT"]=str(model_root);os.environ["OLLAMA_MODELS"]=str(model_root);os.environ["OLLAMA_MODEL"]=LATEST_RECOMMENDED_MODEL
     _persist_windows_ollama_models(str(model_root))
     get_settings.cache_clear()
 
-    return {"ok":True,"message":f"{LATEST_RECOMMENDED_MODEL}을 공통 모델 경로에 다운로드하고 현재 PC 기본 모델로 적용했습니다.","model":LATEST_RECOMMENDED_MODEL,"common_models_root":str(model_root),"pc_name":current_pc_name(),"output_tail":output[-2000:],"restart_note":"현재 11434 Ollama 서버가 다른 모델 경로로 실행 중이면 SYSTEM_ADMIN.cmd 재실행 후 동일 공통 경로가 확정 적용됩니다."}
+    restarted=await _restart_local_ollama(ollama_exe,model_root,str(settings.ollama_base_url or "http://127.0.0.1:11434"))
+    if not restarted:
+        raise RuntimeError("모델 다운로드는 완료되었지만 현재 Ollama 서버를 공통 모델 경로로 재기동하지 못했습니다. SYSTEM_ADMIN.cmd를 다시 실행하면 다운로드된 qwen3.5:4b를 그대로 사용할 수 있습니다.")
+
+    return {"ok":True,"message":f"{LATEST_RECOMMENDED_MODEL}을 공통 모델 경로에 다운로드하고 Ollama 서버를 같은 경로로 재기동하여 현재 PC 기본 모델로 적용했습니다.","model":LATEST_RECOMMENDED_MODEL,"common_models_root":str(model_root),"pc_name":current_pc_name(),"output_tail":output[-2000:],"ollama_restarted":True}
