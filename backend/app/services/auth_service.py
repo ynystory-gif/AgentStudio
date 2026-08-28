@@ -42,8 +42,9 @@ async def register_member(payload:dict)->dict:
         count=int((await s.execute(select(func.count()).select_from(AgentStudioMember))).scalar() or 0)
         row=AgentStudioMember(id=uuid.uuid4().hex,login_id=login_id,password_hash=_hash_password(password),name=name,email=email,role='ADMIN' if count==0 else 'USER',is_active=True)
         s.add(row);await s.flush()
+        # 회원가입을 수행한 PC는 최초 관리 PC로 자동 등록합니다.
         pc=current_pc_name();s.add(AgentStudioMemberPc(id=uuid.uuid4().hex,member_id=row.id,pc_name=pc,can_manage=True))
-        await s.commit();return {'ok':True,'member':_member(row,[pc]),'first_admin':count==0}
+        await s.commit();return {'ok':True,'member':_member(row,[pc]),'first_admin':count==0,'current_pc_name':pc,'current_pc_registered':True}
 
 async def login(login_id:str,password:str,remember_me:bool)->dict:
     async with SessionLocal() as s:
@@ -51,13 +52,12 @@ async def login(login_id:str,password:str,remember_me:bool)->dict:
         if not row or not row.is_active or not _verify_password(password,row.password_hash): raise ValueError('아이디 또는 비밀번호가 올바르지 않습니다.')
         pc=current_pc_name()
         pcs=list((await s.execute(select(AgentStudioMemberPc.pc_name).where(AgentStudioMemberPc.member_id==row.id))).scalars().all())
-        if row.role!='ADMIN' and pc not in pcs:
-            raise ValueError(f"이 회원에게 현재 PC '{pc}' 사용 권한이 없습니다. 관리자에게 PC 배정을 요청하세요.")
-        if row.role=='ADMIN' and pc not in pcs:
-            s.add(AgentStudioMemberPc(id=uuid.uuid4().hex,member_id=row.id,pc_name=pc,can_manage=True));pcs.append(pc)
+        # 새 PC에서도 로그인 자체는 허용합니다. 프로젝트/데이터 API는 main.py의
+        # PC 권한 Guard가 계속 차단하며, 사용자 메뉴에서 현재 PC를 명시적으로
+        # 등록한 뒤 정상 사용하도록 합니다.
         token=secrets.token_urlsafe(48);expires=datetime.utcnow()+timedelta(days=REMEMBER_DAYS) if remember_me else datetime.utcnow()+timedelta(hours=SESSION_HOURS)
         s.add(AgentStudioAuthSession(id=uuid.uuid4().hex,member_id=row.id,token_hash=_token_hash(token),remember_me=remember_me,expires_at=expires))
-        await s.commit();return {'ok':True,'token':token,'remember_me':remember_me,'expires_at':expires.isoformat(),'member':_member(row,pcs)}
+        await s.commit();return {'ok':True,'token':token,'remember_me':remember_me,'expires_at':expires.isoformat(),'member':_member(row,pcs),'current_pc_name':pc,'current_pc_registered':pc in pcs}
 
 async def authenticate_token(token:str)->dict|None:
     if not token:return None
@@ -68,6 +68,38 @@ async def authenticate_token(token:str)->dict|None:
         if not row or not row.is_active:return None
         session.last_used_at=datetime.utcnow();pcs=list((await s.execute(select(AgentStudioMemberPc.pc_name).where(AgentStudioMemberPc.member_id==row.id))).scalars().all());await s.commit()
         return _member(row,pcs)
+
+async def current_pc_status(member_id:str)->dict:
+    pc=current_pc_name()
+    async with SessionLocal() as s:
+        row=await s.get(AgentStudioMember,member_id)
+        if not row: raise KeyError('회원을 찾을 수 없습니다.')
+        pcs=list((await s.execute(select(AgentStudioMemberPc.pc_name).where(AgentStudioMemberPc.member_id==member_id))).scalars().all())
+        machine=await s.get(AgentStudioMachine,pc)
+        return {
+            'ok':True,
+            'current_pc_name':pc,
+            'registered':pc in pcs,
+            'member_pcs':sorted(pcs),
+            'machine':{
+                'pc_name':pc,
+                'host_name':getattr(machine,'host_name','') or '',
+                'os_name':getattr(machine,'os_name','') or '',
+                'last_seen_at':machine.last_seen_at.isoformat() if machine and machine.last_seen_at else '',
+            }
+        }
+
+async def register_current_pc_for_member(member_id:str)->dict:
+    pc=current_pc_name()
+    async with SessionLocal() as s:
+        row=await s.get(AgentStudioMember,member_id)
+        if not row: raise KeyError('회원을 찾을 수 없습니다.')
+        existing=(await s.execute(select(AgentStudioMemberPc).where(AgentStudioMemberPc.member_id==member_id,AgentStudioMemberPc.pc_name==pc))).scalar_one_or_none()
+        if not existing:
+            s.add(AgentStudioMemberPc(id=uuid.uuid4().hex,member_id=member_id,pc_name=pc,can_manage=True))
+        await s.commit()
+        pcs=list((await s.execute(select(AgentStudioMemberPc.pc_name).where(AgentStudioMemberPc.member_id==member_id))).scalars().all())
+        return {'ok':True,'current_pc_name':pc,'registered':True,'member':_member(row,sorted(pcs)),'member_pcs':sorted(pcs)}
 
 async def logout(token:str)->dict:
     async with SessionLocal() as s:
