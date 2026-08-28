@@ -19,7 +19,7 @@ from app.api.auth_routes import router as auth_router
 from app.services.langgraph_runtime import agent_graph_runtime
 from app.services.mcp_registry import mcp_registry_monitor
 from app.services.settings_service import migrate_env_settings_to_db, load_db_settings_into_runtime, register_current_machine, resolve_pending_machine_name
-from app.core.machine_identity import ensure_pc_name_env
+from app.core.machine_identity import ensure_pc_name_env, current_pc_name
 from app.services.project_root_registry import restore_registered_project_roots
 from app.services.llm_usage_service import prune_llm_history
 from app.services.llm_learning_service import sync_misjudgment_candidates
@@ -125,6 +125,9 @@ async def _agentstudio_auth_guard(request: Request, call_next):
     member = await authenticate_token(token)
     if not member:
         return JSONResponse(status_code=401, content={"detail": "로그인이 필요합니다."})
+    pc_name = current_pc_name()
+    if member.get("role") != "ADMIN" and pc_name not in set(member.get("pcs") or []):
+        return JSONResponse(status_code=403, content={"detail": f"현재 PC '{pc_name}' 사용 권한이 없습니다."})
     request.state.member = member
     return await call_next(request)
 
