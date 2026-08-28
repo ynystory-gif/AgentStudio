@@ -120,6 +120,7 @@ app.add_middleware(
 # All project/data/member APIs remain protected by the normal Bearer session.
 _PUBLIC_API_PATHS = {
     "/api/health",
+    "/api/health/database",
     "/api/auth/login",
     "/api/auth/register",
 }
@@ -127,6 +128,21 @@ _PUBLIC_API_PATHS = {
 @app.middleware("http")
 async def _agentstudio_auth_guard(request: Request, call_next):
     path = request.url.path
+
+    # Bootstrap health must use the FastAPI application's version as the single
+    # source of truth. This prevents a stale version string in a legacy route
+    # from blocking SYSTEM_ADMIN before the frontend can start.
+    if path == "/api/health":
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "status": "ok",
+                "service": "THEANOVA AgentStudio Backend",
+                "version": app.version,
+            },
+        )
+
     if request.method == "OPTIONS" or not path.startswith("/api/") or path in _PUBLIC_API_PATHS:
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
