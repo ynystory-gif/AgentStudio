@@ -101,7 +101,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.417", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.418", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -115,9 +115,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# These endpoints must be reachable before login because SYSTEM_ADMIN and the
-# frontend launcher use them only to verify that the backend process is alive.
-# All project/data/member APIs remain protected by the normal Bearer session.
 _PUBLIC_API_PATHS = {
     "/api/health",
     "/api/health/database",
@@ -125,9 +122,6 @@ _PUBLIC_API_PATHS = {
     "/api/auth/register",
 }
 
-# A signed-in user may need these endpoints before the current PC has been
-# registered to the account. They authenticate their own Bearer token inside
-# auth_routes, but do not require an existing member↔PC assignment.
 _AUTH_BOOTSTRAP_PATHS = {
     "/api/auth/me",
     "/api/auth/logout",
@@ -138,10 +132,6 @@ _AUTH_BOOTSTRAP_PATHS = {
 @app.middleware("http")
 async def _agentstudio_auth_guard(request: Request, call_next):
     path = request.url.path
-
-    # Bootstrap health must use the FastAPI application's version as the single
-    # source of truth. This prevents a stale version string in a legacy route
-    # from blocking SYSTEM_ADMIN before the frontend can start.
     if path == "/api/health":
         return JSONResponse(
             status_code=200,
