@@ -9,11 +9,13 @@ if sys.platform == "win32":
         pass
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from app.core.database import init_db, migrate_agentstudio_schema, ensure_runtime_metadata_tables
 from app.api.routes import router
 from app.api.learning_routes import router as learning_router
+from app.api.auth_routes import router as auth_router
 from app.services.langgraph_runtime import agent_graph_runtime
 from app.services.mcp_registry import mcp_registry_monitor
 from app.services.settings_service import migrate_env_settings_to_db, load_db_settings_into_runtime, register_current_machine, resolve_pending_machine_name
@@ -21,6 +23,7 @@ from app.core.machine_identity import ensure_pc_name_env
 from app.services.project_root_registry import restore_registered_project_roots
 from app.services.llm_usage_service import prune_llm_history
 from app.services.llm_learning_service import sync_misjudgment_candidates
+from app.services.auth_service import authenticate_token
 from app.services.database_runtime_service import apply_saved_database_provider
 from app.services.chromium_browser_service import chromium_browser_manager
 from app.services.codex_app_server_service import codex_app_server_manager
@@ -98,7 +101,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.413", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.414", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -112,6 +115,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def _agentstudio_auth_guard(request: Request, call_next):
+    path = request.url.path
+    if request.method == "OPTIONS" or not path.startswith("/api/") or path in {"/api/auth/login", "/api/auth/register"}:
+        return await call_next(request)
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    member = await authenticate_token(token)
+    if not member:
+        return JSONResponse(status_code=401, content={"detail": "로그인이 필요합니다."})
+    request.state.member = member
+    return await call_next(request)
+
 @app.on_event("startup")
 async def _agentstudio_startup_probe():
     from pathlib import Path
@@ -123,6 +139,7 @@ async def _agentstudio_startup_probe():
     with log_path.open("a", encoding="utf-8") as f:
         f.write(f"[{datetime.now().isoformat()}] AgentStudio Backend startup completed\n")
 
+app.include_router(auth_router, prefix="/api")
 app.include_router(router, prefix="/api")
 app.include_router(learning_router, prefix="/api")
 
