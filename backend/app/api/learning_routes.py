@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
@@ -72,12 +71,12 @@ class OllamaApplyRequest(BaseModel):
 
 @router.get("/summary")
 async def summary():
-    return await asyncio.to_thread(learning_summary)
+    return await learning_summary()
 
 
 @router.post("/misjudgments/sync")
 async def sync_candidates():
-    return await asyncio.to_thread(sync_misjudgment_candidates)
+    return await sync_misjudgment_candidates()
 
 
 @router.get("/misjudgments")
@@ -86,18 +85,18 @@ async def misjudgments(
     status: str = Query(default=""),
     limit: int = Query(default=500, ge=1, le=2000),
 ):
-    return await asyncio.to_thread(list_misjudgment_cases, provider, status, limit)
+    return await list_misjudgment_cases(provider, status, limit)
 
 
 @router.post("/misjudgments/manual")
 async def add_manual(req: ManualMisjudgmentRequest):
-    return await asyncio.to_thread(add_manual_misjudgment_case, req.model_dump())
+    return await add_manual_misjudgment_case(req.model_dump())
 
 
 @router.patch("/misjudgments/{case_id}")
 async def review_case(case_id: str, req: MisjudgmentReviewRequest):
     try:
-        return await asyncio.to_thread(review_misjudgment_case, case_id, req.model_dump())
+        return await review_misjudgment_case(case_id, req.model_dump())
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -107,7 +106,7 @@ async def review_case(case_id: str, req: MisjudgmentReviewRequest):
 @router.post("/datasets/generate")
 async def generate_dataset(req: ProblemGenerationRequest):
     try:
-        return await asyncio.to_thread(generate_problem_dataset, req.case_id, req.target_count, req.provider)
+        return await generate_problem_dataset(req.case_id, req.target_count, req.provider)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -118,13 +117,13 @@ async def generate_dataset(req: ProblemGenerationRequest):
 
 @router.get("/datasets")
 async def datasets():
-    return await asyncio.to_thread(list_datasets)
+    return await list_datasets()
 
 
 @router.post("/datasets/{dataset_id}/validate")
 async def validate(dataset_id: str, req: DatasetValidationRequest):
     try:
-        return await asyncio.to_thread(validate_dataset, dataset_id, req.approved_problem_ids)
+        return await validate_dataset(dataset_id, req.approved_problem_ids)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -134,7 +133,7 @@ async def validate(dataset_id: str, req: DatasetValidationRequest):
 @router.post("/datasets/{dataset_id}/prepare-training")
 async def prepare(dataset_id: str, req: TrainingPrepareRequest):
     try:
-        return await asyncio.to_thread(prepare_training, dataset_id, req.base_model)
+        return await prepare_training(dataset_id, req.base_model)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -144,9 +143,7 @@ async def prepare(dataset_id: str, req: TrainingPrepareRequest):
 @router.post("/datasets/{dataset_id}/evaluation")
 async def evaluation(dataset_id: str, req: EvaluationRequest):
     try:
-        return await asyncio.to_thread(
-            record_evaluation, dataset_id, req.baseline_score, req.trained_score, req.minimum_gain
-        )
+        return await record_evaluation(dataset_id, req.baseline_score, req.trained_score, req.minimum_gain)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -154,7 +151,7 @@ async def evaluation(dataset_id: str, req: EvaluationRequest):
 @router.post("/datasets/{dataset_id}/apply-ollama")
 async def apply(dataset_id: str, req: OllamaApplyRequest):
     try:
-        return await asyncio.to_thread(apply_to_ollama, dataset_id, req.model_name, req.adapter_path)
+        return await apply_to_ollama(dataset_id, req.model_name, req.adapter_path)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (ValueError, RuntimeError) as exc:
