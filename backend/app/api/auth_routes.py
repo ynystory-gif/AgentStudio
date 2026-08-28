@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
-from app.services.auth_service import authenticate_token, list_members, list_registered_pcs, login, logout, register_member, set_member_pcs, update_member_admin
+from app.services.auth_service import authenticate_token, current_pc_status, list_members, list_registered_pcs, login, logout, register_current_pc_for_member, register_member, set_member_pcs, update_member_admin
 router=APIRouter(prefix='/auth',tags=['Auth'])
 
 def _bearer(value:str)->str:
@@ -27,6 +27,16 @@ async def do_login(req:LoginReq):
     except ValueError as e:raise HTTPException(status_code=401,detail=str(e))
 @router.get('/me')
 async def me(authorization:str=Header(default='')):return {'ok':True,'member':await _current(authorization)}
+@router.get('/current-pc')
+async def current_pc(authorization:str=Header(default='')):
+    member=await _current(authorization)
+    try:return await current_pc_status(member['id'])
+    except KeyError as e:raise HTTPException(status_code=404,detail=str(e))
+@router.post('/current-pc/register')
+async def register_current_pc(authorization:str=Header(default='')):
+    member=await _current(authorization)
+    try:return await register_current_pc_for_member(member['id'])
+    except KeyError as e:raise HTTPException(status_code=404,detail=str(e))
 @router.post('/logout')
 async def do_logout(authorization:str=Header(default='')):return await logout(_bearer(authorization))
 @router.get('/members')
