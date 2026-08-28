@@ -15,9 +15,8 @@ from fastapi.responses import JSONResponse
 from app.core.database import init_db, migrate_agentstudio_schema, ensure_runtime_metadata_tables
 # Must load before API routes so direct imports of read_usage_summary receive the DB-backed version.
 import app.services.llm_usage_db_bridge  # noqa: F401
-# v5.426: problem collection must reuse AgentStudio's configured high-level model
-# priority instead of pinning Ollama. This bridge patches the single internal
-# Dataset-generation hook used by both sync and Job-based learning collection.
+# Problem collection reuses AgentStudio's configured high-level model priority.
+# v5.427 additionally repairs malformed Teacher JSON and falls through to the next Teacher.
 import app.services.learning_teacher_bridge  # noqa: F401
 from app.api.routes import router
 from app.api.learning_diagnostics_routes import router as learning_diagnostics_router
@@ -109,7 +108,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.426", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.427", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -177,8 +176,6 @@ async def _agentstudio_startup_probe():
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(router, prefix="/api")
-# Diagnostics is registered before the base learning router so its GET status route
-# can enrich failed jobs with a concrete log path while keeping all existing endpoints.
 app.include_router(learning_diagnostics_router, prefix="/api")
 app.include_router(learning_router, prefix="/api")
 app.include_router(ui_theme_dynamic_router, prefix="/api")
