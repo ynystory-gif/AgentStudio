@@ -16,7 +16,9 @@ from app.core.database import init_db, migrate_agentstudio_schema, ensure_runtim
 # Must load before API routes so direct imports of read_usage_summary receive the DB-backed version.
 import app.services.llm_usage_db_bridge  # noqa: F401
 from app.api.routes import router
+from app.api.learning_diagnostics_routes import router as learning_diagnostics_router
 from app.api.learning_routes import router as learning_router
+from app.api.ui_theme_dynamic_routes import router as ui_theme_dynamic_router
 from app.api.auth_routes import router as auth_router
 from app.services.langgraph_runtime import agent_graph_runtime
 from app.services.mcp_registry import mcp_registry_monitor
@@ -103,7 +105,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.424", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.425", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -171,7 +173,11 @@ async def _agentstudio_startup_probe():
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(router, prefix="/api")
+# Diagnostics is registered before the base learning router so its GET status route
+# can enrich failed jobs with a concrete log path while keeping all existing endpoints.
+app.include_router(learning_diagnostics_router, prefix="/api")
 app.include_router(learning_router, prefix="/api")
+app.include_router(ui_theme_dynamic_router, prefix="/api")
 
 from app.api.terminal_ws import router as terminal_ws_router
 app.include_router(terminal_ws_router)
