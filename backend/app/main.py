@@ -101,7 +101,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.414", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.415", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -115,10 +115,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# These endpoints must be reachable before login because SYSTEM_ADMIN and the
+# frontend launcher use them only to verify that the backend process is alive.
+# All project/data/member APIs remain protected by the normal Bearer session.
+_PUBLIC_API_PATHS = {
+    "/api/health",
+    "/api/auth/login",
+    "/api/auth/register",
+}
+
 @app.middleware("http")
 async def _agentstudio_auth_guard(request: Request, call_next):
     path = request.url.path
-    if request.method == "OPTIONS" or not path.startswith("/api/") or path in {"/api/auth/login", "/api/auth/register"}:
+    if request.method == "OPTIONS" or not path.startswith("/api/") or path in _PUBLIC_API_PATHS:
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
