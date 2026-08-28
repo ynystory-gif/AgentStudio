@@ -38,13 +38,99 @@ function notebookAttachmentDataUrl(attachments: NotebookAttachments, name: strin
   return `data:${mime};base64,${raw.replace(/\s/g, '')}`
 }
 
+interface NotebookInlineImageProps {
+  src: string
+  alt?: string
+  title?: string
+  sourceLabel?: string
+}
+
+function decodeNotebookHtmlAttribute(value: string): string {
+  return String(value || '')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+}
+
+function NotebookInlineImage({ src, alt = '', title = '', sourceLabel = '' }: NotebookInlineImageProps) {
+  const [failed, setFailed] = React.useState(false)
+  if (failed) {
+    return (
+      <span className="notebook-attachment-missing notebook-remote-image-failed" title={src}>
+        ⚠ 이미지를 불러오지 못했습니다.{' '}
+        <a href={src} target="_blank" rel="noreferrer">
+          {sourceLabel || alt || '이미지 URL 열기'}
+        </a>
+      </span>
+    )
+  }
+  return (
+    <img
+      className="notebook-markdown-inline-image"
+      alt={alt || 'Notebook image'}
+      title={title || undefined}
+      src={src}
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+    />
+  )
+}
+
+function notebookSafeImageSource(rawSource: string, attachments: NotebookAttachments): string {
+  const source = decodeNotebookHtmlAttribute(String(rawSource || '').trim())
+  if (!source) return ''
+  if (/^attachment:/i.test(source)) return notebookAttachmentDataUrl(attachments, source)
+  if (/^https?:\/\//i.test(source)) return source
+
+  // Jupyter/Markdown generators may embed images directly as data URIs.
+  // Some notebooks wrap the very long base64 payload across source lines, and
+  // NotebookMarkdown joins those lines with spaces before inline rendering.
+  // Normalize whitespace only for a whitelisted image data URI instead of
+  // rejecting it or rendering the raw base64 text into the notebook.
+  const dataImage = source.match(
+    /^(data:image\/(?:png|jpe?g|gif|webp|svg\+xml);(?:base64|charset=utf-8),)([\s\S]*)$/i,
+  )
+  if (dataImage) {
+    const prefix = dataImage[1] || ''
+    const payload = dataImage[2] || ''
+    return `${prefix}${payload.replace(/\s/g, '')}`
+  }
+  return ''
+}
+
+function parseNotebookHtmlImageTag(
+  value: string,
+  attachments: NotebookAttachments,
+): { src: string; alt: string; title: string } | null {
+  if (!/^<img\b[^>]*\/?>$/i.test(value.trim())) return null
+  const attributes: Record<string, string> = {}
+  const body = value.trim().replace(/^<img\b/i, '').replace(/\/?>$/, '')
+  const attrPattern = /([a-zA-Z_:][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g
+  let match: RegExpExecArray | null
+  while ((match = attrPattern.exec(body))) {
+    attributes[String(match[1] || '').toLowerCase()] = decodeNotebookHtmlAttribute(match[2] ?? match[3] ?? match[4] ?? '')
+  }
+  const src = notebookSafeImageSource(attributes.src || '', attachments)
+  if (!src) return null
+  return {
+    src,
+    alt: attributes.alt || '',
+    title: attributes.title || '',
+  }
+}
+
 function renderNotebookInline(
   text: unknown,
   keyPrefix = 'inline',
   attachments: NotebookAttachments = {},
 ): ReactNode[] {
   const source = String(text ?? '')
-  const token = /(!\[[^\]]*\]\((?:attachment:[^)]+|https?:\/\/[^)\s]+)\)|`[^`]*`|\*\*[^*]+\*\*|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g
+  // Notebook Markdown commonly contains raw HTML <img> tags. Render only a
+  // tightly-whitelisted image tag here; arbitrary raw HTML remains escaped.
+  const token = /(<img\b[^>]*\/?>|!\[[^\]]*\]\s*\((?:attachment:[^)]+|https?:\/\/[^)\s]+|data:image\/(?:png|jpe?g|gif|webp|svg\+xml);(?:base64|charset=utf-8),[^)]*)\)|`[^`]*`|\*\*[^*]+\*\*|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/gi
   const nodes: ReactNode[] = []
   let last = 0
   let match: RegExpExecArray | null
@@ -55,20 +141,37 @@ function renderNotebookInline(
     const value = match[0]
     const key = `${keyPrefix}-${index++}`
 
-    if (value.startsWith('![')) {
-      const image = value.match(/^!\[([^\]]*)\]\((attachment:[^)]+|https?:\/\/[^)\s]+)\)$/)
+    if (/^<img\b/i.test(value)) {
+      const image = parseNotebookHtmlImageTag(value, attachments)
+      if (image) {
+        nodes.push(
+          <NotebookInlineImage
+            key={key}
+            src={image.src}
+            alt={image.alt}
+            title={image.title}
+            sourceLabel={image.alt}
+          />,
+        )
+      } else {
+        // Unsupported/unsafe raw HTML remains visible as text instead of being
+        // injected into the DOM.
+        nodes.push(value)
+      }
+    } else if (value.startsWith('![')) {
+      const image = value.match(
+        /^!\[([^\]]*)\]\s*\((attachment:[^)]+|https?:\/\/[^)\s]+|data:image\/(?:png|jpe?g|gif|webp|svg\+xml);(?:base64|charset=utf-8),[^)]*)\)$/i,
+      )
       if (image) {
         const target = image[2] ?? ''
-        const src = target.startsWith('attachment:')
-          ? notebookAttachmentDataUrl(attachments, target)
-          : target
+        const src = notebookSafeImageSource(target, attachments)
         if (src) {
           nodes.push(
-            <img
+            <NotebookInlineImage
               key={key}
-              className="notebook-markdown-inline-image"
-              alt={image[1] || 'Notebook attachment'}
               src={src}
+              alt={image[1] || 'Notebook attachment'}
+              sourceLabel={image[1] || target}
             />,
           )
         } else {
@@ -278,6 +381,54 @@ export function NotebookMarkdown({ text, attachments = {} }: NotebookMarkdownPro
   return <div className="notebook-markdown-rendered">{blocks}</div>
 }
 
+interface SmoothNotebookOutputImageProps {
+  src: string
+}
+
+function SmoothNotebookOutputImage({ src }: SmoothNotebookOutputImageProps) {
+  const [displaySrc, setDisplaySrc] = React.useState(src)
+
+  React.useEffect(() => {
+    if (!src || src === displaySrc) return
+
+    let cancelled = false
+    const loader = new Image()
+    loader.decoding = 'async'
+
+    const commit = async () => {
+      try {
+        if (typeof loader.decode === 'function') await loader.decode()
+      } catch {
+        // onload already confirms the image is usable; decode() is optional.
+      }
+      if (!cancelled) setDisplaySrc(src)
+    }
+
+    loader.onload = () => { void commit() }
+    loader.onerror = () => {
+      // Preserve normal browser error behavior, but never blank the old frame
+      // while a new streaming image is still loading.
+      if (!cancelled) setDisplaySrc(src)
+    }
+    loader.src = src
+
+    return () => {
+      cancelled = true
+      loader.onload = null
+      loader.onerror = null
+    }
+  }, [src, displaySrc])
+
+  return (
+    <img
+      alt="Notebook output"
+      src={displaySrc}
+      decoding="async"
+      className="notebook-output-rich-image"
+    />
+  )
+}
+
 export function NotebookOutput({ output }: NotebookOutputProps) {
   if (!output) return null
   const outputType = String(output.output_type || '')
@@ -302,9 +453,10 @@ export function NotebookOutput({ output }: NotebookOutputProps) {
     const data = output.data || {}
     const image = notebookSourceToText(data['image/png'])
     if (image) {
+      const imageSrc = `data:image/png;base64,${image.replace(/\s/g, '')}`
       return (
         <div className="notebook-output-rich">
-          <img alt="Notebook output" src={`data:image/png;base64,${image.replace(/\s/g, '')}`} />
+          <SmoothNotebookOutputImage src={imageSrc} />
         </div>
       )
     }

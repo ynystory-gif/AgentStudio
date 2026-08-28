@@ -3285,7 +3285,7 @@ async def code_generation_node(state: AgentState):
             + "\n\n전체 프로젝트를 처음부터 다시 생성하지 마십시오. 기존 정상 파일은 보존하고 이번 변경에 영향받은 파일만 수정하십시오. "
             "새 설계에서 추가된 required 파일은 생성할 수 있습니다. 변경과 무관한 파일은 changes[]에 넣지 마십시오. "
             "ui_layout 변경분에 실행/상태 유지 설정이 포함되면 기존 Agent Runtime을 UI component lifecycle에 종속시키지 말고, 상태 store·복원·실행 상태 표시·알림·WebSocket/SSE 재연결 정책만 필요한 파일에 증분 반영하십시오. "
-            "ui_layout.theme가 custom이면 theme_id/theme_name/theme_tokens/component_rules/layout_rules를 보존하고 기존 Frontend 기술에 맞는 native Theme 방식으로 증분 스타일링하십시오. component_rules.menu.normal/hover/active가 있으면 메뉴 기본·마우스 오버·활성 상태도 증분 반영하십시오. React/Vue/Angular/Svelte/Next/Nuxt/Astro/HTML/Streamlit/Gradio/NiceGUI/Blazor/React Native/Flutter 등 특정 Framework 하나로 강제하지 마십시오. 참조 사이트의 로고·콘텐츠는 복제하지 마십시오. "
+            "ui_layout.theme가 custom이면 theme_id/theme_name/theme_tokens/component_rules/layout_rules를 보존하고 기존 Frontend 기술에 맞는 native Theme 방식으로 증분 스타일링하십시오. component_rules.menu.normal/hover/active가 있으면 메뉴 기본·마우스 오버·활성 상태를 반영하고, submenu/user_menu/button/input/card의 hover/focus/open 상태 규칙도 존재하는 범위에서 그대로 반영하십시오. React/Vue/Angular/Svelte/Next/Nuxt/Astro/HTML/Streamlit/Gradio/NiceGUI/Blazor/React Native/Flutter 등 특정 Framework 하나로 강제하지 마십시오. 참조 사이트의 로고·콘텐츠는 복제하지 마십시오. "
             "auth/role/permission/database/상품/주문 변경으로 test_environment_plan이 바뀌면 Seed Data·권한별 테스트 계정·시나리오·관리자 Test-as-user 관련 파일만 함께 증분 반영하십시오."
         )
         try:
@@ -3338,7 +3338,7 @@ async def code_generation_node(state: AgentState):
             "10MB/120초/Chunking 등 인터뷰 확정값도 구현하십시오. "
             "AgentStudio Coding Style Registry의 선택 규칙을 생성 코드에 적용하십시오. "
             "confirmed_requirements.ui_layout이 선택되어 있으면 메뉴/탭/Route 전환과 Frontend View/Component lifecycle이 Agent run의 cancel/stop과 연결되지 않게 하십시오. "
-            "custom Theme이 선택되어 있으면 ui_layout.theme_tokens/component_rules/layout_rules를 canonical Design Token으로 유지한 뒤 확정된 Frontend Framework의 native Theme 방식으로 변환하여 Header/Navigation/Card/Button/Form/Table/Modal 등 공통 UI에 일관되게 적용하십시오. component_rules.menu.normal/hover/active가 있으면 메뉴 기본·마우스 오버·활성 상태를 모두 구현하십시오. React 전용 Theme Provider나 CSS 변수 방식으로 고정하지 마십시오. "
+            "custom Theme이 선택되어 있으면 ui_layout.theme_tokens/component_rules/layout_rules를 canonical Design Token으로 유지한 뒤 확정된 Frontend Framework의 native Theme 방식으로 변환하여 Header/Navigation/Card/Button/Form/Table/Modal 등 공통 UI에 일관되게 적용하십시오. component_rules.menu.normal/hover/active가 있으면 메뉴 기본·마우스 오버·활성 상태를 모두 구현하고, submenu/user_menu/button/input/card의 상태 규칙도 존재하는 경우 실제 interaction CSS/컴포넌트 상태로 구현하십시오. React 전용 Theme Provider나 CSS 변수 방식으로 고정하지 마십시오. "
             + frontend_theme_generation_instruction((state.get("request") or "") + "\n" + json.dumps(build_context, ensure_ascii=False)) + " "
             "Agent Runtime은 Backend session_id/run_id 기반으로 UI lifecycle과 분리하고, Frontend는 실행 상태 store와 상태 재조회/재연결로 복원하십시오. "
             "restore_screen_state/restore_scroll_position/restore_draft_input/restore_selection_state/screen_restore_mode와 show_running_tasks/runtime_status_position/알림 설정을 실제 UI 코드에 반영하십시오. "

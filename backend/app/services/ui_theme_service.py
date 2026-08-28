@@ -138,6 +138,22 @@ def build_rules(tokens: dict) -> tuple[dict, dict]:
             },
             "source": "TOKEN_INFERRED",
         },
+        "submenu": {
+            "normal": {"background": colors.get("surface", "#ffffff"), "color": colors.get("textPrimary", "#0f172a"), "border": colors.get("border", "#dbe4ee"), "radius": radius.get("card", 12)},
+            "hover": {"background": colors.get("primary", "#2563eb"), "color": "#ffffff"},
+            "source": "TOKEN_INFERRED",
+        },
+        "user_menu": {
+            "normal": {"background": colors.get("surface", "#ffffff"), "color": colors.get("textPrimary", "#0f172a"), "border": colors.get("border", "#dbe4ee"), "radius": radius.get("card", 12)},
+            "hover": {"background": colors.get("background", "#f8fafc"), "color": colors.get("textPrimary", "#0f172a")},
+            "source": "TOKEN_INFERRED",
+        },
+        "tab": {
+            "normal": {"background": "transparent", "color": colors.get("textSecondary", "#475569")},
+            "hover": {"color": colors.get("primary", "#2563eb")},
+            "active": {"color": colors.get("primary", "#2563eb"), "border": colors.get("primary", "#2563eb")},
+            "source": "TOKEN_INFERRED",
+        },
     }
     layout_rules = {
         "headerHeight": 64,
@@ -189,6 +205,30 @@ def _declaration_map(body: str) -> dict:
                 result["fontWeight"] = 700
         elif name == "text-decoration":
             result["textDecoration"] = raw[:80]
+        elif name == "box-shadow":
+            result["boxShadow"] = raw[:180]
+        elif name == "transition":
+            result["transition"] = raw[:180]
+        elif name == "transform":
+            result["transform"] = raw[:120]
+        elif name == "opacity":
+            try:
+                result["opacity"] = max(0.0, min(1.0, float(raw.split()[0])))
+            except (TypeError, ValueError):
+                pass
+        elif name == "font-size":
+            match = re.search(r"([0-9.]+)px", raw, re.IGNORECASE)
+            if match:
+                try:
+                    result["fontSize"] = float(match.group(1))
+                except ValueError:
+                    pass
+        elif name == "line-height":
+            result["lineHeight"] = raw[:60]
+        elif name in {"padding", "padding-inline", "padding-block"}:
+            result["padding"] = raw[:100]
+        elif name == "outline":
+            result["outline"] = raw[:120]
     return result
 
 
@@ -245,6 +285,115 @@ def extract_menu_rules(css_text: str, tokens: dict) -> dict:
     }
     return result
 
+
+
+
+def _selector_state(selector: str) -> str:
+    value = str(selector or "").casefold()
+    if ":hover" in value:
+        return "hover"
+    if ":active" in value or ".pressed" in value or "[aria-pressed=\"true\"]" in value or "[aria-pressed='true']" in value:
+        return "pressed"
+    if ":focus" in value or ":focus-visible" in value or ":focus-within" in value:
+        return "focus"
+    if ":disabled" in value or "[disabled" in value or ".disabled" in value:
+        return "disabled"
+    if any(token in value for token in (".active", ".selected", "[aria-current", "[aria-selected=\"true\"]", "[aria-selected='true']")):
+        return "active"
+    return "normal"
+
+
+def _component_selector_score(selector: str, keywords: tuple[str, ...]) -> int:
+    value = f" {str(selector or '').casefold()} "
+    score = 0
+    for keyword in keywords:
+        if keyword in value:
+            score += 8 if keyword.startswith((".", "#", "[")) else 5
+    if score <= 0:
+        return 0
+    if any(token in value for token in (":hover", ":focus", ":active", ".active", ".selected", ":disabled")):
+        score += 2
+    return score
+
+
+def _extract_component_states(css_text: str, keywords: tuple[str, ...], *, component: str) -> tuple[dict, dict]:
+    """Return reusable state rules plus evidence without copying source content.
+
+    The selected CSS selector is kept only as provenance so users can see whether a
+    preview state came from a real public-site rule or a fallback inference.
+    """
+    best: dict[str, tuple[int, dict, str]] = {}
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", str(css_text or ""), re.DOTALL):
+        selector = match.group(1).strip()
+        score = _component_selector_score(selector, keywords)
+        if score <= 0:
+            continue
+        props = _declaration_map(match.group(2))
+        if not props:
+            continue
+        state = _selector_state(selector)
+        previous = best.get(state)
+        if previous is None or score > previous[0]:
+            best[state] = (score, props, selector[:240])
+
+    rules: dict = {}
+    evidence: dict = {}
+    for state, (score, props, selector) in best.items():
+        rules[state] = props
+        confidence = min(0.99, 0.70 + min(score, 24) / 100.0)
+        evidence[f"{component}.{state}"] = {
+            "status": "confirmed",
+            "source": "URL_CSS_SELECTOR",
+            "selector": selector,
+            "confidence": round(confidence, 2),
+        }
+    if rules:
+        rules["source"] = "CSS_SELECTOR_ANALYSIS"
+    return rules, evidence
+
+
+def extract_interaction_rules(css_text: str, tokens: dict) -> tuple[dict, dict]:
+    """Extract interaction-oriented styles used by the interactive Theme preview."""
+    defaults, _ = build_rules(tokens)
+    definitions = {
+        "menu": (".nav-item", ".nav-link", ".menu-item", ".sidebar", ".sidenav", ".navbar", " nav "),
+        "submenu": (".dropdown-menu", ".dropdown-item", ".submenu", ".sub-menu", ".menu-popup", "[role=menu]"),
+        "user_menu": (".user-menu", ".profile-menu", ".account-menu", ".user-dropdown", ".profile-dropdown", ".avatar-menu", ".account-dropdown"),
+        "button": (" button", ".btn", "[role=button]"),
+        "input": (" input", " textarea", " select", ".form-control", ".input"),
+        "card": (".card", ".panel", ".tile", ".surface"),
+        "tab": (".tab", ".tabs", "[role=tab]"),
+    }
+    components: dict = {}
+    evidence: dict = {}
+    for component, keywords in definitions.items():
+        extracted, found = _extract_component_states(css_text, keywords, component=component)
+        base = defaults.get(component) if isinstance(defaults.get(component), dict) else {}
+        if extracted:
+            merged = dict(base or {})
+            for state, props in extracted.items():
+                if state == "source":
+                    continue
+                if isinstance(props, dict):
+                    merged[state] = {**(merged.get(state) or {}), **props}
+            merged["source"] = "CSS_SELECTOR_ANALYSIS"
+            components[component] = merged
+            evidence.update(found)
+    return components, evidence
+
+
+def analyze_html_interactions(html: str) -> dict:
+    source = str(html or "")[:1_000_000]
+    checks = {
+        "submenu": (r"aria-haspopup\s*=", r"\bdropdown\b", r"\bsubmenu\b", r"\bsub-menu\b", r"role=[\"']menu[\"']"),
+        "user_menu": (r"\buser[-_ ]?menu\b", r"\bprofile[-_ ]?menu\b", r"\baccount[-_ ]?menu\b", r"\bavatar\b"),
+        "tabs": (r"role=[\"']tab[\"']", r"\btablist\b", r"class=[\"'][^\"']*\btabs?\b"),
+    }
+    result = {}
+    for key, patterns in checks.items():
+        hits = sum(1 for pattern in patterns if re.search(pattern, source, re.IGNORECASE))
+        result[key] = {"detected": hits > 0, "signals": hits}
+    return result
 
 def _most_common(values: list):
     normalized = [value for value in values if value not in (None, "", {}, [])]
@@ -360,6 +509,32 @@ def merge_theme_analyses(analyses: list[dict]) -> dict:
         if len(preview) >= 8:
             break
 
+    evidence: dict = {}
+    for row in rows:
+        for key, item in (((row.get("component_rules") or {}).get("_evidence") or {}).items()):
+            if isinstance(item, dict):
+                current = evidence.get(key)
+                if current is None or float(item.get("confidence") or 0) >= float(current.get("confidence") or 0):
+                    evidence[key] = dict(item)
+        role = str(row.get("reference_role") or "").strip().lower()
+        file_name = str(row.get("file_name") or "").strip()
+        role_map = {
+            "default":"menu.normal", "menu_hover":"menu.hover", "menu_active":"menu.active",
+            "submenu_open":"submenu.normal", "user_menu_open":"user_menu.normal",
+            "button_hover":"button.hover", "input_focus":"input.focus", "mobile":"layout.mobile",
+        }
+        if role in role_map:
+            evidence[role_map[role]] = {
+                "status":"reference", "source":"SCREENSHOT_REFERENCE", "reference_role":role,
+                "file_name":file_name, "confidence":0.78 if role not in {"default","mobile"} else 0.72,
+            }
+    components["_evidence"] = evidence
+    components["_source_summary"] = {
+        "url_css": bool(url_rows),
+        "screenshots": len([row for row in rows if str(row.get("analysis_source") or "").upper()=="IMAGE"]),
+        "confirmed_states": sum(1 for item in evidence.values() if str(item.get("status"))=="confirmed"),
+        "reference_states": sum(1 for item in evidence.values() if str(item.get("status"))=="reference"),
+    }
     return {
         "tokens": tokens,
         "component_rules": components,
@@ -419,6 +594,18 @@ def analyze_css_text(css_text: str) -> dict:
 
     component_rules, layout_rules = build_rules(tokens)
     component_rules["menu"] = extract_menu_rules(css_text, tokens)
+    interaction_rules, interaction_evidence = extract_interaction_rules(css_text, tokens)
+    for component, rules in interaction_rules.items():
+        if component == "menu":
+            continue
+        component_rules[component] = {**(component_rules.get(component) or {}), **rules}
+    menu_source = component_rules.get("menu") or {}
+    evidence = dict(interaction_evidence)
+    for state in ("normal", "hover", "active"):
+        state_rule = menu_source.get(state)
+        if isinstance(state_rule, dict) and menu_source.get("source") == "CSS_SELECTOR_ANALYSIS":
+            evidence.setdefault(f"menu.{state}", {"status":"confirmed","source":"URL_CSS_SELECTOR","confidence":0.92})
+    component_rules["_evidence"] = evidence
     return {
         "tokens": tokens,
         "component_rules": component_rules,
@@ -495,7 +682,7 @@ async def _safe_get(client: httpx.AsyncClient, url: str, *, max_redirects: int =
 async def analyze_theme_from_url(url: str) -> dict:
     target = await validate_public_theme_url(url)
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36 THEANOVA-AgentStudio-ThemeImporter/5.392",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36 THEANOVA-AgentStudio-ThemeImporter/5.393",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/css;q=0.8,*/*;q=0.6",
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
         "Cache-Control": "no-cache",
@@ -529,12 +716,15 @@ async def analyze_theme_from_url(url: str) -> dict:
             except Exception:
                 continue
 
-    analysis = analyze_css_text("\n".join(css_parts))
+    css_text = "\n".join(css_parts)
+    analysis = analyze_css_text(css_text)
     analysis["analysis_source"] = "URL"
     analysis["source_url"] = final_url
     analysis["source_meta"] = {
         "css_files": fetched_css,
-        "analysis": "HTML/CSS design-token extraction",
+        "analysis": "HTML/CSS interaction-state design-token extraction",
         "content_copied": False,
+        "interaction_structure": analyze_html_interactions(html),
+        "evidence_count": len(((analysis.get("component_rules") or {}).get("_evidence") or {})),
     }
     return analysis

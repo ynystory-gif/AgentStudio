@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import sys
 import uuid
 import subprocess
 import re
@@ -18,7 +19,57 @@ from app.services.gpu_runtime_manager import gpu_runtime_environment
 _runtime_project_roots: set[Path] = set()
 _runtime_roots_lock = RLock()
 
+# v5.393: commands launched by Agent Factory validation/tests are tracked so an
+# asyncio Job cancellation cannot leave a detached compiler/test subprocess
+# running after the UI already shows FAILED/DEBUG_STOPPED/VALIDATION_BLOCKED.
+_active_command_processes: dict[str, subprocess.Popen] = {}
+_active_command_meta: dict[str, dict] = {}
+_active_command_lock = RLock()
 
+
+def _terminate_command_process_tree(process: subprocess.Popen) -> None:
+    if not process or process.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        else:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+def active_command_processes(project_root: str = "") -> list[dict]:
+    requested = str(Path(project_root).expanduser().resolve()) if project_root else ""
+    rows = []
+    with _active_command_lock:
+        items = list(_active_command_processes.items())
+        meta = {key: dict(_active_command_meta.get(key) or {}) for key, _ in items}
+    for execution_id, process in items:
+        running = process.poll() is None
+        info = meta.get(execution_id) or {}
+        if requested and str(info.get("cwd") or "") != requested:
+            continue
+        rows.append({
+            "execution_id": execution_id,
+            "pid": process.pid,
+            "running": running,
+            **info,
+        })
+    return rows
 
 
 class InvalidNotebookContentError(ValueError):
@@ -1113,32 +1164,54 @@ async def write_file(
 async def run_command(command: str, cwd: str):
     p = _allowed(cwd)
     s = get_settings()
-
-    def _execute():
-        return subprocess.run(
-            command,
-            cwd=str(p),
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=s.max_command_seconds,
-            env=gpu_runtime_environment(os.environ.copy()),
-        )
+    execution_id = uuid.uuid4().hex
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if sys.platform == "win32" else 0
+    process = subprocess.Popen(
+        command,
+        cwd=str(p),
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        creationflags=flags,
+        env=gpu_runtime_environment(os.environ.copy()),
+    )
+    with _active_command_lock:
+        _active_command_processes[execution_id] = process
+        _active_command_meta[execution_id] = {
+            "cwd": str(p),
+            "command": str(command),
+        }
 
     try:
-        proc = await asyncio.to_thread(_execute)
-    except subprocess.TimeoutExpired:
-        raise TimeoutError(
-            f"명령 실행 제한시간 {s.max_command_seconds}초를 초과했습니다."
-        )
+        try:
+            stdout, _ = await asyncio.wait_for(
+                asyncio.to_thread(process.communicate),
+                timeout=s.max_command_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            _terminate_command_process_tree(process)
+            raise TimeoutError(
+                f"명령 실행 제한시간 {s.max_command_seconds}초를 초과했습니다."
+            ) from exc
+        except asyncio.CancelledError:
+            # Critical lifecycle rule: cancelling the Agent Factory Job must also
+            # terminate the real compiler/test process tree, not only the asyncio Task.
+            _terminate_command_process_tree(process)
+            raise
 
-    return {
-        "returncode": proc.returncode,
-        "output": (proc.stdout or b"").decode(
-            "utf-8",
-            errors="replace",
-        ),
-    }
+        return {
+            "returncode": process.returncode,
+            "output": (stdout or b"").decode(
+                "utf-8",
+                errors="replace",
+            ),
+        }
+    finally:
+        if process.poll() is None:
+            _terminate_command_process_tree(process)
+        with _active_command_lock:
+            _active_command_processes.pop(execution_id, None)
+            _active_command_meta.pop(execution_id, None)
 
 
 async def create_folder(root: str, relative_path: str):

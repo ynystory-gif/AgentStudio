@@ -46,6 +46,14 @@ export interface NotebookDependencyDiagnostic {
   [key: string]: unknown
 }
 
+export interface NotebookLiveOutputEvent {
+  event?: 'clear_output' | 'display_data' | 'update_display_data' | 'stream' | string
+  wait?: boolean
+  display_id?: string
+  output?: NotebookOutputData
+  [key: string]: unknown
+}
+
 export interface NotebookExecutionRequest {
   pythonCode: string
   filePath: string
@@ -53,6 +61,7 @@ export interface NotebookExecutionRequest {
   cellIndex: number
   mode: 'full' | 'selection'
   selectionOnly: boolean
+  onOutputEvent?: (event: NotebookLiveOutputEvent) => void
 }
 
 export interface NotebookExecutionResult {
@@ -65,7 +74,51 @@ export interface NotebookExecutionResult {
   error_message?: string
   interpreter?: string
   dependency_diagnostic?: NotebookDependencyDiagnostic | null
+  rich_outputs?: NotebookOutputData[]
+  streaming?: boolean
   [key: string]: unknown
+}
+
+export interface NotebookDebugVariable {
+  name: string
+  type?: string
+  value?: string
+  scope?: string
+}
+
+export interface NotebookDebugStackFrame {
+  function?: string
+  file?: string
+  line?: number
+}
+
+export interface NotebookDebugResult extends NotebookExecutionResult {
+  event?: 'idle' | 'paused' | 'evaluate' | 'finished' | 'stopped' | 'error' | string
+  debug_active?: boolean
+  cell_index?: number
+  line?: number
+  source_line?: string
+  reason?: string
+  variables?: NotebookDebugVariable[]
+  stack?: NotebookDebugStackFrame[]
+  evaluate_result?: string
+  evaluate_error?: string
+  exception?: { type?: string; message?: string } | null
+}
+
+export interface NotebookDebugStartRequest {
+  pythonCode: string
+  filePath: string
+  projectRoot?: string
+  cellIndex: number
+  breakpoints: number[]
+}
+
+export interface NotebookDebugCommandRequest {
+  command: 'continue' | 'step_over' | 'step_into' | 'step_out' | 'stop' | 'evaluate'
+  expression?: string
+  filePath: string
+  projectRoot?: string
 }
 
 export interface NotebookEditorController {

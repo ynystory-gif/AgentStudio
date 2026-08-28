@@ -13,10 +13,13 @@ from typing import Any
 
 
 _WORKER_RESPONSE_PREFIX = '__AGENTSTUDIO_PY_RESPONSE_V1__'
+_WORKER_EVENT_PREFIX = '__AGENTSTUDIO_PY_EVENT_V1__'
 
 _WORKER_CODE = r'''
 import ast
 import asyncio
+import base64
+import bdb
 import builtins
 import contextlib
 import io
@@ -31,12 +34,114 @@ import sys
 import traceback
 
 RESPONSE_PREFIX = '__AGENTSTUDIO_PY_RESPONSE_V1__'
+EVENT_PREFIX = '__AGENTSTUDIO_PY_EVENT_V1__'
 
 namespace = {
     "__name__": "__main__",
     "__package__": None,
     "__builtins__": builtins,
 }
+
+# v5.411: Notebook rich-output streaming.
+# AgentStudio does not embed a full ipykernel, so IPython.display would otherwise
+# degrade to text such as "Figure(700x600)".  These hooks serialize display()
+# payloads (especially Matplotlib figures) to the same MIME bundle shape used by
+# Jupyter and emit them immediately over the worker stdout protocol.
+def _agentstudio_emit_notebook_event(payload):
+    try:
+        sys.__stdout__.write(EVENT_PREFIX + json.dumps(payload, ensure_ascii=False) + "\n")
+        sys.__stdout__.flush()
+    except BaseException:
+        pass
+
+def _agentstudio_notebook_mime_bundle(value):
+    data = {}
+    metadata = {}
+    if value is None:
+        return data, metadata
+
+    # Matplotlib Figure and compatible objects.
+    if hasattr(value, "savefig") and callable(getattr(value, "savefig", None)):
+        try:
+            buffer = io.BytesIO()
+            value.savefig(buffer, format="png", bbox_inches="tight")
+            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+            if encoded:
+                data["image/png"] = encoded
+        except BaseException:
+            pass
+
+    rich_methods = (
+        ("_repr_png_", "image/png"),
+        ("_repr_svg_", "image/svg+xml"),
+        ("_repr_html_", "text/html"),
+        ("_repr_markdown_", "text/markdown"),
+    )
+    for method_name, mime_type in rich_methods:
+        if mime_type in data:
+            continue
+        method = getattr(value, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            rendered = method()
+            if rendered is None:
+                continue
+            if isinstance(rendered, tuple):
+                rendered, rich_metadata = rendered
+                if isinstance(rich_metadata, dict):
+                    metadata[mime_type] = rich_metadata
+            if mime_type == "image/png" and isinstance(rendered, (bytes, bytearray)):
+                rendered = base64.b64encode(bytes(rendered)).decode("ascii")
+            if rendered is not None:
+                data[mime_type] = rendered
+        except BaseException:
+            pass
+
+    if not data:
+        try:
+            data["text/plain"] = repr(value)
+        except BaseException:
+            data["text/plain"] = f"<{type(value).__name__}>"
+    return data, metadata
+
+def _agentstudio_notebook_display(*objects, display_id=None, raw=False, metadata=None, **kwargs):
+    for value in objects:
+        if raw and isinstance(value, dict):
+            data = dict(value)
+            rich_metadata = dict(metadata or {})
+        else:
+            data, rich_metadata = _agentstudio_notebook_mime_bundle(value)
+            if isinstance(metadata, dict):
+                rich_metadata.update(metadata)
+        event = {
+            "event": "display_data",
+            "output": {
+                "output_type": "display_data",
+                "data": data,
+                "metadata": rich_metadata,
+            },
+        }
+        if display_id:
+            event["display_id"] = str(display_id)
+        _agentstudio_emit_notebook_event(event)
+    return None
+
+def _agentstudio_notebook_clear_output(wait=False):
+    _agentstudio_emit_notebook_event({
+        "event": "clear_output",
+        "wait": bool(wait),
+    })
+    return None
+
+def _agentstudio_install_notebook_display_hooks():
+    try:
+        import IPython.display as _agentstudio_ipython_display
+        _agentstudio_ipython_display.display = _agentstudio_notebook_display
+        _agentstudio_ipython_display.clear_output = _agentstudio_notebook_clear_output
+    except BaseException:
+        # IPython is optional. Notebook Python execution remains usable without it.
+        pass
 
 # v5.349: AgentStudio Notebook cells now support the same top-level await
 # syntax users expect from Jupyter/IPython.  The worker itself is synchronous,
@@ -245,9 +350,279 @@ namespace["_agentstudio_notebook_pip"] = _agentstudio_notebook_pip
 namespace["_agentstudio_notebook_shell"] = _agentstudio_notebook_shell
 namespace["_agentstudio_notebook_writefile"] = _agentstudio_notebook_writefile
 
+# v5.397: VS Code-like Notebook cell debugger.  The debugger runs inside the
+# same persistent worker/namespace used by normal Notebook execution, so values
+# created by earlier cells remain visible.  While Python is paused, this helper
+# temporarily consumes debugger command packets directly from stdin; the outer
+# worker loop resumes after the debugged cell finishes or is stopped.
+def _agentstudio_send_response(payload):
+    sys.__stdout__.write(RESPONSE_PREFIX + json.dumps(payload, ensure_ascii=False) + "\n")
+    sys.__stdout__.flush()
+
+def _agentstudio_safe_repr(value, limit=700):
+    try:
+        text = repr(value)
+    except BaseException as exc:
+        text = f"<repr failed: {type(exc).__name__}: {exc}>"
+    text = str(text).replace("\r", "\\r").replace("\n", "\\n")
+    if len(text) > limit:
+        text = text[: max(0, limit - 1)] + "…"
+    return text
+
+def _agentstudio_debug_variables(frame):
+    variables = []
+    hidden_prefixes = ("_agentstudio_", "__builtins__")
+    for name, value in sorted(frame.f_locals.items(), key=lambda item: str(item[0]).casefold()):
+        if str(name).startswith(hidden_prefixes):
+            continue
+        variables.append({
+            "name": str(name),
+            "type": type(value).__name__,
+            "value": _agentstudio_safe_repr(value),
+            "scope": "local",
+        })
+        if len(variables) >= 100:
+            break
+    return variables
+
+def _agentstudio_debug_stack(frame, target_filename):
+    stack = []
+    current = frame
+    canonical_target = os.path.normcase(os.path.abspath(target_filename))
+    while current is not None and len(stack) < 30:
+        current_filename = str(current.f_code.co_filename or "")
+        canonical_current = os.path.normcase(os.path.abspath(current_filename)) if current_filename else ""
+        if canonical_current == canonical_target:
+            stack.append({
+                "function": str(current.f_code.co_name or "<module>"),
+                "file": current_filename,
+                "line": int(current.f_lineno or 0),
+            })
+        current = current.f_back
+    return stack
+
+class _AgentStudioCellDebugger(bdb.Bdb):
+    def __init__(self, *, filename, cell_index, stdout, stderr):
+        super().__init__()
+        self.filename = str(filename)
+        self.canonical_filename = self.canonic(self.filename)
+        self.cell_index = cell_index
+        self.stdout = stdout
+        self.stderr = stderr
+        self.current_frame = None
+        self.pause_reason = "step"
+        self.exception_info = None
+
+    def _is_target_frame(self, frame):
+        return self.canonic(str(frame.f_code.co_filename or "")) == self.canonical_filename
+
+    def _state_payload(self, frame, *, event="paused", reason=None, evaluate_result=None, evaluate_error=None):
+        line = max(1, int(frame.f_lineno or 1))
+        source_line = linecache.getline(self.filename, line).rstrip("\r\n")
+        payload = {
+            "ok": True,
+            "event": event,
+            "debug_active": True,
+            "cell_index": self.cell_index,
+            "line": line,
+            "source_line": source_line,
+            "reason": str(reason or self.pause_reason or "step"),
+            "variables": _agentstudio_debug_variables(frame),
+            "stack": _agentstudio_debug_stack(frame, self.filename),
+            "stdout": self.stdout.getvalue(),
+            "stderr": self.stderr.getvalue(),
+        }
+        if self.exception_info:
+            exc_type, exc_value, _ = self.exception_info
+            payload["exception"] = {
+                "type": getattr(exc_type, "__name__", str(exc_type)),
+                "message": str(exc_value),
+            }
+        if evaluate_result is not None:
+            payload["evaluate_result"] = evaluate_result
+        if evaluate_error is not None:
+            payload["evaluate_error"] = evaluate_error
+        return payload
+
+    def _interaction(self, frame, *, reason="step", exception_info=None):
+        self.current_frame = frame
+        self.pause_reason = reason
+        self.exception_info = exception_info
+        _agentstudio_send_response(self._state_payload(frame, reason=reason))
+
+        while True:
+            raw_command = sys.stdin.readline()
+            if not raw_command:
+                self.set_quit()
+                raise bdb.BdbQuit
+            try:
+                command_request = json.loads(raw_command)
+            except BaseException as exc:
+                _agentstudio_send_response(self._state_payload(
+                    frame,
+                    event="evaluate",
+                    reason=reason,
+                    evaluate_error=f"Debugger command JSON 오류: {exc}",
+                ))
+                continue
+
+            if str(command_request.get("action") or "") != "debug_command":
+                _agentstudio_send_response(self._state_payload(
+                    frame,
+                    event="evaluate",
+                    reason=reason,
+                    evaluate_error="디버깅이 일시정지된 동안에는 디버그 명령만 실행할 수 있습니다.",
+                ))
+                continue
+
+            command = str(command_request.get("command") or "").strip().lower()
+            if command == "evaluate":
+                expression = str(command_request.get("expression") or "")
+                if not expression.strip():
+                    _agentstudio_send_response(self._state_payload(
+                        frame, event="evaluate", reason=reason, evaluate_error="평가할 표현식을 입력하세요."
+                    ))
+                    continue
+                try:
+                    try:
+                        value = eval(expression, frame.f_globals, frame.f_locals)
+                        result_text = _agentstudio_safe_repr(value, limit=2000)
+                    except SyntaxError:
+                        exec(expression, frame.f_globals, frame.f_locals)
+                        result_text = "<실행 완료>"
+                    _agentstudio_send_response(self._state_payload(
+                        frame, event="evaluate", reason=reason, evaluate_result=result_text
+                    ))
+                except BaseException as exc:
+                    _agentstudio_send_response(self._state_payload(
+                        frame,
+                        event="evaluate",
+                        reason=reason,
+                        evaluate_error=f"{type(exc).__name__}: {exc}",
+                    ))
+                continue
+
+            if command == "continue":
+                self.set_continue()
+                return
+            if command == "step_over":
+                self.set_next(frame)
+                return
+            if command == "step_into":
+                self.set_step()
+                return
+            if command == "step_out":
+                self.set_return(frame)
+                return
+            if command == "stop":
+                self.set_quit()
+                raise bdb.BdbQuit
+
+            _agentstudio_send_response(self._state_payload(
+                frame,
+                event="evaluate",
+                reason=reason,
+                evaluate_error=f"지원하지 않는 디버그 명령입니다: {command}",
+            ))
+
+    def user_line(self, frame):
+        if not self._is_target_frame(frame):
+            return
+        self._interaction(frame, reason="breakpoint" if self.break_here(frame) else "step")
+
+    def user_exception(self, frame, exc_info):
+        if not self._is_target_frame(frame):
+            return
+        self._interaction(frame, reason="exception", exception_info=exc_info)
+
+def _agentstudio_debug_cell(*, code, filename, cell_index, breakpoints, global_namespace, stdout, stderr):
+    # Debugging Jupyter shell/cell magics through bdb produces misleading source
+    # locations.  Normal execution still supports those magics; the debugger
+    # intentionally targets Python code cells only.
+    raw_lines = str(code or "").splitlines()
+    if any(line.lstrip().startswith(("!", "%")) for line in raw_lines):
+        return {
+            "ok": False,
+            "event": "error",
+            "debug_active": False,
+            "error_type": "NotebookDebugUnsupportedMagic",
+            "error_message": "!command, %magic, %%cell magic이 포함된 셀은 일반 셀 실행을 사용해 주세요.",
+            "traceback": "",
+            "stdout": stdout.getvalue(),
+            "stderr": stderr.getvalue(),
+            "cell_index": cell_index,
+        }
+
+    debugger = _AgentStudioCellDebugger(
+        filename=filename,
+        cell_index=cell_index,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    valid_breakpoints = []
+    max_line = max(1, len(raw_lines))
+    for raw_line in breakpoints or []:
+        try:
+            line = int(raw_line)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= line <= max_line and line not in valid_breakpoints:
+            valid_breakpoints.append(line)
+            try:
+                debugger.set_break(filename, line)
+            except BaseException:
+                pass
+
+    try:
+        # bdb stops at the first executable line.  Continue/step commands then
+        # honor explicit red breakpoints and provide a predictable VS Code-like
+        # entry point even when the user has not placed a breakpoint yet.
+        compiled = compile(code, filename, "exec")
+        debugger.runctx(compiled, global_namespace, global_namespace)
+        return {
+            "ok": True,
+            "event": "finished",
+            "debug_active": False,
+            "stdout": stdout.getvalue(),
+            "stderr": stderr.getvalue(),
+            "traceback": "",
+            "error_type": "",
+            "error_message": "",
+            "cell_index": cell_index,
+            "breakpoints": valid_breakpoints,
+        }
+    except bdb.BdbQuit:
+        return {
+            "ok": False,
+            "cancelled": True,
+            "event": "stopped",
+            "debug_active": False,
+            "stdout": stdout.getvalue(),
+            "stderr": stderr.getvalue(),
+            "traceback": "",
+            "error_type": "ExecutionCancelled",
+            "error_message": "Notebook 셀 디버깅을 종료했습니다.",
+            "cell_index": cell_index,
+            "breakpoints": valid_breakpoints,
+        }
+    except BaseException as exc:
+        return {
+            "ok": False,
+            "event": "error",
+            "debug_active": False,
+            "stdout": stdout.getvalue(),
+            "stderr": stderr.getvalue(),
+            "traceback": traceback.format_exc(),
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "cell_index": cell_index,
+            "breakpoints": valid_breakpoints,
+        }
+
 for raw in sys.stdin:
     try:
         request = json.loads(raw)
+        action = str(request.get("action") or "execute").strip().lower()
         code = str(request.get("code") or "")
         filename = str(request.get("filename") or "<agentstudio>")
         root = str(request.get("root") or os.getcwd())
@@ -265,6 +640,7 @@ for raw in sys.stdin:
             if isinstance(key, str) and value is not None
         } if isinstance(raw_env_overrides, dict) else {}
         if notebook_mode:
+            _agentstudio_install_notebook_display_hooks()
             code = _preprocess_notebook_code(code, root)
 
         if reset:
@@ -319,33 +695,57 @@ for raw in sys.stdin:
                 code.splitlines(True),
                 filename,
             )
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                # Jupyter/IPython accepts ``await`` directly in a Code cell.
-                # Python's compile() can provide the same semantics via
-                # PyCF_ALLOW_TOP_LEVEL_AWAIT, but only in Notebook mode so
-                # normal .py editor execution continues to enforce standard
-                # Python script syntax.
-                compile_flags = ast.PyCF_ALLOW_TOP_LEVEL_AWAIT if notebook_mode else 0
-                if capture_last_expression:
-                    tree = ast.parse(code, filename=filename, mode="exec")
-                    if tree.body and isinstance(tree.body[-1], ast.Expr):
-                        body_module = ast.Module(body=tree.body[:-1], type_ignores=getattr(tree, "type_ignores", []))
-                        ast.fix_missing_locations(body_module)
-                        if body_module.body:
-                            body_compiled = compile(body_module, filename, "exec", flags=compile_flags)
-                            _agentstudio_execute_compiled(body_compiled, namespace)
-                        expression = ast.Expression(body=tree.body[-1].value)
-                        ast.fix_missing_locations(expression)
-                        expression_compiled = compile(expression, filename, "eval", flags=compile_flags)
-                        result = _agentstudio_execute_compiled(expression_compiled, namespace)
-                        if result is not None:
-                            print(repr(result))
-                    else:
-                        compiled = compile(tree, filename, "exec", flags=compile_flags)
-                        _agentstudio_execute_compiled(compiled, namespace)
-                else:
-                    compiled = compile(code, filename, "exec", flags=compile_flags)
-                    _agentstudio_execute_compiled(compiled, namespace)
+            if action == "debug_start":
+                # Keep stdout/stderr redirected for the whole debug session.
+                # Pause/evaluate protocol messages bypass the redirect through
+                # sys.__stdout__ so they remain visible to AgentStudio.
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    response = _agentstudio_debug_cell(
+                        code=code,
+                        filename=filename,
+                        cell_index=request.get("cell_index"),
+                        breakpoints=request.get("breakpoints") or [],
+                        global_namespace=namespace,
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+                # The debug helper already owns execution and returns the final
+                # terminal response.  Skip the normal compile/exec path below.
+                ok = bool(response.get("ok"))
+                error_type = str(response.get("error_type") or "")
+                error_message = str(response.get("error_message") or "")
+                trace = str(response.get("traceback") or "")
+            else:
+                response = None
+
+            if action != "debug_start":
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                  # Jupyter/IPython accepts ``await`` directly in a Code cell.
+                  # Python's compile() can provide the same semantics via
+                  # PyCF_ALLOW_TOP_LEVEL_AWAIT, but only in Notebook mode so
+                  # normal .py editor execution continues to enforce standard
+                  # Python script syntax.
+                  compile_flags = ast.PyCF_ALLOW_TOP_LEVEL_AWAIT if notebook_mode else 0
+                  if capture_last_expression:
+                      tree = ast.parse(code, filename=filename, mode="exec")
+                      if tree.body and isinstance(tree.body[-1], ast.Expr):
+                          body_module = ast.Module(body=tree.body[:-1], type_ignores=getattr(tree, "type_ignores", []))
+                          ast.fix_missing_locations(body_module)
+                          if body_module.body:
+                              body_compiled = compile(body_module, filename, "exec", flags=compile_flags)
+                              _agentstudio_execute_compiled(body_compiled, namespace)
+                          expression = ast.Expression(body=tree.body[-1].value)
+                          ast.fix_missing_locations(expression)
+                          expression_compiled = compile(expression, filename, "eval", flags=compile_flags)
+                          result = _agentstudio_execute_compiled(expression_compiled, namespace)
+                          if result is not None:
+                              print(repr(result))
+                      else:
+                          compiled = compile(tree, filename, "exec", flags=compile_flags)
+                          _agentstudio_execute_compiled(compiled, namespace)
+                  else:
+                      compiled = compile(code, filename, "exec", flags=compile_flags)
+                      _agentstudio_execute_compiled(compiled, namespace)
         except SystemExit as exc:
             ok = exc.code in (None, 0)
             if not ok:
@@ -364,14 +764,15 @@ for raw in sys.stdin:
                 elif env_key in missing_env:
                     os.environ.pop(env_key, None)
 
-        response = {
-            "ok": ok,
-            "stdout": stdout.getvalue(),
-            "stderr": stderr.getvalue(),
-            "error_type": error_type,
-            "error_message": error_message,
-            "traceback": trace,
-        }
+        if action != "debug_start" or response is None:
+            response = {
+                "ok": ok,
+                "stdout": stdout.getvalue(),
+                "stderr": stderr.getvalue(),
+                "error_type": error_type,
+                "error_message": error_message,
+                "traceback": trace,
+            }
     except BaseException as exc:
         response = {
             "ok": False,
@@ -395,6 +796,9 @@ class PythonExecutionSession:
     interpreter: str
     process: subprocess.Popen[str]
     lock: threading.Lock = field(default_factory=threading.Lock)
+    debug_active: bool = False
+    debug_cell_index: int | None = None
+    last_debug_state: dict[str, Any] = field(default_factory=dict)
 
 
 _PIP_PACKAGE_BY_IMPORT = {
@@ -604,6 +1008,169 @@ class PythonExecutionManager:
             self._sessions[key] = session
             return session
 
+    @staticmethod
+    def _read_worker_response(session: PythonExecutionSession) -> tuple[dict[str, Any], str]:
+        if session.process.stdout is None:
+            raise RuntimeError("Python 실행 세션의 stdout을 사용할 수 없습니다.")
+        native_output_parts: list[str] = []
+        while True:
+            response_line = session.process.stdout.readline()
+            if not response_line:
+                raise RuntimeError(
+                    "Python 실행 세션이 프로토콜 응답 전에 종료되었습니다."
+                    + (f"\n자식 프로세스 출력:\n{''.join(native_output_parts)[-4000:]}" if native_output_parts else "")
+                )
+            marker_index = response_line.find(_WORKER_RESPONSE_PREFIX)
+            if marker_index < 0:
+                native_output_parts.append(response_line)
+                continue
+            if marker_index > 0:
+                native_output_parts.append(response_line[:marker_index])
+            response_json = response_line[marker_index + len(_WORKER_RESPONSE_PREFIX):].strip()
+            if not response_json:
+                continue
+            try:
+                response = json.loads(response_json)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "Python 실행 세션의 내부 응답 JSON을 해석하지 못했습니다: "
+                    f"{exc}. 응답={response_json[:500]!r}"
+                ) from exc
+            return response, "".join(native_output_parts)
+
+    @staticmethod
+    def _execution_context(
+        *,
+        root: str,
+        relative_path: str = "",
+        notebook_mode: bool = False,
+        cell_index: int | None = None,
+    ) -> tuple[Path, str, str, Path]:
+        project_root = Path(root).expanduser().resolve()
+        if not project_root.exists() or not project_root.is_dir():
+            raise FileNotFoundError(str(project_root))
+        relative = str(relative_path or "").replace("\\", "/").lstrip("/")
+        filename_path = (project_root / relative).resolve() if relative else project_root / "<selection>"
+        if relative:
+            try:
+                filename_path.relative_to(project_root)
+            except ValueError as exc:
+                raise ValueError("프로젝트 root 밖의 Python 파일은 실행할 수 없습니다.") from exc
+        execution_filename = str(filename_path)
+        execution_working_directory = project_root
+        if notebook_mode and relative.lower().endswith(".ipynb"):
+            display_cell = (int(cell_index) + 1) if cell_index is not None else 1
+            execution_filename = f"{filename_path}.cell-{display_cell}.py"
+            execution_working_directory = filename_path.parent
+        return project_root, relative, execution_filename, execution_working_directory
+
+    def debug_start(
+        self,
+        *,
+        root: str,
+        code: str,
+        relative_path: str,
+        session_id: str | None,
+        cell_index: int,
+        breakpoints: list[int] | None = None,
+        reset: bool = False,
+        env_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        project_root, relative, execution_filename, working_directory = self._execution_context(
+            root=root, relative_path=relative_path, notebook_mode=True, cell_index=cell_index
+        )
+        session = self._get_or_create(str(project_root), session_id)
+        with session.lock:
+            if session.debug_active:
+                return {**session.last_debug_state, "debug_active": True, "event": "paused"}
+            if session.process.stdin is None:
+                raise RuntimeError("Python 디버그 세션의 stdin을 사용할 수 없습니다.")
+            request = {
+                "action": "debug_start",
+                "root": str(project_root),
+                "working_directory": str(working_directory),
+                "code": str(code or ""),
+                "filename": execution_filename,
+                "reset": bool(reset),
+                "capture_last_expression": False,
+                "notebook_mode": True,
+                "cell_index": int(cell_index),
+                "breakpoints": [int(line) for line in (breakpoints or []) if int(line) > 0],
+                "env_overrides": {str(k): str(v) for k, v in (env_overrides or {}).items() if v is not None},
+            }
+            session.process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+            session.process.stdin.flush()
+            response, native_output = self._read_worker_response(session)
+            if native_output:
+                response["stdout"] = native_output + str(response.get("stdout") or "")
+            session.debug_active = bool(response.get("debug_active")) and str(response.get("event") or "") in {"paused", "evaluate"}
+            session.debug_cell_index = int(cell_index) if session.debug_active else None
+            session.last_debug_state = dict(response)
+        response.update({
+            "interpreter": session.interpreter,
+            "session_id": session.session_id,
+            "root": str(project_root),
+            "relative_path": relative,
+            "notebook_mode": True,
+            "cell_index": int(cell_index),
+        })
+        return response
+
+    def debug_command(
+        self,
+        *,
+        root: str,
+        session_id: str | None,
+        command: str,
+        expression: str = "",
+    ) -> dict[str, Any]:
+        key = self._session_key(root, session_id)
+        with self._sessions_lock:
+            session = self._sessions.get(key)
+        if not session or session.process.poll() is not None:
+            raise RuntimeError("활성 Notebook 디버그 세션이 없습니다.")
+        with session.lock:
+            if not session.debug_active:
+                raise RuntimeError("Notebook 디버거가 현재 일시정지 상태가 아닙니다.")
+            if session.process.stdin is None:
+                raise RuntimeError("Python 디버그 세션의 stdin을 사용할 수 없습니다.")
+            packet = {"action": "debug_command", "command": str(command or "").strip().lower()}
+            if expression:
+                packet["expression"] = str(expression)
+            session.process.stdin.write(json.dumps(packet, ensure_ascii=False) + "\n")
+            session.process.stdin.flush()
+            response, native_output = self._read_worker_response(session)
+            if native_output:
+                response["stdout"] = native_output + str(response.get("stdout") or "")
+            event = str(response.get("event") or "")
+            session.debug_active = bool(response.get("debug_active")) and event in {"paused", "evaluate"}
+            if not session.debug_active:
+                session.debug_cell_index = None
+            session.last_debug_state = dict(response)
+        response.update({
+            "interpreter": session.interpreter,
+            "session_id": session.session_id,
+            "root": str(Path(root).expanduser().resolve()),
+        })
+        return response
+
+    def debug_status(self, root: str, session_id: str | None = None) -> dict[str, Any]:
+        key = self._session_key(root, session_id)
+        with self._sessions_lock:
+            session = self._sessions.get(key)
+        if not session or session.process.poll() is not None:
+            return {"ok": True, "debug_active": False, "event": "idle"}
+        return {
+            "ok": True,
+            "debug_active": bool(session.debug_active),
+            "event": str(session.last_debug_state.get("event") or ("paused" if session.debug_active else "idle")),
+            "cell_index": session.debug_cell_index,
+            "line": session.last_debug_state.get("line"),
+            "variables": session.last_debug_state.get("variables") or [],
+            "stack": session.last_debug_state.get("stack") or [],
+            "source_line": session.last_debug_state.get("source_line") or "",
+        }
+
     def execute(
         self,
         *,
@@ -643,6 +1210,8 @@ class PythonExecutionManager:
             execution_working_directory = filename_path.parent
 
         session = self._get_or_create(str(project_root), session_id)
+        if session.debug_active:
+            raise RuntimeError("Notebook 디버거가 일시정지되어 있습니다. 디버그를 계속하거나 종료한 뒤 일반 실행을 사용하세요.")
         request = {
             "root": str(project_root),
             "working_directory": str(execution_working_directory),
@@ -751,6 +1320,203 @@ class PythonExecutionManager:
             "cell_index": cell_index,
         })
         return response
+
+    def execute_stream(
+        self,
+        *,
+        root: str,
+        code: str,
+        relative_path: str = "",
+        session_id: str | None = None,
+        reset: bool = False,
+        capture_last_expression: bool = False,
+        notebook_mode: bool = False,
+        cell_index: int | None = None,
+        env_overrides: dict[str, str] | None = None,
+    ):
+        """Yield Notebook display/clear events while the persistent worker runs.
+
+        The final packet is ``{"type": "result", "result": ...}``.  Rich
+        display events are also folded into ``result.rich_outputs`` so the last
+        visible frame can be saved back into the .ipynb document.
+        """
+        project_root = Path(root).expanduser().resolve()
+        if not project_root.exists() or not project_root.is_dir():
+            raise FileNotFoundError(str(project_root))
+
+        relative = str(relative_path or "").replace("\\", "/").lstrip("/")
+        filename_path = (project_root / relative).resolve() if relative else project_root / "<selection>"
+        if relative:
+            try:
+                filename_path.relative_to(project_root)
+            except ValueError as exc:
+                raise ValueError("프로젝트 root 밖의 Python 파일은 실행할 수 없습니다.") from exc
+
+        execution_filename = str(filename_path)
+        execution_working_directory = project_root
+        if notebook_mode and relative.lower().endswith(".ipynb"):
+            display_cell = (int(cell_index) + 1) if cell_index is not None else 1
+            execution_filename = f"{filename_path}.cell-{display_cell}.py"
+            execution_working_directory = filename_path.parent
+
+        session = self._get_or_create(str(project_root), session_id)
+        if session.debug_active:
+            raise RuntimeError("Notebook 디버거가 일시정지되어 있습니다. 디버그를 계속하거나 종료한 뒤 일반 실행을 사용하세요.")
+
+        request = {
+            "root": str(project_root),
+            "working_directory": str(execution_working_directory),
+            "code": str(code or ""),
+            "filename": execution_filename,
+            "reset": bool(reset),
+            "capture_last_expression": bool(capture_last_expression),
+            "notebook_mode": bool(notebook_mode),
+            "cell_index": cell_index,
+            "env_overrides": {str(k): str(v) for k, v in (env_overrides or {}).items() if v is not None},
+        }
+
+        yield {
+            "type": "start",
+            "cell_index": cell_index,
+            "session_id": session.session_id,
+            "interpreter": session.interpreter,
+        }
+
+        native_output_parts: list[str] = []
+        rich_outputs: list[dict[str, Any]] = []
+        pending_clear_wait = False
+        response: dict[str, Any] | None = None
+
+        with session.lock:
+            if session.process.poll() is not None:
+                with self._sessions_lock:
+                    self._sessions.pop(session.key, None)
+                session = self._get_or_create(str(project_root), session_id)
+
+            if session.process.stdin is None or session.process.stdout is None:
+                raise RuntimeError("Python 실행 세션의 stdin/stdout을 사용할 수 없습니다.")
+
+            session.process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+            session.process.stdin.flush()
+
+            while True:
+                response_line = session.process.stdout.readline()
+                if not response_line:
+                    with self._sessions_lock:
+                        cancelled = session.key in self._cancelled_sessions
+                        if cancelled:
+                            self._cancelled_sessions.discard(session.key)
+                    if cancelled:
+                        response = {
+                            "ok": False,
+                            "cancelled": True,
+                            "stdout": "".join(native_output_parts),
+                            "stderr": "",
+                            "error_type": "ExecutionCancelled",
+                            "error_message": "사용자가 Python 실행을 중지했습니다.",
+                            "traceback": "",
+                        }
+                        break
+                    raise RuntimeError(
+                        "Python 실행 세션이 프로토콜 응답 전에 종료되었습니다."
+                        + (
+                            f"\n자식 프로세스 출력:\n{''.join(native_output_parts)[-4000:]}"
+                            if native_output_parts
+                            else ""
+                        )
+                    )
+
+                event_index = response_line.find(_WORKER_EVENT_PREFIX)
+                response_index = response_line.find(_WORKER_RESPONSE_PREFIX)
+
+                if event_index >= 0 and (response_index < 0 or event_index < response_index):
+                    if event_index > 0:
+                        native_output_parts.append(response_line[:event_index])
+                    event_json = response_line[event_index + len(_WORKER_EVENT_PREFIX):].strip()
+                    if not event_json:
+                        continue
+                    try:
+                        event = json.loads(event_json)
+                    except json.JSONDecodeError:
+                        native_output_parts.append(response_line)
+                        continue
+
+                    event_name = str(event.get("event") or "")
+                    if event_name == "clear_output":
+                        if bool(event.get("wait")):
+                            # Jupyter semantics: defer the clear until replacement
+                            # output is actually available. This keeps the previous
+                            # animation frame visible and prevents a blank flash.
+                            pending_clear_wait = True
+                        else:
+                            rich_outputs.clear()
+                            pending_clear_wait = False
+                    else:
+                        output = event.get("output")
+                        if isinstance(output, dict):
+                            if pending_clear_wait:
+                                rich_outputs.clear()
+                                pending_clear_wait = False
+                            rich_outputs.append(output)
+                    yield {"type": "event", "event": event}
+                    continue
+
+                if response_index >= 0:
+                    if response_index > 0:
+                        native_output_parts.append(response_line[:response_index])
+                    response_json = response_line[response_index + len(_WORKER_RESPONSE_PREFIX):].strip()
+                    if not response_json:
+                        continue
+                    try:
+                        response = json.loads(response_json)
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError(
+                            "Python 실행 세션의 내부 응답 JSON을 해석하지 못했습니다: "
+                            f"{exc}. 응답={response_json[:500]!r}"
+                        ) from exc
+                    break
+
+                native_output_parts.append(response_line)
+
+        if response is None:
+            response = {
+                "ok": False,
+                "stdout": "",
+                "stderr": "",
+                "error_type": "NotebookStreamingError",
+                "error_message": "Notebook 스트리밍 실행 결과를 받지 못했습니다.",
+                "traceback": "",
+            }
+
+        native_output = "".join(native_output_parts)
+        if native_output:
+            response["stdout"] = native_output + str(response.get("stdout") or "")
+
+        dependency = _dependency_diagnostic(
+            response=response,
+            interpreter=session.interpreter,
+            project_root=project_root,
+        )
+        if dependency:
+            response["dependency_diagnostic"] = dependency
+
+        if rich_outputs:
+            response["rich_outputs"] = rich_outputs
+
+        response.update({
+            "interpreter": session.interpreter,
+            "session_id": session.session_id,
+            "root": str(project_root),
+            "relative_path": relative,
+            "working_directory": str(execution_working_directory),
+            "persistent": True,
+            "reset": bool(reset),
+            "capture_last_expression": bool(capture_last_expression),
+            "notebook_mode": bool(notebook_mode),
+            "cell_index": cell_index,
+            "streaming": True,
+        })
+        yield {"type": "result", "result": response}
 
     @staticmethod
     def _stop_session_process(session: PythonExecutionSession, timeout: float = 2.0) -> None:

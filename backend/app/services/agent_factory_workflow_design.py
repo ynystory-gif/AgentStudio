@@ -868,6 +868,41 @@ def _enforce_generated_test_environment_plan(design: dict, request: str) -> dict
     design["test_environment_plan"] = plan
     return design
 
+def build_safe_agent_factory_design(request: str, *, reason: str = "") -> dict:
+    """Build a deterministic, LLM-free Agent design that keeps Workflow/DB review usable.
+
+    v5.393 recovery path: provider outages must not leave the user on a dead-end
+    error card.  This uses the existing policy/fallback workflow plus the verified
+    Database Module Registry, so the user can inspect/confirm the DB plan and retry
+    AI enrichment later.
+    """
+    fallback = _enforce_workflow_requirement_coverage(
+        _fallback_design(request),
+        request,
+    )
+    _sanitize_requirement_spec(fallback, request)
+    fallback["database_plan"] = build_database_plan(request, fallback)
+    fallback = _enforce_generated_test_environment_plan(fallback, request)
+    runtime = fallback.setdefault("design_runtime", {})
+    runtime.update({
+        "workflow_provider": "deterministic_safe_fallback",
+        "workflow_task": LLMTask.WORKFLOW_DESIGN.value,
+        "database_provider": "deterministic_module_registry",
+        "recovery_mode": "SAFE_DESIGN",
+        "recovery_reason": str(reason or "AI Provider를 사용하지 않는 안전 설계가 선택되었습니다."),
+    })
+    fallback["recovery"] = {
+        "used": True,
+        "kind": "DETERMINISTIC_SAFE_DESIGN",
+        "message": "AI Provider 없이 검증된 기본 Workflow/DB Module Registry로 안전 설계를 만들었습니다.",
+        "original_error": str(reason or ""),
+        "can_retry_ai": True,
+        "can_continue_safe": True,
+        "can_rebuild_database": True,
+    }
+    return fallback
+
+
 async def design_agent_factory(
     request: str,
     project_context: dict | None = None,
@@ -1007,7 +1042,7 @@ def _preview_design_sections(previous_design: dict | None) -> dict:
 
 def _stable_confirmed_requirements(value: dict | None) -> dict:
     source = value if isinstance(value, dict) else {}
-    ignored = {"user_answers", "latest_analysis", "attachment_summary"}
+    ignored = {"user_answers", "latest_analysis", "attachment_summary", "superseded_requirements"}
     return {
         key: _clone_json(item) if isinstance(item, (dict, list)) else item
         for key, item in source.items()
@@ -1044,6 +1079,7 @@ def _impact_sections(changed_groups: list[str], delta_text: str) -> list[str]:
     mapping = {
         "original_request": set(_DESIGN_SECTION_KEYS),
         "ui": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "environment_plan"},
+        "frontend": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "environment_plan"},
         "ui_layout": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "environment_plan"},
         "backend": {"requirement_spec", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "environment_plan"},
         "llm": {"requirement_spec", "capability_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},

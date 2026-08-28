@@ -1405,7 +1405,7 @@ def _add_ui_layout_slide(prs, payload: dict[str, Any], page: int, version: str):
     return True
 
 
-def build_agentstudio_presentation(payload: dict[str, Any], version: str = "5.392") -> tuple[bytes, str]:
+def build_agentstudio_presentation(payload: dict[str, Any], version: str = "5.412") -> tuple[bytes, str]:
     scope = str(payload.get("scope") or "ALL").strip().upper()
     deck_type = str(payload.get("deck_type") or "AGENT").strip().upper()
     if scope not in {"ALL", "WORKFLOW", "RUN", "REPORT", "ARCHITECTURE", "DB_ERD"}:

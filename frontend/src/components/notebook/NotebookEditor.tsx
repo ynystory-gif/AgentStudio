@@ -9,6 +9,10 @@ import type {
   NotebookExecutionRequest,
   NotebookExecutionResult,
   NotebookOutputData,
+  NotebookLiveOutputEvent,
+  NotebookDebugResult,
+  NotebookDebugStartRequest,
+  NotebookDebugCommandRequest,
 } from '../../types/notebook'
 import { NotebookMarkdown, NotebookOutput, notebookSourceToText } from './NotebookRenderers'
 
@@ -48,6 +52,8 @@ interface NotebookEditorDecorationLike {
     isWholeLine?: boolean
     glyphMarginClassName?: string
     glyphMarginHoverMessage?: { value: string }
+    className?: string
+    hoverMessage?: { value: string }
   }
 }
 
@@ -90,6 +96,59 @@ interface NotebookLineBookmark {
 
 const NOTEBOOK_LINE_BOOKMARKS = new Map<string, NotebookLineBookmark[]>()
 const NOTEBOOK_BOOKMARK_STORAGE_PREFIX = 'theanova.agentstudio.notebook.line-bookmarks::'
+
+interface NotebookLineBreakpoint {
+  cellIndex: number
+  lineNumber: number
+}
+
+const NOTEBOOK_LINE_BREAKPOINTS = new Map<string, NotebookLineBreakpoint[]>()
+const NOTEBOOK_BREAKPOINT_STORAGE_PREFIX = 'theanova.agentstudio.notebook.breakpoints::'
+
+function isPythonNotebookKernel(kernel: unknown): boolean {
+  const value = String(kernel || '').trim().toLowerCase()
+  return value === 'python' || value.startsWith('python') || value.includes('ipykernel')
+}
+
+function normalizeNotebookLineBreakpoints(value: unknown): NotebookLineBreakpoint[] {
+  if (!Array.isArray(value)) return []
+  const unique = new Map<string, NotebookLineBreakpoint>()
+  value.forEach(item => {
+    const raw = item as Partial<NotebookLineBreakpoint>
+    const cellIndex = Number(raw?.cellIndex)
+    const lineNumber = Number(raw?.lineNumber)
+    if (!Number.isInteger(cellIndex) || cellIndex < 0 || !Number.isInteger(lineNumber) || lineNumber < 1) return
+    unique.set(`${cellIndex}:${lineNumber}`, { cellIndex, lineNumber })
+  })
+  return Array.from(unique.values()).sort((a, b) => a.cellIndex - b.cellIndex || a.lineNumber - b.lineNumber)
+}
+
+function getNotebookLineBreakpoints(key: string): NotebookLineBreakpoint[] {
+  if (!key) return []
+  const cached = NOTEBOOK_LINE_BREAKPOINTS.get(key)
+  if (cached) return cached
+  let loaded: NotebookLineBreakpoint[] = []
+  try {
+    const raw = window.localStorage.getItem(`${NOTEBOOK_BREAKPOINT_STORAGE_PREFIX}${key}`)
+    if (raw) loaded = normalizeNotebookLineBreakpoints(JSON.parse(raw))
+  } catch {
+    loaded = []
+  }
+  NOTEBOOK_LINE_BREAKPOINTS.set(key, loaded)
+  return loaded
+}
+
+function storeNotebookLineBreakpoints(key: string, breakpoints: NotebookLineBreakpoint[]): NotebookLineBreakpoint[] {
+  const normalized = normalizeNotebookLineBreakpoints(breakpoints)
+  if (!key) return normalized
+  NOTEBOOK_LINE_BREAKPOINTS.set(key, normalized)
+  try {
+    window.localStorage.setItem(`${NOTEBOOK_BREAKPOINT_STORAGE_PREFIX}${key}`, JSON.stringify(normalized))
+  } catch {
+    // localStorage를 사용할 수 없는 환경에서도 현재 세션에서는 유지합니다.
+  }
+  return normalized
+}
 
 function normalizeNotebookLineBookmarks(value: unknown): NotebookLineBookmark[] {
   if (!Array.isArray(value)) return []
@@ -152,6 +211,8 @@ export interface NotebookEditorProps {
   onChange?: (value: string) => void
   onExecutePython?: (request: NotebookExecutionRequest) => Promise<NotebookExecutionResult | null | undefined> | NotebookExecutionResult | null | undefined
   onStopPython?: () => Promise<unknown> | unknown
+  onDebugPython?: (request: NotebookDebugStartRequest) => Promise<NotebookDebugResult | null | undefined> | NotebookDebugResult | null | undefined
+  onDebugCommand?: (request: NotebookDebugCommandRequest) => Promise<NotebookDebugResult | null | undefined> | NotebookDebugResult | null | undefined
   controllerRef?: React.MutableRefObject<NotebookEditorController | null> | null
   onEditorFocus?: () => void
 }
@@ -184,6 +245,8 @@ export function NotebookEditor({
   onChange,
   onExecutePython,
   onStopPython,
+  onDebugPython,
+  onDebugCommand,
   controllerRef,
   onEditorFocus,
 }: NotebookEditorProps) {
@@ -193,6 +256,7 @@ export function NotebookEditor({
   const scrollKeyRef = useRef(scrollKey)
   const cellEditorsRef = useRef<Record<number, NotebookMonacoEditorLike | undefined>>({})
   const cellBookmarkDecorationsRef = useRef<Record<number, string[] | undefined>>({})
+  const cellDebugDecorationsRef = useRef<Record<number, string[] | undefined>>({})
   const cellSelectionsRef = useRef<Record<number, RememberedCellSelection | undefined>>({})
   // Monaco cell models must remain the source of truth while the user is typing.
   // Serializing the whole .ipynb on every keystroke and feeding the resulting
@@ -203,12 +267,24 @@ export function NotebookEditor({
   const [editingMarkdown, setEditingMarkdown] = useState<Record<number, boolean>>({})
   const [activeCellIndex, setActiveCellIndex] = useState(0)
   const [bookmarkRevision, setBookmarkRevision] = useState(0)
+  const [breakpointRevision, setBreakpointRevision] = useState(0)
+  const [debugState, setDebugState] = useState<NotebookDebugResult | null>(null)
+  const [debugBusy, setDebugBusy] = useState(false)
+  const [debugExpression, setDebugExpression] = useState('')
+  const [debugConsole, setDebugConsole] = useState<Array<{ expression: string; result: string; error?: boolean }>>([])
   const [runningCells, setRunningCells] = useState<Record<number, boolean>>({})
+  const [liveOutputsByCell, setLiveOutputsByCell] = useState<Record<number, NotebookOutputData[] | undefined>>({})
+  // v5.412: clear_output(wait=True) must keep the previous frame visible until
+  // the replacement rich output is ready. This mirrors Jupyter's deferred-clear
+  // semantics and prevents animation frames from flashing to an empty region.
+  const pendingLiveClearWaitRef = useRef<Record<number, boolean>>({})
+  const replaceLiveOutputOnNextEventRef = useRef<Record<number, boolean>>({})
   const [runAllBusy, setRunAllBusy] = useState(false)
   const [stopBusy, setStopBusy] = useState(false)
   const cancelRequestedRef = useRef(false)
   const executionCounterRef = useRef(0)
   const bookmarks = React.useMemo(() => getNotebookLineBookmarks(scrollKey), [scrollKey, bookmarkRevision])
+  const breakpoints = React.useMemo(() => getNotebookLineBreakpoints(scrollKey), [scrollKey, breakpointRevision])
 
   useEffect(() => {
     scrollKeyRef.current = scrollKey
@@ -227,6 +303,12 @@ export function NotebookEditor({
     cellSelectionsRef.current = {}
     latestCellSourcesRef.current = {}
     cellBookmarkDecorationsRef.current = {}
+    cellDebugDecorationsRef.current = {}
+    setDebugState(null)
+    setDebugConsole([])
+    pendingLiveClearWaitRef.current = {}
+    replaceLiveOutputOnNextEventRef.current = {}
+    setLiveOutputsByCell({})
   }, [filePath])
 
   useEffect(() => {
@@ -346,6 +428,63 @@ export function NotebookEditor({
     })
   }, [bookmarkRevision, scrollKey])
 
+
+  const updateBreakpointState = (next: NotebookLineBreakpoint[]): NotebookLineBreakpoint[] => {
+    const stored = storeNotebookLineBreakpoints(scrollKeyRef.current, next)
+    setBreakpointRevision(value => value + 1)
+    return stored
+  }
+
+  const toggleLineBreakpoint = (cellIndex: number, lineNumber: number): void => {
+    if (debugState?.debug_active) return
+    const key = scrollKeyRef.current
+    if (!key) return
+    const safeCellIndex = Math.max(0, Number(cellIndex) || 0)
+    const safeLineNumber = Math.max(1, Number(lineNumber) || 1)
+    const current = getNotebookLineBreakpoints(key)
+    const exists = current.some(item => item.cellIndex === safeCellIndex && item.lineNumber === safeLineNumber)
+    updateBreakpointState(exists
+      ? current.filter(item => !(item.cellIndex === safeCellIndex && item.lineNumber === safeLineNumber))
+      : [...current, { cellIndex: safeCellIndex, lineNumber: safeLineNumber }])
+  }
+
+  const applyDebugDecorations = (cellIndex: number, editor?: NotebookMonacoEditorLike): void => {
+    const targetEditor = editor || cellEditorsRef.current[cellIndex]
+    if (!targetEditor?.deltaDecorations) return
+    const previous = cellDebugDecorationsRef.current[cellIndex] || []
+    const maxLineNumber = Math.max(1, Number(targetEditor.getModel?.()?.getLineCount?.()) || 1)
+    const decorations: NotebookEditorDecorationLike[] = getNotebookLineBreakpoints(scrollKeyRef.current)
+      .filter(item => item.cellIndex === cellIndex && item.lineNumber <= maxLineNumber)
+      .map(item => ({
+        range: { startLineNumber: item.lineNumber, startColumn: 1, endLineNumber: item.lineNumber, endColumn: 1 },
+        options: {
+          isWholeLine: true,
+          glyphMarginClassName: 'notebook-debug-breakpoint-glyph',
+          glyphMarginHoverMessage: { value: `중단점 · Cell ${cellIndex + 1} · Line ${item.lineNumber}` },
+        },
+      }))
+
+    if (debugState?.debug_active && Number(debugState.cell_index) === cellIndex && Number(debugState.line) >= 1) {
+      const debugLine = Math.min(maxLineNumber, Math.max(1, Number(debugState.line)))
+      decorations.push({
+        range: { startLineNumber: debugLine, startColumn: 1, endLineNumber: debugLine, endColumn: 1 },
+        options: {
+          isWholeLine: true,
+          className: 'notebook-debug-current-line',
+          hoverMessage: { value: `현재 디버그 위치 · Line ${debugLine}` },
+        },
+      })
+    }
+    cellDebugDecorationsRef.current[cellIndex] = targetEditor.deltaDecorations(previous, decorations)
+  }
+
+  useEffect(() => {
+    Object.entries(cellEditorsRef.current).forEach(([indexText, editor]) => {
+      if (!editor) return
+      applyDebugDecorations(Number(indexText), editor)
+    })
+  }, [breakpointRevision, debugState, scrollKey])
+
   const revealBookmark = (bookmark: NotebookLineBookmark): void => {
     const maxIndex = parsed.ok ? Math.max(0, parsed.notebook.cells.length - 1) : 0
     const safeCellIndex = Math.max(0, Math.min(bookmark.cellIndex, maxIndex))
@@ -404,10 +543,28 @@ export function NotebookEditor({
       : item))
   }
 
+  const shiftBreakpointsForInsertedCell = (insertAt: number): void => {
+    const current = getNotebookLineBreakpoints(scrollKeyRef.current)
+    if (!current.length) return
+    updateBreakpointState(current.map(item => item.cellIndex >= insertAt
+      ? { ...item, cellIndex: item.cellIndex + 1 }
+      : item))
+  }
+
   const shiftBookmarksForDeletedCell = (deletedIndex: number): void => {
     const current = getNotebookLineBookmarks(scrollKeyRef.current)
     if (!current.length) return
     updateBookmarkState(current
+      .filter(item => item.cellIndex !== deletedIndex)
+      .map(item => item.cellIndex > deletedIndex
+        ? { ...item, cellIndex: item.cellIndex - 1 }
+        : item))
+  }
+
+  const shiftBreakpointsForDeletedCell = (deletedIndex: number): void => {
+    const current = getNotebookLineBreakpoints(scrollKeyRef.current)
+    if (!current.length) return
+    updateBreakpointState(current
       .filter(item => item.cellIndex !== deletedIndex)
       .map(item => item.cellIndex > deletedIndex
         ? { ...item, cellIndex: item.cellIndex - 1 }
@@ -450,6 +607,12 @@ export function NotebookEditor({
     const stderr = String(result?.stderr || '')
     const trace = String(result?.traceback || '')
 
+    if (Array.isArray(result?.rich_outputs)) {
+      result.rich_outputs.forEach(output => {
+        if (output && typeof output === 'object') outputs.push(output)
+      })
+    }
+
     if (stdout) outputs.push({ name: 'stdout', output_type: 'stream', text: textToNotebookSource(stdout) })
     if (stderr) outputs.push({ name: 'stderr', output_type: 'stream', text: textToNotebookSource(stderr) })
 
@@ -487,6 +650,47 @@ export function NotebookEditor({
     return next
   }
 
+  const handleLiveOutputEvent = (index: number, event: NotebookLiveOutputEvent): void => {
+    const eventName = String(event?.event || '')
+    if (eventName === 'clear_output') {
+      if (Boolean(event?.wait)) {
+        // Jupyter clear_output(wait=True): do not blank the current frame now.
+        // The next output will atomically replace it.
+        pendingLiveClearWaitRef.current[index] = true
+      } else {
+        pendingLiveClearWaitRef.current[index] = false
+        replaceLiveOutputOnNextEventRef.current[index] = false
+        setLiveOutputsByCell(prev => ({ ...prev, [index]: [] }))
+      }
+      return
+    }
+
+    const output = event?.output
+    if (!output || typeof output !== 'object') return
+
+    const replaceCurrent = Boolean(
+      pendingLiveClearWaitRef.current[index] || replaceLiveOutputOnNextEventRef.current[index],
+    )
+    pendingLiveClearWaitRef.current[index] = false
+    replaceLiveOutputOnNextEventRef.current[index] = false
+
+    setLiveOutputsByCell(prev => {
+      const current = replaceCurrent
+        ? []
+        : (Array.isArray(prev[index]) ? prev[index]!.slice() : [])
+      if (eventName === 'update_display_data' && event.display_id) {
+        const displayId = String(event.display_id)
+        const found = current.findIndex(item => String((item as any)?.transient?.display_id || '') === displayId)
+        const nextOutput = { ...output, transient: { ...((output as any).transient || {}), display_id: displayId } }
+        if (found >= 0) current[found] = nextOutput
+        else current.push(nextOutput)
+      } else {
+        current.push(output)
+      }
+      return { ...prev, [index]: current }
+    })
+  }
+
   const executeCellFromNotebook = async (
     notebook: NotebookDocument,
     index: number,
@@ -522,6 +726,12 @@ export function NotebookEditor({
     if (!String(pythonCode || '').trim()) return notebook
 
     setRunningCells(prev => ({ ...prev, [index]: true }))
+    pendingLiveClearWaitRef.current[index] = false
+    replaceLiveOutputOnNextEventRef.current[index] = true
+    // Keep the previous rendered output on screen until the first new output
+    // arrives. This avoids an initial white/empty flash on animation reruns.
+    const previousOutputs = Array.isArray(cell.outputs) ? cell.outputs : []
+    setLiveOutputsByCell(prev => ({ ...prev, [index]: previousOutputs }))
     try {
       const result = await onExecutePython?.({
         pythonCode,
@@ -530,6 +740,7 @@ export function NotebookEditor({
         cellIndex: index,
         mode: reset ? 'full' : 'selection',
         selectionOnly,
+        onOutputEvent: event => handleLiveOutputEvent(index, event),
       })
       if (!result) return notebook
       return applyExecutionResult(notebook, index, result)
@@ -537,6 +748,17 @@ export function NotebookEditor({
       return applyExecutionResult(notebook, index, errorToExecutionResult(error))
     } finally {
       setRunningCells(prev => ({ ...prev, [index]: false }))
+      pendingLiveClearWaitRef.current[index] = false
+      replaceLiveOutputOnNextEventRef.current[index] = false
+      // Give the parent notebook document one paint cycle to commit the final
+      // rich output before removing the temporary streaming layer.
+      window.setTimeout(() => {
+        setLiveOutputsByCell(prev => {
+          const next = { ...prev }
+          delete next[index]
+          return next
+        })
+      }, 80)
     }
   }
 
@@ -599,6 +821,115 @@ export function NotebookEditor({
   const runActiveCell = async (): Promise<void> => runCell(activeCellIndex, { selectionOnly: false, reset: false })
   const runSelection = async (): Promise<void> => runCell(activeCellIndex, { selectionOnly: true, reset: false })
 
+  const revealDebugLine = (state: NotebookDebugResult): void => {
+    const cellIndex = Math.max(0, Number(state.cell_index) || 0)
+    const lineNumber = Math.max(1, Number(state.line) || 1)
+    setActiveCellIndex(cellIndex)
+    const section = shellRef.current?.querySelector(`[data-notebook-cell-index="${cellIndex}"]`) as HTMLElement | null
+    section?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+    window.setTimeout(() => {
+      const editor = cellEditorsRef.current[cellIndex]
+      editor?.revealLineInCenter?.(lineNumber)
+      editor?.setPosition?.({ lineNumber, column: 1 })
+      editor?.focus?.()
+    }, 60)
+  }
+
+  const handleDebugResponse = (state: NotebookDebugResult | null | undefined): void => {
+    if (!state) return
+    const event = String(state.event || '')
+    if (event === 'evaluate') {
+      const expression = debugExpression.trim()
+      const error = String(state.evaluate_error || '')
+      const result = error || String(state.evaluate_result ?? '')
+      if (expression) {
+        setDebugConsole(prev => [...prev, { expression, result, error: !!error }].slice(-50))
+      }
+      setDebugState(prev => ({ ...(prev || {}), ...state, debug_active: true }))
+      return
+    }
+    setDebugState(state)
+    if (state.debug_active && event === 'paused') revealDebugLine(state)
+    if (!state.debug_active && ['finished', 'stopped', 'error'].includes(event)) {
+      const cellIndex = Math.max(0, Number(state.cell_index) || Number(debugState?.cell_index) || activeCellIndex)
+      if (parsed.ok && parsed.notebook.cells[cellIndex]?.cell_type === 'code') {
+        const result: NotebookExecutionResult = {
+          ...state,
+          ok: event === 'finished' ? true : !!state.ok,
+          cancelled: event === 'stopped' || !!state.cancelled,
+        }
+        const next = applyExecutionResult(parsed.notebook, cellIndex, result)
+        commitNotebook(next)
+      }
+    }
+  }
+
+  const startDebugCell = async (index: number): Promise<void> => {
+    if (!parsed.ok || debugBusy || debugState?.debug_active) return
+    const cell = parsed.notebook.cells[index]
+    if (cell?.cell_type !== 'code') return
+    const editor = cellEditorsRef.current[index]
+    const pythonCode = editor?.getValue?.() ?? latestCellSourcesRef.current[index] ?? notebookSourceToText(cell.source)
+    if (!String(pythonCode || '').trim()) return
+    const lines = getNotebookLineBreakpoints(scrollKeyRef.current)
+      .filter(item => item.cellIndex === index)
+      .map(item => item.lineNumber)
+    setDebugBusy(true)
+    setDebugConsole([])
+    setActiveCellIndex(index)
+    try {
+      const result = await onDebugPython?.({
+        pythonCode,
+        filePath: String(filePath || ''),
+        projectRoot: String(projectRoot || ''),
+        cellIndex: index,
+        breakpoints: lines,
+      })
+      handleDebugResponse(result)
+    } catch (error) {
+      handleDebugResponse({ ...errorToExecutionResult(error), event: 'error', debug_active: false, cell_index: index })
+    } finally {
+      setDebugBusy(false)
+    }
+  }
+
+  const sendDebugCommand = async (command: NotebookDebugCommandRequest['command'], expression = ''): Promise<void> => {
+    if (!debugState?.debug_active || debugBusy) return
+    setDebugBusy(true)
+    try {
+      const result = await onDebugCommand?.({
+        command,
+        expression,
+        filePath: String(filePath || ''),
+        projectRoot: String(projectRoot || ''),
+      })
+      handleDebugResponse(result)
+      if (command === 'evaluate' && result) setDebugExpression('')
+    } catch (error) {
+      handleDebugResponse({ ...errorToExecutionResult(error), event: 'error', debug_active: false, cell_index: debugState.cell_index })
+    } finally {
+      setDebugBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!debugState?.debug_active) return
+    const onDebugShortcut = (event: KeyboardEvent) => {
+      let command: NotebookDebugCommandRequest['command'] | '' = ''
+      if (event.key === 'F5' && !event.shiftKey) command = 'continue'
+      else if (event.key === 'F10') command = 'step_over'
+      else if (event.key === 'F11' && event.shiftKey) command = 'step_out'
+      else if (event.key === 'F11') command = 'step_into'
+      else if (event.key === 'F5' && event.shiftKey) command = 'stop'
+      if (!command) return
+      event.preventDefault()
+      event.stopPropagation()
+      void sendDebugCommand(command)
+    }
+    window.addEventListener('keydown', onDebugShortcut, true)
+    return () => window.removeEventListener('keydown', onDebugShortcut, true)
+  }, [debugState?.debug_active, debugBusy, filePath, projectRoot])
+
   const stopExecution = async (): Promise<void> => {
     if (stopBusy) return
     cancelRequestedRef.current = true
@@ -655,6 +986,7 @@ export function NotebookEditor({
       : { cell_type: 'code', execution_count: null, metadata: {}, outputs: [], source: [] }
     notebook.cells.splice(insertAt, 0, cell)
     shiftBookmarksForInsertedCell(insertAt)
+    shiftBreakpointsForInsertedCell(insertAt)
     commitNotebook(notebook)
     setActiveCellIndex(insertAt)
     if (cellType === 'markdown') setEditingMarkdown(prev => ({ ...prev, [insertAt]: true }))
@@ -666,6 +998,7 @@ export function NotebookEditor({
     if (!notebook.cells[index]) return
     notebook.cells.splice(index, 1)
     shiftBookmarksForDeletedCell(index)
+    shiftBreakpointsForDeletedCell(index)
     commitNotebook(notebook)
     setActiveCellIndex(Math.max(0, Math.min(index, notebook.cells.length - 1)))
   }
@@ -748,7 +1081,7 @@ export function NotebookEditor({
         <strong>Jupyter Notebook</strong>
         <span className="notebook-kernel-chip">{kernel || 'python'}</span>
         <span className="notebook-cell-count">{notebook.cells.length} cells</span>
-        <span className="notebook-bookmark-hint" title="상단의 현재 줄 버튼을 누르거나 Code 셀의 줄 번호/왼쪽 북마크 여백을 클릭하면 북마크를 추가/해제할 수 있습니다.">🔖 현재 줄 버튼 또는 줄 번호 클릭</span>
+        <span className="notebook-bookmark-hint" title="줄 번호는 북마크, 줄 번호 왼쪽의 glyph 여백은 빨간 디버그 중단점입니다.">🔖 줄 번호=북마크 · ● 왼쪽 여백=중단점</span>
       </div>
       <div className="notebook-toolbar-actions">
         <div className="notebook-bookmark-navigation" aria-label="Notebook 북마크 이동">
@@ -763,6 +1096,29 @@ export function NotebookEditor({
         <button type="button" onClick={clearAllOutputs}>출력 모두 지우기</button>
       </div>
     </div>
+
+    {(debugState?.debug_active || breakpoints.length > 0) && <div className="notebook-debug-toolbar" role="region" aria-label="Notebook 디버그 도구">
+      <div className="notebook-debug-toolbar-status">
+        <span className="notebook-debug-dot" />
+        <strong>{debugState?.debug_active ? '디버그 일시정지' : '중단점 준비'}</strong>
+        {debugState?.debug_active
+          ? <span>Cell {Number(debugState.cell_index || 0) + 1} · Line {Number(debugState.line || 1)}</span>
+          : <span>중단점 {breakpoints.length}개 · 디버그 시작 후 F10/F11을 사용할 수 있습니다.</span>}
+        {debugState?.reason === 'exception' && <em>예외</em>}
+      </div>
+      <div className="notebook-debug-toolbar-actions">
+        {!debugState?.debug_active && <button type="button" className={debugBusy ? 'busy' : ''} disabled={debugBusy || !isPythonNotebookKernel(kernel)} title="중단점이 있는 셀 또는 현재 셀에서 디버그 시작" onClick={() => {
+          const activeHasBreakpoint = breakpoints.some(item => item.cellIndex === activeCellIndex)
+          const targetCell = activeHasBreakpoint ? activeCellIndex : (breakpoints[0]?.cellIndex ?? activeCellIndex)
+          void startDebugCell(targetCell)
+        }}>{debugBusy ? '시작 중…' : '▶ 디버그 시작'}</button>}
+        <button type="button" disabled={debugBusy || !debugState?.debug_active} title="계속 (F5)" onClick={() => void sendDebugCommand('continue')}>▶ 계속</button>
+        <button type="button" disabled={debugBusy || !debugState?.debug_active} title="다음 줄 / Step Over (F10)" onClick={() => void sendDebugCommand('step_over')}>↷ 다음 줄</button>
+        <button type="button" disabled={debugBusy || !debugState?.debug_active} title="함수 안으로 / Step Into (F11)" onClick={() => void sendDebugCommand('step_into')}>↓ 함수 안</button>
+        <button type="button" disabled={debugBusy || !debugState?.debug_active} title="함수 밖으로 / Step Out (Shift+F11)" onClick={() => void sendDebugCommand('step_out')}>↑ 함수 밖</button>
+        <button type="button" className="danger" disabled={debugBusy || !debugState?.debug_active} title="디버그 종료 (Shift+F5)" onClick={() => void sendDebugCommand('stop')}>■ 종료</button>
+      </div>
+    </div>}
 
     <div className="notebook-cells">
       {notebook.cells.map((cell, index) => {
@@ -791,10 +1147,11 @@ export function NotebookEditor({
               <span>{cellType === 'code' ? 'Code' : cellType === 'markdown' ? 'Markdown' : 'Raw'}</span>
               <div>
                 {cellType === 'code' && <>
-                  <button type="button" disabled={running || runAllBusy} onClick={(event: React.MouseEvent<HTMLButtonElement>) => { event.stopPropagation(); void runCell(index) }}>{running ? '실행 중…' : '▶ 셀 실행'}</button>
+                  <button type="button" disabled={running || runAllBusy || !!debugState?.debug_active} onClick={(event: React.MouseEvent<HTMLButtonElement>) => { event.stopPropagation(); void runCell(index) }}>{running ? '실행 중…' : '▶ 셀 실행'}</button>
+                  <button type="button" className="notebook-debug-cell-button" disabled={running || runAllBusy || debugBusy || !!debugState?.debug_active || !isPythonNotebookKernel(kernel)} title="현재 셀을 디버그합니다. 줄 번호 왼쪽 여백을 클릭하면 중단점을 설정할 수 있습니다." onClick={(event: React.MouseEvent<HTMLButtonElement>) => { event.stopPropagation(); void startDebugCell(index) }}>{debugBusy ? '🐞 시작 중…' : '🐞 디버그 셀'}</button>
                   <button
                     type="button"
-                    disabled={running || runAllBusy}
+                    disabled={running || runAllBusy || !!debugState?.debug_active}
                     onMouseDown={(event: React.MouseEvent<HTMLButtonElement>) => {
                       event.preventDefault()
                       event.stopPropagation()
@@ -823,15 +1180,18 @@ export function NotebookEditor({
                     cellEditorsRef.current[index] = editor as unknown as NotebookMonacoEditorLike
                     latestCellSourcesRef.current[index] = editor.getValue?.() ?? source
                     applyBookmarkDecorations(index, editor)
+                    applyDebugDecorations(index, editor)
                     editor.onMouseDown?.((event: NotebookEditorMouseDownEventLike) => {
                       // Monaco MouseTargetType: glyph=2, line number=3, line decoration=4.
-                      // v5.382부터는 사용자가 클릭 위치를 헷갈리지 않도록 줄 번호 자체와
-                      // 그 왼쪽 여백 어느 쪽을 눌러도 북마크가 토글됩니다.
-                      if (![2, 3, 4].includes(Number(event?.target?.type))) return
+                      // VS Code와 비슷하게 glyph 여백(줄 번호보다 더 왼쪽)은 빨간
+                      // 디버그 중단점, 줄 번호/장식 영역은 기존 파란 북마크입니다.
+                      const targetType = Number(event?.target?.type)
+                      if (![2, 3, 4].includes(targetType)) return
                       const lineNumber = Number(event?.target?.position?.lineNumber)
                       if (!Number.isInteger(lineNumber) || lineNumber < 1) return
                       setActiveCellIndex(index)
-                      toggleLineBookmark(index, lineNumber)
+                      if (targetType === 2) toggleLineBreakpoint(index, lineNumber)
+                      else toggleLineBookmark(index, lineNumber)
                     })
                     editor.onDidFocusEditorText(() => {
                       setActiveCellIndex(index)
@@ -927,10 +1287,53 @@ export function NotebookEditor({
                     : <div className="notebook-markdown-cell" onDoubleClick={() => setEditingMarkdown(prev => ({ ...prev, [index]: true }))}><NotebookMarkdown text={source} attachments={cell.attachments || {}} /></div>)
                 : <pre className="notebook-raw-cell">{source}</pre>}
 
-            {cellType === 'code' && Array.isArray(cell.outputs) && cell.outputs.length > 0 &&
-              <div className="notebook-cell-outputs">
-                {cell.outputs.map((output, outputIndex) => <NotebookOutput key={outputIndex} output={output} />)}
-              </div>}
+            {cellType === 'code' && debugState?.debug_active && Number(debugState.cell_index) === index && <div className="notebook-debug-panel">
+              <div className="notebook-debug-current">
+                <strong>현재 위치</strong>
+                <code>Line {Number(debugState.line || 1)} · {String(debugState.source_line || '').trim() || '(빈 줄)'}</code>
+                {debugState.exception && <span className="notebook-debug-exception">{debugState.exception.type}: {debugState.exception.message}</span>}
+              </div>
+              <div className="notebook-debug-grid">
+                <section>
+                  <header>변수 <span>{Array.isArray(debugState.variables) ? debugState.variables.length : 0}</span></header>
+                  <div className="notebook-debug-variable-list">
+                    {(debugState.variables || []).length === 0 && <small>현재 프레임에 표시할 변수가 없습니다.</small>}
+                    {(debugState.variables || []).map((item, itemIndex) => <div className="notebook-debug-variable" key={`${item.name}-${itemIndex}`}>
+                      <b>{item.name}</b><i>{item.type || ''}</i><code title={item.value || ''}>{item.value || ''}</code>
+                    </div>)}
+                  </div>
+                </section>
+                <section>
+                  <header>호출 스택 <span>{Array.isArray(debugState.stack) ? debugState.stack.length : 0}</span></header>
+                  <div className="notebook-debug-stack-list">
+                    {(debugState.stack || []).map((frame, frameIndex) => <button type="button" key={`${frame.function}-${frame.line}-${frameIndex}`} onClick={() => revealDebugLine({ ...debugState, line: frame.line })}>
+                      <b>{frame.function || '<module>'}</b><span>Line {frame.line || 0}</span>
+                    </button>)}
+                  </div>
+                </section>
+              </div>
+              <div className="notebook-debug-console">
+                <header>디버그 콘솔</header>
+                {debugConsole.length > 0 && <div className="notebook-debug-console-history">
+                  {debugConsole.map((item, itemIndex) => <div key={`${item.expression}-${itemIndex}`} className={item.error ? 'error' : ''}><span>› {item.expression}</span><code>{item.result}</code></div>)}
+                </div>}
+                <div className="notebook-debug-console-input">
+                  <input value={debugExpression} onChange={event => setDebugExpression(event.target.value)} placeholder="예: all_tokens, len(all_tokens), word_counts" onKeyDown={event => { if (event.key === 'Enter' && debugExpression.trim()) { event.preventDefault(); void sendDebugCommand('evaluate', debugExpression.trim()) } }} />
+                  <button type="button" disabled={debugBusy || !debugExpression.trim()} onClick={() => void sendDebugCommand('evaluate', debugExpression.trim())}>평가</button>
+                </div>
+              </div>
+            </div>}
+
+            {cellType === 'code' && (() => {
+              const hasLiveOutputs = Object.prototype.hasOwnProperty.call(liveOutputsByCell, index)
+              const visibleOutputs = hasLiveOutputs ? (liveOutputsByCell[index] || []) : (Array.isArray(cell.outputs) ? cell.outputs : [])
+              if (!visibleOutputs.length) return null
+              return (
+                <div className={`notebook-cell-outputs${hasLiveOutputs ? ' live' : ''}`}>
+                  {visibleOutputs.map((output, outputIndex) => <NotebookOutput key={outputIndex} output={output} />)}
+                </div>
+              )
+            })()}
           </div>
         </section>
       })}

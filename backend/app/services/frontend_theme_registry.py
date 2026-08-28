@@ -150,7 +150,7 @@ def frontend_theme_generation_instruction(text: str) -> str:
         "Theme 적용을 React/CSS Provider 하나로 고정하지 마십시오. 선택된 Frontend의 native theme API, "
         "CSS/SCSS variables, framework config 또는 theme object를 사용하십시오. "
         "미등록 Frontend라도 generic adapter를 사용해 같은 Design Token 의미(primary/background/surface/text/border, "
-        "typography, radius, shadow, spacing/layout)를 유지하십시오. component_rules.menu에 normal/hover/active가 있으면 "
+        "typography, radius, shadow, spacing/layout)를 유지하십시오. component_rules.menu의 normal/hover/active와 submenu/user_menu/button/input/card의 상태 규칙이 있으면 "
         "Navigation/Sidebar/Header menu의 기본 상태, 마우스 오버 상태, 활성 상태를 선택한 Frontend의 native styling 방식으로 반드시 구현하십시오. "
         "참조 사이트의 로고·문구·이미지·고유 콘텐츠는 복제하지 마십시오."
     )

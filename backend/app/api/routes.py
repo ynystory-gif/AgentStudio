@@ -36,6 +36,7 @@ from app.services.project_root_registry import adopt_legacy_projects_for_current
 from app.services.terminal_completion_service import complete_terminal_input
 from app.services.managed_process_service import managed_process_service
 from app.services.python_execution_service import python_execution_manager
+from app.services.source_debug_service import source_debug_capability, run_source_code
 from app.services.presentation_preview_service import (
     PresentationPreviewError,
     prepare_presentation_preview,
@@ -78,7 +79,7 @@ from app.services.sql_workspace_service import (
 )
 import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from langgraph.types import Command
 from sqlalchemy import select, func
@@ -109,7 +110,7 @@ from app.services.ai_attachment_service import (
     prepare_attachment,
     redact_sensitive_text,
 )
-from app.services.local_control import list_files, list_directories, read_file, write_file, run_command, register_runtime_project_root, get_runtime_project_roots, create_folder, rename_path, create_file, delete_files, project_file_snapshot, get_file_meta, get_file_hash_states, validate_project_root, watch_project_changes, search_project_text, ExternalFileChangedError, InvalidNotebookContentError
+from app.services.local_control import list_files, list_directories, read_file, write_file, run_command, register_runtime_project_root, get_runtime_project_roots, create_folder, rename_path, create_file, delete_files, project_file_snapshot, get_file_meta, get_file_hash_states, validate_project_root, watch_project_changes, search_project_text, active_command_processes, ExternalFileChangedError, InvalidNotebookContentError
 from app.services.tavily_service import web_search
 from app.services.requirements_agent import next_interview_message, summarize_attachment_requirements, build_attachment_requirements_display_summary
 from app.services.attachment_requirement_mining import extract_attachment_requirement_registry, format_requirement_registry_memory
@@ -121,6 +122,7 @@ from app.services.mcp_registry import mcp_registry_monitor
 from app.services.langgraph_runtime import agent_graph_runtime
 from app.services.git_service import git_status, git_diff, checkpoint
 from app.services.project_analyzer import scan_project, find_related_files, local_project_summary
+from app.services.high_speed_analysis import high_speed_analysis_status
 from app.services.project_adaptive_report import build_project_adaptive_report
 from app.services.memory_service import add_memory, search_memory
 from app.services.simple_question import answer_simple_question
@@ -142,7 +144,7 @@ from app.services.agent_factory_policy_planner import (
     infer_fastapi_factory_plan,
     load_agent_factory_policies,
 )
-from app.services.agent_factory_workflow_design import design_agent_factory, design_agent_factory_incremental
+from app.services.agent_factory_workflow_design import build_safe_agent_factory_design, design_agent_factory, design_agent_factory_incremental
 from app.services.failure_artifact_service import (
     begin_workflow_diagnostic_run,
     normalize_workflow_result,
@@ -584,6 +586,9 @@ class WorkflowPreviewRequest(BaseModel):
     attachment_ids: list[str] = []
     attachment_memory: str = ""
     previous_design: dict = {}
+    # v5.393: user-selectable recovery path. When True, do not call an AI
+    # Provider; build a deterministic Workflow + DB Module Registry plan.
+    safe_mode: bool = False
 
 
 
@@ -745,6 +750,7 @@ class UIThemeImportImageRequest(BaseModel):
 
 class UIThemeImportImageReference(BaseModel):
     file_name: str = ""
+    reference_role: str = "default"
     tokens: dict = {}
     component_rules: dict = {}
     layout_rules: dict = {}
@@ -1436,6 +1442,32 @@ async def get_job(job_id: str):
     return vars(job)
 
 
+@router.get("/workflow/runtime-status")
+async def workflow_runtime_status(project_root: str = "", job_id: str = ""):
+    """Return backend truth for Agent Factory execution lifecycle.
+
+    v5.393 keeps UI stop controls tied to the actual Background Job/task and
+    validation subprocesses instead of a stale browser-side boolean.
+    """
+    job = job_manager.jobs.get(str(job_id or "")) if job_id else None
+    task = job_manager.tasks.get(str(job_id or "")) if job_id else None
+    command_processes = await asyncio.to_thread(active_command_processes, project_root)
+    job_status = str(job.status if job else "NOT_FOUND").upper()
+    job_active = bool(job and job_status in {"QUEUED", "RUNNING", "WAITING_USER"})
+    task_alive = bool(task and not task.done())
+    process_active = any(bool(item.get("running")) for item in command_processes)
+    return {
+        "ok": True,
+        "job_id": str(job_id or ""),
+        "job_status": job_status,
+        "job_active": job_active,
+        "task_alive": task_alive,
+        "validation_process_count": sum(1 for item in command_processes if item.get("running")),
+        "validation_processes": command_processes,
+        "execution_active": bool(job_active or task_alive or process_active),
+    }
+
+
 @router.post("/settings/database/provision-agentstudio")
 async def provision_agentstudio_db(req: DatabaseProvisionRequest):
     try:
@@ -1550,7 +1582,7 @@ async def import_ui_theme_from_sources(req: UIThemeImportCombinedRequest):
     """Import one Theme from an optional public URL and up to three screenshot analyses.
 
     Either source is sufficient. When both are provided, URL CSS semantics (including
-    menu hover/active states) and screenshot visual tokens are merged before persistence.
+    menu hover/active/submenu/user-menu states) and screenshot state references are merged before persistence.
     """
     await _ensure_ui_theme_storage()
     name = (req.name or "").strip()
@@ -1597,12 +1629,17 @@ async def import_ui_theme_from_sources(req: UIThemeImportCombinedRequest):
             layout_rules = layout_rules or default_layout
         analyses.append({
             "analysis_source": "IMAGE",
+            "file_name": (image.file_name or "화면 캡처 이미지").strip(),
+            "reference_role": (image.reference_role or "default").strip().lower(),
             "tokens": tokens,
             "component_rules": component_rules,
             "layout_rules": layout_rules,
             "preview_colors": image.preview_colors or [],
         })
-        source_meta["images"].append((image.file_name or "화면 캡처 이미지").strip())
+        source_meta["images"].append({
+            "file_name": (image.file_name or "화면 캡처 이미지").strip(),
+            "reference_role": (image.reference_role or "default").strip().lower(),
+        })
 
     if not analyses:
         raise HTTPException(status_code=400, detail="Theme으로 사용할 수 있는 참고 소스를 분석하지 못했습니다.")
@@ -3246,7 +3283,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.392", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.412", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -4376,6 +4413,146 @@ async def ai_edit_code(req: CodeEditRequest):
             content = "\n".join(lines).strip()
         return content
 
+    def _fallback_edit_explanation(original: str, proposed: str) -> dict:
+        import difflib
+
+        diff_lines = list(difflib.unified_diff(
+            str(original or "").splitlines(),
+            str(proposed or "").splitlines(),
+            lineterm="",
+        ))
+        added = [line[1:].strip() for line in diff_lines if line.startswith("+") and not line.startswith("+++")]
+        removed = [line[1:].strip() for line in diff_lines if line.startswith("-") and not line.startswith("---")]
+        if added or removed:
+            summary = f"요청을 반영해 코드 {len(added)}줄을 추가/변경했습니다."
+        else:
+            summary = "사용자 요청을 반영한 코드 제안입니다."
+        walkthrough = []
+        for line in added[:6]:
+            if line:
+                walkthrough.append({
+                    "code": line[:220],
+                    "explanation": "이 줄은 사용자 요청을 실제 코드 동작으로 반영하기 위해 추가되거나 변경된 부분입니다.",
+                })
+        return {
+            "summary": summary,
+            "value_reasons": [],
+            "code_walkthrough": walkthrough,
+            "notes": ["AI 설명 생성이 실패한 경우에도 코드 제안은 그대로 검토하고 적용할 수 있습니다."],
+            "source": "fallback",
+        }
+
+    async def _build_edit_explanation(
+        *,
+        llm,
+        original: str,
+        proposed: str,
+        instruction: str,
+        path: str,
+        project_root: str,
+    ) -> dict:
+        """Explain the proposed change without blocking the code proposal.
+
+        Code generation remains a code-only call so malformed explanatory JSON can
+        never corrupt the proposed source.  A second compact call explains only the
+        actual diff, including why literal values/expressions were selected.
+        """
+        import difflib
+
+        fallback = _fallback_edit_explanation(original, proposed)
+        try:
+            diff_text = "\n".join(difflib.unified_diff(
+                str(original or "").splitlines(),
+                str(proposed or "").splitlines(),
+                fromfile="before",
+                tofile="after",
+                lineterm="",
+                n=3,
+            ))
+            if not diff_text.strip():
+                diff_text = str(proposed or "")[:8000]
+            diff_text = diff_text[:14000]
+
+            explanation_prompt = f"""
+당신은 프로그래밍 학습을 돕는 코드 리뷰 설명 AI입니다.
+코드를 다시 작성하지 말고, 아래 실제 변경 내용을 한국어로 설명하세요.
+
+[파일]
+{path}
+
+[사용자 요청]
+{instruction}
+
+[변경 Diff]
+```diff
+{diff_text}
+```
+
+반드시 JSON 객체 하나만 반환하세요. Markdown 코드펜스는 사용하지 마세요.
+스키마:
+{{
+  "summary": "무엇을 왜 변경했는지 2~4문장",
+  "value_reasons": [
+    {{"value": "코드에 들어간 값/식/함수/shape 등", "reason": "왜 이 값이나 표현이어야 하는지"}}
+  ],
+  "code_walkthrough": [
+    {{"code": "설명 대상 코드 조각", "explanation": "이 코드가 하는 일과 실행 흐름"}}
+  ],
+  "notes": ["주의점, 전제조건 또는 대안이 있으면 작성"]
+}}
+
+규칙:
+1. 사용자가 학습 중이라고 가정하고 용어를 쉽게 풀어 설명합니다.
+2. 숫자, dtype, shape, index, 함수 인자, 조건식처럼 선택 이유가 있는 값은 value_reasons에 우선 설명합니다.
+3. 이유가 없는 관례적 값은 억지로 의미를 만들지 말고 생략합니다.
+4. code_walkthrough는 변경된 코드 중심으로 최대 8개만 작성합니다.
+5. value_reasons도 최대 8개만 작성합니다.
+6. 원본 코드와 변경 Diff로 확인할 수 없는 사실은 단정하지 않습니다.
+"""
+
+            with usage_context(
+                project_root=project_root,
+                operation="code_edit_explanation",
+            ):
+                explained = await llm.ainvoke(explanation_prompt)
+
+            raw = explained.content if hasattr(explained, "content") else str(explained)
+            raw = _strip_code_fence(raw)
+            try:
+                data = json.loads(raw)
+            except Exception:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start < 0 or end <= start:
+                    return fallback
+                data = json.loads(raw[start:end + 1])
+
+            if not isinstance(data, dict):
+                return fallback
+
+            def _items(name: str, keys: tuple[str, ...], limit: int) -> list[dict]:
+                output = []
+                for item in data.get(name) or []:
+                    if not isinstance(item, dict):
+                        continue
+                    normalized = {key: str(item.get(key) or "").strip()[:1200] for key in keys}
+                    if any(normalized.values()):
+                        output.append(normalized)
+                    if len(output) >= limit:
+                        break
+                return output
+
+            notes = [str(item).strip()[:1200] for item in (data.get("notes") or []) if str(item).strip()][:6]
+            return {
+                "summary": str(data.get("summary") or fallback["summary"]).strip()[:3000],
+                "value_reasons": _items("value_reasons", ("value", "reason"), 8),
+                "code_walkthrough": _items("code_walkthrough", ("code", "explanation"), 8),
+                "notes": notes,
+                "source": "llm",
+            }
+        except Exception:
+            return fallback
+
     try:
         llm = model_for_task(LLMTask.CODE_GENERATION)
         is_notebook = req.path.casefold().endswith(".ipynb")
@@ -4470,6 +4647,14 @@ async def ai_edit_code(req: CodeEditRequest):
             )
 
             merged_notebook = merge_notebook_cell(notebook_ctx, cell_content)
+            proposal_explanation = await _build_edit_explanation(
+                llm=llm,
+                original=notebook_ctx.active_cell_source,
+                proposed=cell_content,
+                instruction=req.instruction,
+                path=req.path,
+                project_root=req.root,
+            )
             reduced = max(notebook_ctx.original_chars - notebook_ctx.compact_chars, 0)
             message = (
                 f"Notebook Cell {target_number} 코드 수정 제안을 만들었습니다. "
@@ -4483,6 +4668,7 @@ async def ai_edit_code(req: CodeEditRequest):
                 "code": merged_notebook,
                 "cell_code": cell_content,
                 "message": message,
+                "proposal_explanation": proposal_explanation,
                 "path": req.path,
                 "saved": False,
                 "preserved_comment_lines": preserved_comment_lines,
@@ -4568,6 +4754,15 @@ async def ai_edit_code(req: CodeEditRequest):
             instruction=req.instruction,
         )
 
+        proposal_explanation = await _build_edit_explanation(
+            llm=llm,
+            original=req.content,
+            proposed=content,
+            instruction=req.instruction,
+            path=req.path,
+            project_root=req.root,
+        )
+
         message = "코드 수정 제안을 만들었습니다."
         if preserved_comment_lines:
             message += f" 기존 주석 {preserved_comment_lines}줄을 보존했습니다."
@@ -4576,6 +4771,7 @@ async def ai_edit_code(req: CodeEditRequest):
             "ok": True,
             "code": content,
             "message": message,
+            "proposal_explanation": proposal_explanation,
             "path": req.path,
             "saved": False,
             "preserved_comment_lines": preserved_comment_lines,
@@ -5133,7 +5329,7 @@ async def execute_python_editor_code(payload: dict):
         raise HTTPException(status_code=400, detail="root가 필요합니다.")
     if not code.strip():
         raise HTTPException(status_code=400, detail="실행할 Python 코드가 없습니다.")
-    if relative_path and not relative_path.lower().endswith((".py", ".ipynb")):
+    if relative_path and not relative_path.lower().endswith((".py", ".pyw", ".ipynb")):
         raise HTTPException(status_code=400, detail="Python(.py) 또는 Jupyter Notebook(.ipynb) 파일만 실행할 수 있습니다.")
 
     try:
@@ -5165,6 +5361,178 @@ async def execute_python_editor_code(payload: dict):
                 "exception": type(exc).__name__,
             },
         ) from exc
+
+
+
+
+@router.post("/python/execute/stream")
+async def execute_python_editor_code_stream(payload: dict):
+    """Stream Jupyter-style rich display events while a Notebook cell runs."""
+    root = str(payload.get("root") or "").strip()
+    code = str(payload.get("code") or "")
+    relative_path = str(payload.get("relative_path") or "").strip()
+    session_id = str(payload.get("session_id") or "default").strip() or "default"
+    mode = str(payload.get("mode") or "selection").strip().lower()
+    capture_last_expression = bool(payload.get("capture_last_expression"))
+    notebook_mode = bool(payload.get("notebook_mode"))
+    raw_cell_index = payload.get("cell_index")
+    try:
+        cell_index = int(raw_cell_index) if raw_cell_index is not None else None
+    except (TypeError, ValueError):
+        cell_index = None
+
+    if not root:
+        raise HTTPException(status_code=400, detail="root가 필요합니다.")
+    if not code.strip():
+        raise HTTPException(status_code=400, detail="실행할 Python 코드가 없습니다.")
+    if relative_path and not relative_path.lower().endswith((".py", ".pyw", ".ipynb")):
+        raise HTTPException(status_code=400, detail="Python(.py) 또는 Jupyter Notebook(.ipynb) 파일만 실행할 수 있습니다.")
+
+    execution_env = await asyncio.to_thread(
+        get_redis_python_script_runtime_env,
+        root,
+        relative_path,
+    )
+
+    def packet_stream():
+        try:
+            for packet in python_execution_manager.execute_stream(
+                root=root,
+                code=code,
+                relative_path=relative_path,
+                session_id=session_id,
+                reset=(mode == "full"),
+                capture_last_expression=capture_last_expression,
+                notebook_mode=notebook_mode,
+                cell_index=cell_index,
+                env_overrides=execution_env,
+            ):
+                yield json.dumps(packet, ensure_ascii=False) + "\n"
+        except Exception as exc:
+            packet = {
+                "type": "result",
+                "result": {
+                    "ok": False,
+                    "stdout": "",
+                    "stderr": "",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "traceback": traceback.format_exc(),
+                    "streaming": True,
+                },
+            }
+            yield json.dumps(packet, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        packet_stream(),
+        media_type="application/x-ndjson; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/source/debug/capability")
+async def source_debug_capability_route(relative_path: str = Query(...)):
+    return source_debug_capability(relative_path)
+
+
+@router.post("/source/debug/run")
+async def source_debug_run(payload: dict):
+    root = str(payload.get("root") or "").strip()
+    relative_path = str(payload.get("relative_path") or "").strip()
+    code = str(payload.get("code") or "")
+    if not root:
+        raise HTTPException(status_code=400, detail="root가 필요합니다.")
+    if not relative_path:
+        raise HTTPException(status_code=400, detail="relative_path가 필요합니다.")
+    if not code.strip():
+        raise HTTPException(status_code=400, detail="실행할 소스 코드가 없습니다.")
+    try:
+        return await asyncio.to_thread(run_source_code, root=root, relative_path=relative_path, code=code, timeout=int(payload.get("timeout") or 120))
+    except (ValueError, FileNotFoundError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": f"소스 실행 Adapter 실패: {exc}", "exception": type(exc).__name__}) from exc
+
+
+@router.post("/python/debug/start")
+async def start_python_source_debug(payload: dict):
+    root = str(payload.get("root") or "").strip()
+    code = str(payload.get("code") or "")
+    relative_path = str(payload.get("relative_path") or "").strip()
+    session_id = str(payload.get("session_id") or "default").strip() or "default"
+    raw_cell_index = payload.get("cell_index")
+    raw_breakpoints = payload.get("breakpoints") or []
+    try:
+        cell_index = max(0, int(raw_cell_index or 0))
+    except (TypeError, ValueError):
+        cell_index = 0
+    if not root:
+        raise HTTPException(status_code=400, detail="root가 필요합니다.")
+    if not code.strip():
+        raise HTTPException(status_code=400, detail="디버깅할 Python 코드가 없습니다.")
+    if relative_path and not relative_path.lower().endswith((".py", ".ipynb")):
+        raise HTTPException(status_code=400, detail="Python 디버깅은 .py/.pyw 또는 .ipynb 파일에서 사용할 수 있습니다.")
+    breakpoints = []
+    if isinstance(raw_breakpoints, list):
+        for value in raw_breakpoints:
+            try:
+                line = int(value)
+            except (TypeError, ValueError):
+                continue
+            if line > 0 and line not in breakpoints:
+                breakpoints.append(line)
+    try:
+        execution_env = await asyncio.to_thread(get_redis_python_script_runtime_env, root, relative_path)
+        return await asyncio.to_thread(
+            python_execution_manager.debug_start,
+            root=root,
+            code=code,
+            relative_path=relative_path,
+            session_id=session_id,
+            cell_index=cell_index,
+            breakpoints=breakpoints,
+            reset=False,
+            env_overrides=execution_env,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": f"Python 소스 디버그 시작 실패: {exc}", "exception": type(exc).__name__}) from exc
+
+
+@router.post("/python/debug/command")
+async def command_notebook_cell_debug(payload: dict):
+    root = str(payload.get("root") or "").strip()
+    session_id = str(payload.get("session_id") or "default").strip() or "default"
+    command = str(payload.get("command") or "").strip().lower()
+    expression = str(payload.get("expression") or "")
+    if not root:
+        raise HTTPException(status_code=400, detail="root가 필요합니다.")
+    if command not in {"continue", "step_over", "step_into", "step_out", "stop", "evaluate"}:
+        raise HTTPException(status_code=400, detail="지원하지 않는 디버그 명령입니다.")
+    try:
+        return await asyncio.to_thread(
+            python_execution_manager.debug_command,
+            root=root,
+            session_id=session_id,
+            command=command,
+            expression=expression,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": f"Notebook 디버그 명령 실패: {exc}", "exception": type(exc).__name__}) from exc
+
+
+@router.get("/python/debug/status")
+async def notebook_cell_debug_status(root: str = Query(...), session_id: str = Query("default")):
+    try:
+        return await asyncio.to_thread(python_execution_manager.debug_status, root, session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/python/status")
@@ -5542,6 +5910,19 @@ async def project_analyze(req: ProjectAnalyzeRequest):
     return await local_project_summary(root, req.request)
 
 
+@router.get("/project/high-speed-analysis/status")
+async def project_high_speed_analysis_status():
+    """Return the local analysis acceleration capabilities without invoking an LLM."""
+    return high_speed_analysis_status()
+
+
+@router.post("/project/high-speed-analysis")
+async def project_high_speed_analysis(req: ProjectAnalyzeRequest):
+    """Run the same accelerated candidate-compression path used by design/build workflows."""
+    root = register_runtime_project_root(req.project_root)
+    return await local_project_summary(root, req.request)
+
+
 @router.post("/project/adaptive-report")
 async def project_adaptive_report(req: ProjectAnalyzeRequest):
     """프로젝트 소스에서 Workflow/Report/Architecture/PPT용 동적 Snapshot을 생성합니다.
@@ -5690,6 +6071,53 @@ def _build_interview_requirement_context(
     return "\n".join(rows)
 
 
+def _normalize_latest_confirmed_requirement_conflicts(value: dict | None) -> dict:
+    """Resolve deterministic requirement conflicts before workflow design.
+
+    v5.393: later explicit Frontend requirements must supersede an older
+    Headless layout selection.  Keeping both values made the right-side
+    requirements card continue to show Headless and allowed code generation to
+    reuse a stale no-UI design even after the user asked for React/TypeScript.
+    """
+    source = value if isinstance(value, dict) else {}
+    try:
+        normalized = json.loads(json.dumps(source, ensure_ascii=False, default=str))
+    except Exception:
+        normalized = dict(source)
+
+    frontend = normalized.get("frontend") if isinstance(normalized.get("frontend"), dict) else {}
+    ui_text = str(normalized.get("ui") or "").strip()
+    framework = str(frontend.get("framework") or "").strip()
+    headless = frontend.get("headless") is True
+    explicit_frontend = bool(framework or ui_text)
+    non_headless_frontend = bool(
+        explicit_frontend
+        and not headless
+        and "headless" not in ui_text.casefold()
+        and "ui 없음" not in ui_text.casefold()
+        and "화면 없음" not in ui_text.casefold()
+    )
+
+    layout = normalized.get("ui_layout") if isinstance(normalized.get("ui_layout"), dict) else {}
+    layout_headless = bool(layout.get("enabled") is False or str(layout.get("template_id") or "") == "headless_agent")
+    if non_headless_frontend and layout_headless:
+        previous = str(layout.get("name") or layout.get("template_name") or "UI 없음 / Headless Agent")
+        normalized["ui_layout"] = None
+        history = normalized.get("superseded_requirements")
+        if not isinstance(history, list):
+            history = []
+        history.append({
+            "key": "ui_layout",
+            "previous": previous,
+            "replacement": ui_text or framework,
+            "reason": "최신 사용자 Frontend 요구사항이 이전 Headless UI와 충돌하여 대체되었습니다.",
+            "source": "SERVER_CONFLICT_VALIDATOR",
+        })
+        normalized["superseded_requirements"] = history[-20:]
+
+    return normalized
+
+
 @router.post("/workflow/preview")
 async def workflow_preview(req: WorkflowPreviewRequest):
     if not req.request.strip():
@@ -5712,10 +6140,11 @@ async def workflow_preview(req: WorkflowPreviewRequest):
                 "analysis_error": "프로젝트 분석 없이 Workflow 설계를 계속합니다.",
             }
 
+    confirmed_requirements = _normalize_latest_confirmed_requirement_conflicts(req.confirmed_requirements)
     full_request = _build_interview_requirement_context(
         request=req.request,
         interview_messages=req.interview_messages,
-        confirmed_requirements=req.confirmed_requirements,
+        confirmed_requirements=confirmed_requirements,
     )
     attachment_context = build_requirements_attachment_context(
         req.attachment_ids,
@@ -5735,21 +6164,42 @@ async def workflow_preview(req: WorkflowPreviewRequest):
     previous_design = req.previous_design if isinstance(req.previous_design, dict) else {}
     previous_confirmed = previous_design.get("confirmed_requirements") or {}
 
-    with usage_context(
-        project_root=req.project_root,
-        operation="workflow_preview",
-    ):
-        design = await design_agent_factory_incremental(
-            request=full_request,
-            project_context=project_context,
-            provider=req.provider,
-            previous_design=previous_design,
-            previous_confirmed_requirements=previous_confirmed,
-            current_confirmed_requirements=req.confirmed_requirements,
-            interview_messages=req.interview_messages,
+    preview_recovery = None
+    if req.safe_mode:
+        design = build_safe_agent_factory_design(
+            full_request,
+            reason="사용자가 AI Provider 오류 복구를 위해 안전 설계를 선택했습니다.",
         )
+        preview_recovery = dict(design.get("recovery") or {})
+    else:
+        try:
+            with usage_context(
+                project_root=req.project_root,
+                operation="workflow_preview",
+            ):
+                design = await design_agent_factory_incremental(
+                    request=full_request,
+                    project_context=project_context,
+                    provider=req.provider,
+                    previous_design=previous_design,
+                    previous_confirmed_requirements=previous_confirmed,
+                    current_confirmed_requirements=confirmed_requirements,
+                    interview_messages=req.interview_messages,
+                )
+        except Exception as preview_exc:
+            # v5.393: Workflow/DB 설계 화면을 dead-end 오류로 끝내지 않습니다.
+            # Provider/네트워크 오류가 나도 검증된 deterministic 설계와 DB Module
+            # Registry를 반환해 사용자가 DB를 확인하고 계속 진행할 수 있습니다.
+            design = build_safe_agent_factory_design(
+                full_request,
+                reason=f"{type(preview_exc).__name__}: {preview_exc}",
+            )
+            preview_recovery = dict(design.get("recovery") or {})
 
-    selected_ui_layout = (req.confirmed_requirements or {}).get("ui_layout") or {}
+    design["confirmed_requirements"] = confirmed_requirements
+    design["interview_messages"] = list(req.interview_messages or [])
+
+    selected_ui_layout = (confirmed_requirements or {}).get("ui_layout") or {}
     if isinstance(selected_ui_layout, dict) and selected_ui_layout.get("template_id"):
         requirement_spec = design.setdefault("requirement_spec", {})
         if isinstance(requirement_spec, dict):
@@ -5795,6 +6245,7 @@ async def workflow_preview(req: WorkflowPreviewRequest):
         "settings_plan": design.get("settings_plan") or {},
         "design_runtime": design.get("design_runtime") or {},
         "workflow_quality": quality,
+        "recovery": preview_recovery or design.get("recovery") or {},
     }
 
 

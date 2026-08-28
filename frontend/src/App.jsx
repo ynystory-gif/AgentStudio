@@ -28,7 +28,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.392'
+const AGENTSTUDIO_FRONTEND_VERSION='5.412'
 
 const DebouncedProjectSearchInput=memo(function DebouncedProjectSearchInput({value,onCommit,placeholder='프로젝트 검색...'}){
   const [localValue,setLocalValue]=useState(value||'')
@@ -48,6 +48,172 @@ const DebouncedProjectSearchInput=memo(function DebouncedProjectSearchInput({val
     spellCheck={false}
   />
 })
+
+
+const CSV_SPREADSHEET_EXTENSIONS=new Set(['csv','tsv'])
+const spreadsheetFileExtension=(filePath='')=>{
+  const name=String(filePath||'').replace(/\\/g,'/').split('/').pop()||''
+  const dot=name.lastIndexOf('.')
+  return dot>=0?name.slice(dot+1).toLowerCase():''
+}
+const isCsvSpreadsheetFile=(filePath='')=>CSV_SPREADSHEET_EXTENSIONS.has(spreadsheetFileExtension(filePath))
+const spreadsheetColumnLabel=(index=0)=>{
+  let value=Math.max(0,Number(index)||0)+1
+  let label=''
+  while(value>0){
+    const digit=(value-1)%26
+    label=String.fromCharCode(65+digit)+label
+    value=Math.floor((value-1)/26)
+  }
+  return label
+}
+const countDelimiterOutsideQuotes=(line='',delimiter=',')=>{
+  let inQuotes=false
+  let count=0
+  for(let index=0;index<line.length;index+=1){
+    const char=line[index]
+    if(char==='"'){
+      if(inQuotes&&line[index+1]==='"') index+=1
+      else inQuotes=!inQuotes
+      continue
+    }
+    if(!inQuotes&&char===delimiter) count+=1
+  }
+  return count
+}
+const detectSpreadsheetDelimiter=(value='',filePath='')=>{
+  if(spreadsheetFileExtension(filePath)==='tsv') return '\t'
+  const lines=String(value||'').replace(/^\uFEFF/,'').split(/\r?\n/).filter(line=>line.trim()).slice(0,16)
+  if(!lines.length) return ','
+  const candidates=[',','\t',';','|']
+  let winner=','
+  let winnerScore=-Infinity
+  for(const delimiter of candidates){
+    const counts=lines.map(line=>countDelimiterOutsideQuotes(line,delimiter))
+    const positive=counts.filter(count=>count>0)
+    if(!positive.length) continue
+    const average=positive.reduce((sum,count)=>sum+count,0)/positive.length
+    const variance=positive.reduce((sum,count)=>sum+Math.abs(count-average),0)/positive.length
+    const score=(positive.length*100)+(average*5)-variance
+    if(score>winnerScore){winner=delimiter;winnerScore=score}
+  }
+  return winner
+}
+const parseSpreadsheetPreview=(value='',delimiter=',',{maxRows=5000,maxColumns=200}={})=>{
+  const text=String(value||'').replace(/^\uFEFF/,'')
+  const rows=[]
+  let row=[]
+  let cell=''
+  let inQuotes=false
+  let truncatedRows=false
+  let truncatedColumns=false
+  const pushCell=()=>{
+    if(row.length<maxColumns) row.push(cell)
+    else truncatedColumns=true
+    cell=''
+  }
+  const pushRow=()=>{
+    pushCell()
+    rows.push(row)
+    row=[]
+    if(rows.length>=maxRows) truncatedRows=true
+  }
+  for(let index=0;index<text.length;index+=1){
+    const char=text[index]
+    if(char==='"'){
+      if(inQuotes&&text[index+1]==='"'){
+        cell+='"'
+        index+=1
+      }else{
+        inQuotes=!inQuotes
+      }
+      continue
+    }
+    if(!inQuotes&&char===delimiter){
+      pushCell()
+      continue
+    }
+    if(!inQuotes&&(char==='\n'||char==='\r')){
+      if(char==='\r'&&text[index+1]==='\n') index+=1
+      pushRow()
+      if(truncatedRows) break
+      continue
+    }
+    cell+=char
+  }
+  if(!truncatedRows&&(cell.length>0||row.length>0)) pushRow()
+  while(rows.length&&rows[rows.length-1].every(item=>String(item||'').length===0)) rows.pop()
+  const columnCount=Math.min(maxColumns,rows.reduce((max,current)=>Math.max(max,current.length),0))
+  const normalized=rows.map(current=>Array.from({length:columnCount},(_,index)=>current[index]??''))
+  return {rows:normalized,columnCount,truncatedRows,truncatedColumns}
+}
+const spreadsheetDelimiterLabel=(delimiter)=>delimiter==='\t'?'TAB':delimiter===';'?'세미콜론 (;)':delimiter==='|'?'파이프 (|)':'쉼표 (,)'
+
+function CsvSpreadsheetViewer({value='',filePath='',onChange=()=>{}}){
+  const [mode,setMode]=useState('GRID')
+  const [selectedCell,setSelectedCell]=useState(null)
+  const [wrapCells,setWrapCells]=useState(false)
+  const delimiter=useMemo(()=>detectSpreadsheetDelimiter(value,filePath),[value,filePath])
+  const parsed=useMemo(()=>parseSpreadsheetPreview(value,delimiter),[value,delimiter])
+  const fileName=String(filePath||'CSV').replace(/\\/g,'/').split('/').pop()||'CSV'
+  const selectedValue=selectedCell?parsed.rows[selectedCell.row]?.[selectedCell.column]??'':''
+  const copySelected=async()=>{
+    if(!selectedCell) return
+    try{await navigator.clipboard?.writeText?.(String(selectedValue??''))}catch{}
+  }
+  return <div className="csv-spreadsheet-viewer">
+    <div className="csv-spreadsheet-toolbar">
+      <div className="csv-spreadsheet-title">
+        <strong>▦ CSV 표 보기</strong>
+        <span>{fileName}</span>
+        <em>{parsed.truncatedRows?`${parsed.rows.length.toLocaleString()}행 이상`: `${parsed.rows.length.toLocaleString()}행`} · {parsed.columnCount.toLocaleString()}열 · {spreadsheetDelimiterLabel(delimiter)}</em>
+      </div>
+      <div className="csv-spreadsheet-actions">
+        <button type="button" className={mode==='GRID'?'active':''} onClick={()=>setMode('GRID')}>▦ 표 보기</button>
+        <button type="button" className={mode==='RAW'?'active':''} onClick={()=>setMode('RAW')}>≡ 원문 편집</button>
+        {mode==='GRID'&&<label><input type="checkbox" checked={wrapCells} onChange={event=>setWrapCells(event.target.checked)}/> 셀 줄바꿈</label>}
+      </div>
+    </div>
+    {mode==='RAW'
+      ? <div className="csv-raw-editor"><Editor
+          height="100%"
+          language="plaintext"
+          value={value}
+          onChange={next=>onChange(next??'')}
+          theme="vs-dark"
+          options={{minimap:{enabled:false},fontSize:13,automaticLayout:true,wordWrap:'off',scrollBeyondLastLine:false}}
+        /></div>
+      : <>
+          <div className={`csv-grid-scroll ${wrapCells?'wrap-cells':''}`}>
+            {parsed.rows.length&&parsed.columnCount
+              ? <table className="csv-grid-table">
+                  <thead><tr>
+                    <th className="csv-grid-corner" aria-label="행/열 머리글" />
+                    {Array.from({length:parsed.columnCount},(_,column)=><th key={`column-${column}`} className="csv-grid-column-head">{spreadsheetColumnLabel(column)}</th>)}
+                  </tr></thead>
+                  <tbody>{parsed.rows.map((row,rowIndex)=><tr key={`row-${rowIndex}`}>
+                    <th className="csv-grid-row-head">{rowIndex+1}</th>
+                    {row.map((cell,columnIndex)=>{
+                      const selected=selectedCell?.row===rowIndex&&selectedCell?.column===columnIndex
+                      return <td
+                        key={`${rowIndex}-${columnIndex}`}
+                        className={selected?'selected':''}
+                        title={String(cell??'')}
+                        onClick={()=>setSelectedCell({row:rowIndex,column:columnIndex})}
+                      ><span>{String(cell??'')}</span></td>
+                    })}
+                  </tr>)}</tbody>
+                </table>
+              : <div className="csv-grid-empty">표시할 CSV 데이터가 없습니다.</div>}
+          </div>
+          <div className="csv-spreadsheet-statusbar">
+            <span>{selectedCell?`선택 ${spreadsheetColumnLabel(selectedCell.column)}${selectedCell.row+1}`:'셀을 클릭하면 위치와 값을 확인할 수 있습니다.'}</span>
+            {selectedCell&&<><span className="csv-selected-value" title={String(selectedValue??'')}>{String(selectedValue??'')}</span><button type="button" onClick={copySelected}>복사</button></>}
+            {(parsed.truncatedRows||parsed.truncatedColumns)&&<strong>대용량 CSV는 성능을 위해 최대 5,000행 × 200열까지만 표로 미리봅니다. 원문은 그대로 유지됩니다.</strong>}
+          </div>
+        </>}
+  </div>
+}
 
 
 const joinWin = (root, file) => `${root}\\${file}`.replaceAll('\\\\', '\\')
@@ -88,6 +254,28 @@ const storeTextEditorLineBookmarks=(key='',bookmarks=[])=>{
   try{window.localStorage.setItem(`${TEXT_EDITOR_BOOKMARK_STORAGE_PREFIX}${key}`,JSON.stringify(value))}catch{}
   return value
 }
+const TEXT_EDITOR_BREAKPOINT_STORAGE_PREFIX='theanova.agentstudio.text-editor.breakpoints::'
+const TEXT_EDITOR_BREAKPOINT_CACHE=new Map()
+const loadTextEditorBreakpoints=(key='')=>{
+  if(!key) return []
+  if(TEXT_EDITOR_BREAKPOINT_CACHE.has(key)) return TEXT_EDITOR_BREAKPOINT_CACHE.get(key)
+  let value=[]
+  try{const raw=window.localStorage.getItem(`${TEXT_EDITOR_BREAKPOINT_STORAGE_PREFIX}${key}`);if(raw)value=normalizeTextEditorLineBookmarks(JSON.parse(raw))}catch{}
+  TEXT_EDITOR_BREAKPOINT_CACHE.set(key,value)
+  return value
+}
+const storeTextEditorBreakpoints=(key='',breakpoints=[])=>{
+  const value=normalizeTextEditorLineBookmarks(breakpoints)
+  if(!key) return value
+  TEXT_EDITOR_BREAKPOINT_CACHE.set(key,value)
+  try{window.localStorage.setItem(`${TEXT_EDITOR_BREAKPOINT_STORAGE_PREFIX}${key}`,JSON.stringify(value))}catch{}
+  return value
+}
+const SOURCE_DEBUG_LANGUAGES=new Set(['python','javascript','typescript','powershell','bat','shell','csharp','java','cpp','go','rust','php','ruby'])
+const SOURCE_DEBUG_EXTENSIONS=new Set(['py','pyw','js','jsx','mjs','cjs','ts','tsx','mts','cts','ps1','psm1','cmd','bat','sh','bash','zsh','cs','java','c','cc','cpp','cxx','go','rs','php','rb','pl','lua','r','swift','kts'])
+const sourceDebugExtension=(filePath='')=>{const name=normalizeProjectRelativePath(filePath).split('/').pop()||'';const dot=name.lastIndexOf('.');return dot>=0?name.slice(dot+1).toLowerCase():''}
+const isSourceDebugFile=(filePath='')=>SOURCE_DEBUG_EXTENSIONS.has(sourceDebugExtension(filePath))||SOURCE_DEBUG_LANGUAGES.has(getEditorLanguage(filePath))
+const sourceDebugSupportsStep=(filePath='')=>['py','pyw'].includes(sourceDebugExtension(filePath))
 const isBookmarkableTextEditorFile=(filePath='')=>{
   const path=String(filePath||'').trim()
   return !!path
@@ -95,6 +283,7 @@ const isBookmarkableTextEditorFile=(filePath='')=>{
     &&!isPdfFile(path)
     &&!isPresentationFile(path)
     &&!isDatabaseDiagramFile(path)
+    &&!isCsvSpreadsheetFile(path)
     &&!isBinaryPreviewFile(path)
 }
 const sanitizeInterviewDisplayText=(value='')=>{
@@ -399,7 +588,7 @@ const buildImageThemeRules=(tokens={})=>{
     layout_rules:{headerHeight:64,sidebarWidth:240,contentMaxWidth:1440,contentGap:20},
   }
 }
-const extractThemeTokensFromImage=async(file)=>{
+const extractThemeTokensFromImage=async(file,referenceRole='default')=>{
   if(!file) throw new Error('화면 캡처 이미지를 선택하세요.')
   if(file.size>25*1024*1024) throw new Error('Theme 분석 이미지는 25MB 이하 파일을 사용하세요.')
   const imageUrl=URL.createObjectURL(file)
@@ -463,8 +652,187 @@ const extractThemeTokensFromImage=async(file)=>{
       active:{...(rules.component_rules.menu?.active||{}),background:menuHover,color:menuHoverText,border:menuHover},
       source:'IMAGE_MENU_REGION_INFERRED'
     }
-    return {tokens,preview_colors:list.slice(0,6),menu_preview_colors:menuList.slice(0,5),...rules}
+    const role=String(referenceRole||'default').toLowerCase()
+    const roleEvidence={
+      default:'menu.normal',menu_hover:'menu.hover',menu_active:'menu.active',submenu_open:'submenu.normal',
+      user_menu_open:'user_menu.normal',button_hover:'button.hover',input_focus:'input.focus',mobile:'layout.mobile'
+    }
+    const evidenceKey=roleEvidence[role]||'theme.visual'
+    rules.component_rules._evidence={
+      ...(rules.component_rules._evidence||{}),
+      [evidenceKey]:{status:'reference',source:'SCREENSHOT_REFERENCE',reference_role:role,confidence:role==='default'?0.72:0.78}
+    }
+    if(role==='submenu_open') rules.component_rules.submenu={normal:{background:background,color:darkest,border,radius:tokens.radius.card,boxShadow:tokens.shadow.card},hover:{background:menuHover,color:menuHoverText},source:'SCREENSHOT_REFERENCE'}
+    if(role==='user_menu_open') rules.component_rules.user_menu={normal:{background:background,color:darkest,border,radius:tokens.radius.card,boxShadow:tokens.shadow.card},hover:{background:menuHover,color:menuHoverText},source:'SCREENSHOT_REFERENCE'}
+    if(role==='button_hover') rules.component_rules.button={...(rules.component_rules.button||{}),hover:{background:menuHover,color:menuHoverText,border:menuHover,transform:'translateY(-1px)'},source:'SCREENSHOT_REFERENCE'}
+    if(role==='input_focus') rules.component_rules.input={...(rules.component_rules.input||{}),focus:{background:lightest,color:darkest,border:menuHover,boxShadow:`0 0 0 2px ${menuHover}33`},source:'SCREENSHOT_REFERENCE'}
+    return {tokens,reference_role:role,preview_colors:list.slice(0,6),menu_preview_colors:menuList.slice(0,5),...rules}
   }finally{ URL.revokeObjectURL(imageUrl) }
+}
+
+
+const uiThemeSourceMeta=(config={})=>{
+  const raw=config?.theme_source_label
+  if(!raw) return {}
+  if(typeof raw==='object') return raw
+  try{return JSON.parse(String(raw||'{}'))}catch{return {}}
+}
+const uiThemePreviewTokens=(config={})=>{
+  const dark=uiThemeIsDark(config)
+  const colors=config?.theme==='custom'?(config?.theme_tokens?.colors||{}):dark
+    ?{primary:'#43a7d9',secondary:'#88bcd6',background:'#101825',surface:'#17273a',textPrimary:'#edf6fb',textSecondary:'#9bb6c8',border:'#36516b'}
+    :{primary:'#2563eb',secondary:'#64748b',background:'#f3f8fc',surface:'#ffffff',textPrimary:'#0f172a',textSecondary:'#64748b',border:'#c5d8e6'}
+  const rules=config?.theme_component_rules||{}
+  const radius=config?.theme_tokens?.radius||{}
+  const defaultNormal={background:colors.surface||colors.background||'#fff',color:colors.textPrimary||'#0f172a',border:colors.border||'#dbe4ee',radius:radius.button??8}
+  const defaultAccent={background:colors.primary||'#2563eb',color:'#fff',border:colors.primary||'#2563eb',radius:radius.button??8}
+  const normalize=(value={},fallback={})=>({...fallback,...(value||{})})
+  const menu=rules?.menu||{}
+  const submenu=rules?.submenu||{}
+  const userMenu=rules?.user_menu||{}
+  const button=rules?.button||{}
+  const input=rules?.input||{}
+  const card=rules?.card||{}
+  const tab=rules?.tab||{}
+  return {
+    colors:{
+      primary:colors.primary||'#2563eb',secondary:colors.secondary||colors.textSecondary||'#64748b',
+      background:colors.background||'#f8fafc',surface:colors.surface||'#ffffff',
+      text:colors.textPrimary||'#0f172a',muted:colors.textSecondary||'#64748b',border:colors.border||'#dbe4ee'
+    },
+    radius:{button:radius.button??8,card:radius.card??12,input:radius.input??8},
+    shadow:config?.theme_tokens?.shadow?.card||'0 8px 24px rgba(15,23,42,.10)',
+    menu:{
+      normal:normalize(menu?.normal,defaultNormal),hover:normalize(menu?.hover,defaultAccent),active:normalize(menu?.active,defaultAccent),
+      source:menu?.source||'TOKEN_INFERRED'
+    },
+    submenu:{
+      normal:normalize(submenu?.normal,{...defaultNormal,radius:radius.card??12,boxShadow:config?.theme_tokens?.shadow?.card||'0 12px 32px rgba(15,23,42,.16)'}),
+      hover:normalize(submenu?.hover,{background:colors.primary||'#2563eb',color:'#fff'}),source:submenu?.source||'TOKEN_INFERRED'
+    },
+    userMenu:{
+      normal:normalize(userMenu?.normal,{...defaultNormal,radius:radius.card??12,boxShadow:config?.theme_tokens?.shadow?.card||'0 12px 32px rgba(15,23,42,.16)'}),
+      hover:normalize(userMenu?.hover,{background:colors.background||'#f8fafc',color:colors.textPrimary||'#0f172a'}),source:userMenu?.source||'TOKEN_INFERRED'
+    },
+    button:{
+      normal:normalize(button?.normal,{background:button?.background||colors.primary||'#2563eb',color:button?.color||'#fff',border:button?.border||colors.primary||'#2563eb',radius:button?.radius??radius.button??8}),
+      hover:normalize(button?.hover,{background:colors.primary||'#2563eb',color:'#fff',border:colors.primary||'#2563eb',transform:'translateY(-1px)'}),
+      pressed:normalize(button?.pressed,{background:colors.primary||'#2563eb',color:'#fff',transform:'translateY(0) scale(.98)'}),source:button?.source||'TOKEN_INFERRED'
+    },
+    input:{
+      normal:normalize(input?.normal,{background:input?.background||colors.surface||'#fff',color:colors.text||colors.textPrimary||'#0f172a',border:input?.border||colors.border||'#dbe4ee',radius:input?.radius??radius.input??8}),
+      hover:normalize(input?.hover,{border:colors.primary||'#2563eb'}),
+      focus:normalize(input?.focus,{border:colors.primary||'#2563eb',boxShadow:`0 0 0 2px ${colors.primary||'#2563eb'}33`}),source:input?.source||'TOKEN_INFERRED'
+    },
+    card:{
+      normal:normalize(card?.normal,{background:card?.background||colors.surface||'#fff',border:card?.border||colors.border||'#dbe4ee',radius:card?.radius??radius.card??12,boxShadow:config?.theme_tokens?.shadow?.card||'0 8px 24px rgba(15,23,42,.10)'}),
+      hover:normalize(card?.hover,{transform:'translateY(-2px)',boxShadow:'0 14px 34px rgba(15,23,42,.16)'}),source:card?.source||'TOKEN_INFERRED'
+    },
+    tab:{normal:normalize(tab?.normal,{color:colors.textSecondary||'#64748b'}),hover:normalize(tab?.hover,{color:colors.primary||'#2563eb'}),active:normalize(tab?.active,{color:colors.primary||'#2563eb',border:colors.primary||'#2563eb'}),source:tab?.source||'TOKEN_INFERRED'},
+    evidence:rules?._evidence||{},sourceSummary:rules?._source_summary||{},sourceMeta:uiThemeSourceMeta(config)
+  }
+}
+const uiThemePreviewStyleVars=(config={})=>{
+  const p=uiThemePreviewTokens(config)
+  const cssValue=(value,fallback='')=>value===undefined||value===null?fallback:String(value)
+  return {
+    '--tp-primary':p.colors.primary,'--tp-secondary':p.colors.secondary,'--tp-bg':p.colors.background,
+    '--tp-surface':p.colors.surface,'--tp-text':p.colors.text,'--tp-muted':p.colors.muted,'--tp-border':p.colors.border,
+    '--tp-card-radius':`${p.radius.card}px`,'--tp-button-radius':`${p.radius.button}px`,'--tp-input-radius':`${p.radius.input}px`,'--tp-card-shadow':p.shadow,
+    '--tp-menu-normal-bg':p.menu.normal.background,'--tp-menu-normal-color':p.menu.normal.color,'--tp-menu-normal-border':p.menu.normal.border,'--tp-menu-normal-radius':`${p.menu.normal.radius??p.radius.button}px`,
+    '--tp-menu-hover-bg':p.menu.hover.background,'--tp-menu-hover-color':p.menu.hover.color,'--tp-menu-hover-border':p.menu.hover.border,'--tp-menu-hover-radius':`${p.menu.hover.radius??p.radius.button}px`,'--tp-menu-hover-shadow':cssValue(p.menu.hover.boxShadow,'none'),'--tp-menu-hover-transform':cssValue(p.menu.hover.transform,'none'),'--tp-menu-transition':cssValue(p.menu.hover.transition||p.menu.normal.transition,'all .18s ease'),
+    '--tp-menu-active-bg':p.menu.active.background,'--tp-menu-active-color':p.menu.active.color,'--tp-menu-active-border':p.menu.active.border,'--tp-menu-active-radius':`${p.menu.active.radius??p.radius.button}px`,'--tp-menu-active-shadow':cssValue(p.menu.active.boxShadow,'none'),'--tp-menu-active-transform':cssValue(p.menu.active.transform,'none'),
+    '--tp-submenu-bg':p.submenu.normal.background,'--tp-submenu-color':p.submenu.normal.color,'--tp-submenu-border':p.submenu.normal.border,'--tp-submenu-radius':`${p.submenu.normal.radius??p.radius.card}px`,'--tp-submenu-shadow':cssValue(p.submenu.normal.boxShadow,p.shadow),'--tp-submenu-hover-bg':p.submenu.hover.background,'--tp-submenu-hover-color':p.submenu.hover.color,
+    '--tp-user-menu-bg':p.userMenu.normal.background,'--tp-user-menu-color':p.userMenu.normal.color,'--tp-user-menu-border':p.userMenu.normal.border,'--tp-user-menu-radius':`${p.userMenu.normal.radius??p.radius.card}px`,'--tp-user-menu-shadow':cssValue(p.userMenu.normal.boxShadow,p.shadow),'--tp-user-menu-hover-bg':p.userMenu.hover.background,'--tp-user-menu-hover-color':p.userMenu.hover.color,
+    '--tp-button-bg':p.button.normal.background,'--tp-button-color':p.button.normal.color,'--tp-button-border':p.button.normal.border,'--tp-button-hover-bg':p.button.hover.background,'--tp-button-hover-color':p.button.hover.color,'--tp-button-hover-transform':cssValue(p.button.hover.transform,'none'),'--tp-button-pressed-transform':cssValue(p.button.pressed.transform,'scale(.98)'),'--tp-button-transition':cssValue(p.button.hover.transition||p.button.normal.transition,'all .18s ease'),
+    '--tp-input-bg':p.input.normal.background,'--tp-input-color':p.input.normal.color,'--tp-input-border':p.input.normal.border,'--tp-input-hover-border':p.input.hover.border||p.colors.primary,'--tp-input-focus-border':p.input.focus.border||p.colors.primary,'--tp-input-focus-shadow':cssValue(p.input.focus.boxShadow,`0 0 0 2px ${p.colors.primary}33`),
+    '--tp-card-bg':p.card.normal.background,'--tp-card-border':p.card.normal.border,'--tp-card-hover-transform':cssValue(p.card.hover.transform,'translateY(-2px)'),'--tp-card-hover-shadow':cssValue(p.card.hover.boxShadow,p.shadow),
+    '--tp-tab-color':p.tab.normal.color,'--tp-tab-hover-color':p.tab.hover.color,'--tp-tab-active-color':p.tab.active.color,'--tp-tab-active-border':p.tab.active.border||p.colors.primary,
+  }
+}
+const uiThemeEvidenceRows=(config={})=>{
+  const p=uiThemePreviewTokens(config)
+  const evidence=p.evidence||{}
+  const definitions=[
+    ['menu.normal','메뉴 기본'],['menu.hover','메뉴 Hover'],['menu.active','메뉴 Active'],['submenu.normal','하위 메뉴 Open'],['user_menu.normal','사용자 메뉴 Open'],['button.hover','버튼 Hover'],['input.focus','입력 Focus'],['card.hover','Card Hover']
+  ]
+  return definitions.map(([key,label])=>{
+    const item=evidence[key]||{}
+    const status=item.status||'inferred'
+    const source=item.source||((config?.theme==='custom')?'TOKEN_INFERRED':'SYSTEM_THEME')
+    const confidence=Number(item.confidence||(status==='confirmed'?0.92:status==='reference'?0.78:0.45))
+    return {key,label,status,source,confidence,selector:item.selector||'',fileName:item.file_name||'',referenceRole:item.reference_role||''}
+  })
+}
+function UILayoutThemePreview({config={},compact=false,viewport='desktop'}){
+  const [activeMenu,setActiveMenu]=useState('dashboard')
+  const [submenuOpen,setSubmenuOpen]=useState(false)
+  const [userMenuOpen,setUserMenuOpen]=useState(false)
+  const [mobileMenuOpen,setMobileMenuOpen]=useState(false)
+  const preview=uiThemePreviewTokens(config)
+  const template=uiLayoutTemplateById(config?.template_id)
+  const merged={...template,...config}
+  const hasSidebar=Boolean(merged.sidebar)
+  const hasHeader=Boolean(merged.header)
+  const hasFooter=Boolean(merged.footer)
+  const isMobile=viewport==='mobile'
+  const showHeader=hasHeader||(isMobile&&hasSidebar)
+  const vars=uiThemePreviewStyleVars(config)
+  const label=config?.theme==='custom'?(config?.theme_name||'Custom Theme'):(config?.theme==='dark'?'Dark':config?.theme==='auto'?'Auto':'Light')
+  const menuClick=(id,hasSubmenu=false)=>{setActiveMenu(id);if(hasSubmenu)setSubmenuOpen(value=>!value);else setSubmenuOpen(false)}
+  const evidenceRows=uiThemeEvidenceRows(config)
+  const reproduction=Math.round(evidenceRows.reduce((sum,row)=>sum+row.confidence,0)/Math.max(1,evidenceRows.length)*100)
+  useEffect(()=>{
+    setSubmenuOpen(false)
+    setUserMenuOpen(false)
+    setMobileMenuOpen(false)
+  },[viewport])
+  const mobileItem=(id,labelText,hasSubmenu=false,children=[])=><div className="ui-theme-preview-mobile-menu-item" key={id}>
+    <button className={activeMenu===id?'active':''} onClick={()=>menuClick(id,hasSubmenu)}>{labelText}{hasSubmenu?<span>{submenuOpen&&activeMenu===id?'⌃':'⌄'}</span>:null}</button>
+    {hasSubmenu&&submenuOpen&&activeMenu===id&&<div className="ui-theme-preview-mobile-submenu">{children.map(item=><button key={item}>{item}</button>)}</div>}
+  </div>
+  return <div className={`ui-theme-preview ${compact?'compact':''} ${viewport}`} style={vars}>
+    <div className="ui-theme-preview-browser">
+      {showHeader&&<header><b>{label}</b>{isMobile?<button type="button" className={`ui-theme-preview-mobile-menu-trigger ${mobileMenuOpen?'open':''}`} aria-label="모바일 메뉴 열기" aria-expanded={mobileMenuOpen} onClick={()=>{setMobileMenuOpen(value=>!value);setSubmenuOpen(false)}}><span>☰</span><em>{mobileMenuOpen?'닫기':'메뉴'}</em></button>:<nav>
+        <button className={activeMenu==='home'?'active':''} onClick={()=>menuClick('home')}>Home</button>
+        <div className="ui-theme-preview-nav-dropdown"><button className={activeMenu==='products'?'active':''} onClick={()=>menuClick('products',true)}>Products <span>⌄</span></button>{submenuOpen&&activeMenu==='products'&&<div className="ui-theme-preview-submenu"><button>상품 조회</button><button>카테고리</button><button>재고 관리</button></div>}</div>
+        <button className={activeMenu==='reports'?'active':''} onClick={()=>menuClick('reports')}>Reports</button>
+      </nav>}<div className="ui-theme-preview-user-wrap"><button className="ui-theme-preview-user-trigger" aria-label="사용자 메뉴" onClick={()=>{setUserMenuOpen(value=>!value);if(isMobile)setMobileMenuOpen(false)}}><i></i><span>Admin</span></button>{userMenuOpen&&<div className="ui-theme-preview-user-menu"><strong>사용자 메뉴</strong><button>프로필</button><button>설정</button><hr/><button>로그아웃</button></div>}</div></header>}
+      {isMobile&&mobileMenuOpen&&<div className="ui-theme-preview-mobile-menu-layer">
+        <button type="button" className="ui-theme-preview-mobile-menu-backdrop" aria-label="모바일 메뉴 닫기" onClick={()=>setMobileMenuOpen(false)}></button>
+        <div className="ui-theme-preview-mobile-menu-panel">
+          <div className="ui-theme-preview-mobile-menu-head"><strong>MENU</strong><button type="button" onClick={()=>setMobileMenuOpen(false)}>×</button></div>
+          <div className="ui-theme-preview-mobile-menu-list">
+            {hasHeader&&mobileItem('home','Home')}
+            {hasHeader&&mobileItem('products','Products',true,['상품 조회','카테고리','재고 관리'])}
+            {hasHeader&&mobileItem('reports','Reports')}
+            {hasSidebar&&mobileItem('dashboard','Dashboard')}
+            {hasSidebar&&mobileItem('catalog','Catalog',true,['상품','카테고리'])}
+            {hasSidebar&&mobileItem('orders','Orders')}
+          </div>
+        </div>
+      </div>}
+      <div className="ui-theme-preview-body">
+        {hasSidebar&&<aside><strong>MENU</strong>
+          <button className={activeMenu==='dashboard'?'active':''} onClick={()=>menuClick('dashboard')}>Dashboard</button>
+          <div className="ui-theme-preview-side-dropdown"><button className={activeMenu==='catalog'?'active':''} onClick={()=>menuClick('catalog',true)}>Catalog <span>⌄</span></button>{submenuOpen&&activeMenu==='catalog'&&<div className="ui-theme-preview-side-submenu"><button>상품</button><button>카테고리</button></div>}</div>
+          <button className={activeMenu==='orders'?'active':''} onClick={()=>menuClick('orders')}>Orders</button>
+        </aside>}
+        <main>
+          <div className="ui-theme-preview-tabs"><button className="active">Dashboard</button><button>Activity</button><button>Settings</button></div>
+          <div className="ui-theme-preview-title"><div><b>Dashboard</b><small>직접 Hover/Click하여 외부 Theme의 상태 스타일을 확인하세요.</small></div><button className="ui-theme-preview-primary">Primary</button></div>
+          <div className="ui-theme-preview-kpis"><article><small>Users</small><b>1,248</b></article><article><small>Orders</small><b>326</b></article><article><small>Status</small><b>Active</b></article></div>
+          <section className="ui-theme-preview-card"><div className="ui-theme-preview-form"><input placeholder="클릭하여 Focus 스타일 확인"/><button>검색</button></div><div className="ui-theme-preview-table"><i></i><i></i><i></i></div></section>
+        </main>
+      </div>
+      {hasFooter&&<footer><span></span><span></span><span></span></footer>}
+    </div>
+    {!compact&&<div className="ui-theme-preview-verification">
+      <div className="ui-theme-preview-verification-head"><div><strong>외부 스타일 재현 근거</strong><small>색상 샘플이 아니라 실제 URL CSS Selector 또는 상태별 캡처 참고 여부를 표시합니다.</small></div><b>{config?.theme==='custom'?`${reproduction}%`:'기본'}</b></div>
+      <div className="ui-theme-preview-evidence-grid">{evidenceRows.map(row=><div key={row.key} className={`evidence ${row.status}`}><span>{row.label}</span><b>{row.status==='confirmed'?'URL CSS 확인':row.status==='reference'?'캡처 참고':'추정/기본값'}</b><small>{row.selector?row.selector:row.fileName?`${row.fileName}${row.referenceRole?` · ${row.referenceRole}`:''}`:row.source}</small></div>)}</div>
+      {config?.theme==='custom'&&<div className="ui-theme-preview-source-note"><span>URL CSS 확인 항목은 실제 Selector 상태 규칙을 사용합니다.</span><span>캡처 참고 항목은 사용자가 지정한 상태 이미지에서 보완합니다.</span><span>근거가 없는 상태는 임의 복제라고 표시하지 않고 추정/기본값으로 구분합니다.</span></div>}
+    </div>}
+  </div>
 }
 
 const uiLayoutSummary=(value)=>{
@@ -516,12 +884,15 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
   const [themeImportOpen,setThemeImportOpen]=useState(false)
   const [themeImportName,setThemeImportName]=useState('')
   const [themeImportUrl,setThemeImportUrl]=useState('')
-  const [themeImportFiles,setThemeImportFiles]=useState([])
+  const [themeImportFiles,setThemeImportFiles]=useState([null,null,null])
+  const [themeImportRoles,setThemeImportRoles]=useState(['default','menu_hover','user_menu_open'])
   const [themeImportAnalyses,setThemeImportAnalyses]=useState([])
   const [themeImportPreview,setThemeImportPreview]=useState(null)
   const [themeImportBusy,setThemeImportBusy]=useState(false)
   const [themeImportError,setThemeImportError]=useState('')
   const [themeBackendWarning,setThemeBackendWarning]=useState('')
+  const [themePreviewOpen,setThemePreviewOpen]=useState(false)
+  const [themePreviewViewport,setThemePreviewViewport]=useState('desktop')
   useEffect(()=>{
     if(!open) return
     const template=uiLayoutTemplateById(value?.template_id)
@@ -563,10 +934,10 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
     if(value.startsWith('custom:')){
       const themeId=Number(value.slice(7))
       const theme=customThemes.find(item=>Number(item.id)===themeId)
-      if(theme) patch({theme:'custom',theme_id:theme.id,theme_name:theme.name,theme_tokens:theme.tokens||{},theme_component_rules:theme.component_rules||{},theme_layout_rules:theme.layout_rules||{},theme_source_type:theme.source_type||'',theme_source_url:theme.source_url||''})
+      if(theme) patch({theme:'custom',theme_id:theme.id,theme_name:theme.name,theme_tokens:theme.tokens||{},theme_component_rules:theme.component_rules||{},theme_layout_rules:theme.layout_rules||{},theme_source_type:theme.source_type||'',theme_source_url:theme.source_url||'',theme_source_label:theme.source_label||''})
       return
     }
-    patch({theme:value,theme_id:null,theme_name:'',theme_tokens:{},theme_component_rules:{},theme_layout_rules:{},theme_source_type:'',theme_source_url:''})
+    patch({theme:value,theme_id:null,theme_name:'',theme_tokens:{},theme_component_rules:{},theme_layout_rules:{},theme_source_type:'',theme_source_url:'',theme_source_label:''})
   }
   const mergeThemeImageAnalyses=(analyses=[])=>{
     const rows=(analyses||[]).filter(Boolean)
@@ -621,27 +992,31 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
       const name=String(themeImportName||'').trim()
       if(!name) throw new Error('Theme 이름을 입력하세요.')
       const url=String(themeImportUrl||'').trim()
-      const files=Array.isArray(themeImportFiles)?themeImportFiles:[]
+      const files=(Array.isArray(themeImportFiles)?themeImportFiles:[]).filter(Boolean)
       if(!url&&!files.length) throw new Error('웹사이트 URL 또는 화면 캡처 이미지를 하나 이상 입력하세요.')
-      if(files.length>3) throw new Error('화면 캡처 이미지는 최대 3개까지 선택할 수 있습니다.')
 
-      let analyses=themeImportAnalyses
-      if(files.length&&(!Array.isArray(analyses)||analyses.length!==files.length)){
+      let analyses=Array.isArray(themeImportAnalyses)?themeImportAnalyses:[]
+      const slots=Array.isArray(themeImportFiles)?themeImportFiles:[null,null,null]
+      if(files.length&&(!Array.isArray(analyses)||analyses.length!==slots.length||slots.some((file,index)=>Boolean(file)&&!analyses[index]))){
         analyses=[]
-        for(const file of files) analyses.push(await extractThemeTokensFromImage(file))
+        for(let index=0;index<slots.length;index++){
+          const file=slots[index]
+          analyses[index]=file?await extractThemeTokensFromImage(file,themeImportRoles?.[index]||'default'):null
+        }
         setThemeImportAnalyses(analyses)
-        setThemeImportPreview(mergeThemeImageAnalyses(analyses))
+        setThemeImportPreview(mergeThemeImageAnalyses(analyses.filter(Boolean)))
       }
       const result=await api('/ui-themes/import',{method:'POST',body:JSON.stringify({
         name,
         url,
-        images:files.map((file,index)=>({
+        images:(Array.isArray(themeImportFiles)?themeImportFiles:[]).map((file,index)=>file?({
           file_name:file.name,
+          reference_role:themeImportRoles?.[index]||'default',
           tokens:analyses?.[index]?.tokens||{},
           component_rules:analyses?.[index]?.component_rules||{},
           layout_rules:analyses?.[index]?.layout_rules||{},
           preview_colors:analyses?.[index]?.preview_colors||[],
-        })),
+        }):null).filter(Boolean),
         scope:'GLOBAL'
       })})
       const theme=result?.theme
@@ -652,36 +1027,47 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
         setThemeBackendWarning('')
       }
       setCustomThemes(prev=>[theme,...prev.filter(item=>Number(item.id)!==Number(theme.id))])
-      patch({theme:'custom',theme_id:theme.id,theme_name:theme.name,theme_tokens:theme.tokens||{},theme_component_rules:theme.component_rules||{},theme_layout_rules:theme.layout_rules||{},theme_source_type:theme.source_type||'',theme_source_url:theme.source_url||''})
-      setThemeImportOpen(false); setThemeImportName(''); setThemeImportUrl(''); setThemeImportFiles([]); setThemeImportAnalyses([]); setThemeImportPreview(null)
+      patch({theme:'custom',theme_id:theme.id,theme_name:theme.name,theme_tokens:theme.tokens||{},theme_component_rules:theme.component_rules||{},theme_layout_rules:theme.layout_rules||{},theme_source_type:theme.source_type||'',theme_source_url:theme.source_url||'',theme_source_label:theme.source_label||''})
+      setThemeImportOpen(false); setThemeImportName(''); setThemeImportUrl(''); setThemeImportFiles([null,null,null]); setThemeImportRoles(['default','menu_hover','user_menu_open']); setThemeImportAnalyses([]); setThemeImportPreview(null)
     }catch(error){setThemeImportError(String(error?.message||error))}finally{setThemeImportBusy(false)}
   }
-  const chooseThemeImages=async(fileList)=>{
-    setThemeImportError('')
-    const files=Array.from(fileList||[]).filter(Boolean)
-    if(files.length>3){
-      setThemeImportError('화면 캡처 이미지는 최대 3개까지 선택할 수 있습니다.')
-      return
+  const analyzeThemeImageSlots=async(nextSlots,nextRoles=themeImportRoles)=>{
+    const slots=Array.isArray(nextSlots)?nextSlots:[null,null,null]
+    setThemeImportAnalyses([]); setThemeImportPreview(null)
+    if(!slots.some(Boolean)) return
+    const analyses=[]
+    for(let index=0;index<slots.length;index++){
+      analyses[index]=slots[index]?await extractThemeTokensFromImage(slots[index],nextRoles?.[index]||'default'):null
     }
-    for(const file of files){
+    setThemeImportAnalyses(analyses)
+    setThemeImportPreview(mergeThemeImageAnalyses(analyses.filter(Boolean)))
+  }
+  const chooseThemeImageSlot=async(index,fileList)=>{
+    setThemeImportError('')
+    const file=Array.from(fileList||[]).filter(Boolean)[0]||null
+    if(file){
       if(!String(file.type||'').startsWith('image/')){setThemeImportError('이미지 파일만 선택할 수 있습니다.');return}
       if(file.size>25*1024*1024){setThemeImportError(`'${file.name}' 파일은 25MB를 초과합니다.`);return}
     }
-    setThemeImportFiles(files); setThemeImportAnalyses([]); setThemeImportPreview(null)
-    if(!files.length) return
-    try{
-      const analyses=[]
-      for(const file of files) analyses.push(await extractThemeTokensFromImage(file))
-      setThemeImportAnalyses(analyses)
-      setThemeImportPreview(mergeThemeImageAnalyses(analyses))
-    }catch(error){setThemeImportError(String(error?.message||error))}
+    const next=[...(Array.isArray(themeImportFiles)?themeImportFiles:[null,null,null])]
+    while(next.length<3) next.push(null)
+    next[index]=file
+    setThemeImportFiles(next.slice(0,3))
+    try{await analyzeThemeImageSlots(next.slice(0,3))}catch(error){setThemeImportError(String(error?.message||error))}
   }
   const removeThemeImage=(index)=>{
-    const nextFiles=themeImportFiles.filter((_,i)=>i!==index)
-    const nextAnalyses=themeImportAnalyses.filter((_,i)=>i!==index)
-    setThemeImportFiles(nextFiles)
-    setThemeImportAnalyses(nextAnalyses)
-    setThemeImportPreview(mergeThemeImageAnalyses(nextAnalyses))
+    const next=[...(Array.isArray(themeImportFiles)?themeImportFiles:[null,null,null])]
+    while(next.length<3) next.push(null)
+    next[index]=null
+    setThemeImportFiles(next.slice(0,3))
+    analyzeThemeImageSlots(next.slice(0,3)).catch(error=>setThemeImportError(String(error?.message||error)))
+  }
+  const changeThemeImageRole=(index,role)=>{
+    const next=[...(Array.isArray(themeImportRoles)?themeImportRoles:['default','menu_hover','user_menu_open'])]
+    while(next.length<3) next.push('default')
+    next[index]=String(role||'default')
+    setThemeImportRoles(next.slice(0,3))
+    analyzeThemeImageSlots(themeImportFiles,next.slice(0,3)).catch(error=>setThemeImportError(String(error?.message||error)))
   }
   const deleteCustomTheme=async(theme)=>{
     if(!theme?.id) return
@@ -749,21 +1135,43 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
               <div><strong>{draft.theme_name||'Custom Theme'}</strong><small>{draft.theme_source_type==='COMBINED'?'URL + 화면 캡처 통합 Theme':draft.theme_source_type==='URL'?'URL 분석 Theme':draft.theme_source_type==='IMAGE'?'화면 캡처 Theme':'사용자 Theme'} · 선택된 Frontend 기술의 native Theme 방식으로 자동 변환 적용</small></div>
               <button type="button" onClick={()=>deleteCustomTheme(customThemes.find(item=>Number(item.id)===Number(draft.theme_id)))}>삭제</button>
             </div>}
+            <div className="ui-layout-theme-live-preview-card" style={uiThemePreviewStyleVars({...draft,template_id:selectedId})}>
+              <div className="ui-layout-theme-live-preview-head">
+                <div><strong>Theme 미리보기</strong><small>{draft.theme==='custom'?(draft.theme_name||'Custom Theme'):(draft.theme==='dark'?'Dark':draft.theme==='auto'?'Auto':'Light')} · {selected.name}</small></div>
+                <button type="button" onClick={()=>{setThemePreviewViewport('desktop');setThemePreviewOpen(true)}}>전체 미리보기</button>
+              </div>
+              <UILayoutThemePreview config={{...draft,template_id:selectedId}} compact={true}/>
+              <div className="ui-layout-theme-state-swatches">
+                <span className="normal">메뉴 Normal</span><span className="hover">Hover</span><span className="active">Active</span>
+              </div>
+            </div>
             {themeImportOpen&&<div className="ui-layout-theme-import-panel unified-source">
               <div className="ui-layout-theme-import-source-head">
                 <div><strong>스타일 참고 자료</strong><small>URL과 캡처 이미지를 함께 넣을 수 있습니다. 하나만 입력해도 되고, 둘 다 있으면 통합 분석합니다.</small></div>
-                <span>{themeImportFiles.length}/3 이미지</span>
+                <span>{themeImportFiles.filter(Boolean).length}/3 이미지</span>
               </div>
               <label><span>Theme 이름</span><input value={themeImportName} onChange={e=>setThemeImportName(e.target.value)} placeholder="예: 쇼핑몰 A 스타일"/></label>
               <label><span>웹사이트 URL</span><input value={themeImportUrl} onChange={e=>setThemeImportUrl(e.target.value)} placeholder="선택 입력 · https://example.com"/></label>
-              <label className="ui-layout-theme-file"><span>화면 캡처</span><input type="file" accept="image/*" multiple onChange={e=>chooseThemeImages(e.target.files)}/></label>
-              {themeImportFiles.length>0&&<div className="ui-layout-theme-file-list">{themeImportFiles.map((file,index)=><div key={`${file.name}-${file.size}-${index}`}><span title={file.name}>{index+1}. {file.name}</span><button type="button" onClick={()=>removeThemeImage(index)}>×</button></div>)}</div>}
+              <div className="ui-layout-theme-file-slots">
+                {[0,1,2].map(index=>{const file=themeImportFiles[index];return <div key={index} className={`ui-layout-theme-file-slot-wrap ${file?'filled':''}`}>
+                  <label className={`ui-layout-theme-file-slot ${file?'filled':''}`}>
+                    <span>화면 캡처 {index+1}</span>
+                    <input type="file" accept="image/*" onChange={e=>chooseThemeImageSlot(index,e.target.files)}/>
+                    <b title={file?.name||''}>{file?file.name:'이미지 선택'}</b>
+                    <small>{file?`${Math.max(1,Math.round(file.size/1024))} KB`:'선택 입력 · 최대 25MB'}</small>
+                    {file&&<button type="button" onClick={e=>{e.preventDefault();e.stopPropagation();removeThemeImage(index)}}>×</button>}
+                  </label>
+                  <label className="ui-layout-theme-reference-role"><span>참고 상태</span><select value={themeImportRoles[index]||'default'} onChange={e=>changeThemeImageRole(index,e.target.value)}>
+                    <option value="default">기본 화면</option><option value="menu_hover">메뉴 Hover</option><option value="menu_active">메뉴 Active</option><option value="submenu_open">하위 메뉴 Open</option><option value="user_menu_open">사용자 메뉴 Open</option><option value="button_hover">버튼 Hover</option><option value="input_focus">입력 Focus</option><option value="mobile">모바일 화면</option>
+                  </select></label>
+                </div>})}
+              </div>
               {themeImportPreview&&<div className="ui-layout-theme-import-palette">{(themeImportPreview.preview_colors||[]).map((color,index)=><i key={`${color}-${index}`} style={{background:color}} title={color}></i>)}</div>}
               <div className="ui-layout-theme-menu-state-note">
                 <b>메뉴 상태까지 분석</b>
-                <span>URL CSS의 메뉴/Navigation 기본·Hover·Active 스타일을 추출합니다. 캡처 이미지는 최대 3장을 함께 비교하여 메뉴 색상과 상태 차이를 Theme 규칙에 보완합니다.</span>
+                <span>URL CSS의 메뉴/Navigation 기본·Hover·Active, 하위 메뉴, 사용자 메뉴, Button/Input/Card 상태 규칙을 추출합니다. 캡처 이미지는 각 슬롯에서 기본/Hover/메뉴 Open 등 참고 상태를 지정해 URL 분석 결과를 보완합니다.</span>
               </div>
-              <small className="ui-layout-theme-import-help">URL에서는 HTML/CSS의 색상·폰트·Radius·Shadow·Navigation/Menu 상태를 분석하고, 이미지는 색상과 화면 스타일을 추정합니다. URL과 이미지가 모두 있으면 URL의 CSS 상태 규칙과 이미지의 실제 화면 색감을 합쳐 하나의 Design Token Theme으로 저장합니다. 로고·문구·이미지·고유 콘텐츠는 복제하지 않습니다.</small>
+              <small className="ui-layout-theme-import-help">URL에서는 HTML/CSS의 색상·폰트·Radius·Shadow와 실제 :hover/:focus/.active/Dropdown/User Menu Selector를 분석하고, 이미지는 지정한 UI 상태의 실제 화면 특징을 참고합니다. URL과 이미지가 모두 있으면 URL의 CSS 상태 규칙과 이미지의 실제 화면 색감을 합쳐 하나의 Design Token Theme으로 저장합니다. 로고·문구·이미지·고유 콘텐츠는 복제하지 않습니다.</small>
               {customThemes.length>0&&<div className="ui-layout-theme-library"><strong>저장된 Theme</strong>{customThemes.slice(0,8).map(theme=><div key={theme.id}><span className="ui-layout-theme-library-palette">{(theme.preview_colors||[]).slice(0,4).map((color,index)=><i key={`${color}-${index}`} style={{background:color}}></i>)}</span><b>{theme.name}</b><em>{theme.source_type==='COMBINED'?'URL+이미지':theme.source_type==='URL'?'URL':theme.source_type==='IMAGE'?'이미지':'Custom'}</em><button type="button" onClick={()=>{selectThemeValue(`custom:${theme.id}`);setThemeImportOpen(false)}}>적용</button><button type="button" className="danger" onClick={()=>deleteCustomTheme(theme)}>삭제</button></div>)}</div>}
               {themeImportError&&<div className="ui-layout-theme-import-error">{themeImportError}</div>}
               <div className="ui-layout-theme-import-actions"><button type="button" onClick={()=>setThemeImportOpen(false)}>취소</button><button type="button" className="primary" disabled={themeImportBusy} onClick={importTheme}>{themeImportBusy?'통합 분석·저장 중...':'분석 후 Theme 저장'}</button></div>
@@ -803,6 +1211,25 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
           <div className="ui-layout-config-actions"><button type="button" onClick={onClose}>취소</button><button type="button" className="primary" onClick={()=>onApply(normalizeUILayoutConfig(selected,{...draft,template_id:selectedId,selected_at:new Date().toISOString()}))}>이 레이아웃 사용</button></div>
         </aside>
       </div>
+
+      {themePreviewOpen&&<div className="ui-layout-theme-preview-modal-backdrop" onMouseDown={()=>setThemePreviewOpen(false)}>
+        <div className="ui-layout-theme-preview-modal" style={uiThemePreviewStyleVars({...draft,template_id:selectedId})} onMouseDown={event=>event.stopPropagation()}>
+          <div className="ui-layout-theme-preview-modal-head">
+            <div><span>LAYOUT + THEME PREVIEW</span><strong>{draft.theme==='custom'?(draft.theme_name||'Custom Theme'):(draft.theme==='dark'?'Dark':draft.theme==='auto'?'Auto':'Light')} · {selected.name}</strong><small>미리보기 안에서 직접 마우스 오버·메뉴 클릭·하위 메뉴·사용자 메뉴·입력 Focus를 조작해 외부 Theme의 실제 상태 스타일을 검증합니다.</small></div>
+            <button type="button" onClick={()=>setThemePreviewOpen(false)}>×</button>
+          </div>
+          <div className="ui-layout-theme-preview-modal-tools">
+            {['desktop','tablet','mobile'].map(item=><button key={item} type="button" className={themePreviewViewport===item?'active':''} onClick={()=>setThemePreviewViewport(item)}>{item==='desktop'?'Desktop':item==='tablet'?'Tablet':'Mobile'}</button>)}
+          </div>
+          <div className="ui-layout-theme-preview-modal-body">
+            <UILayoutThemePreview config={{...draft,template_id:selectedId}} viewport={themePreviewViewport}/>
+          </div>
+          <div className="ui-layout-theme-preview-modal-legend interactive">
+            <span>🖱 메뉴 Hover</span><span>☰ 메뉴 클릭/Open</span><span>👤 사용자 메뉴 클릭</span>
+            <small>아래 '외부 스타일 재현 근거'에서 URL CSS 확인 / 캡처 참고 / 추정 상태를 구분합니다.</small>
+          </div>
+        </div>
+      </div>}
 
       {frontendThemeListOpen&&<div className="ui-layout-theme-target-modal-backdrop" onMouseDown={()=>setFrontendThemeListOpen(false)}>
         <div className="ui-layout-theme-target-modal" onMouseDown={event=>event.stopPropagation()}>
@@ -2774,6 +3201,15 @@ function IDE() {
   const [projectDirs,setProjectDirs]=useState([])
   const [selected,setSelected]=useState('')
   const [openEditorFiles,setOpenEditorFiles]=useState([])
+  const codeToolbarShellRef=useRef(null)
+  const codeToolbarResizeCleanupRef=useRef(null)
+  const [codeToolbarResizing,setCodeToolbarResizing]=useState(false)
+  const [codeToolbarActionWidth,setCodeToolbarActionWidth]=useState(()=>{
+    try{
+      const saved=Number(localStorage.getItem('agentstudio.codeToolbar.actionWidth'))
+      return Number.isFinite(saved)&&saved>=220?saved:520
+    }catch{return 520}
+  })
   const [editorFileContents,setEditorFileContents]=useState({})
   const editorFileContentsRef=useRef({})
   const [editorFileDirty,setEditorFileDirty]=useState({})
@@ -2794,6 +3230,22 @@ function IDE() {
   const [fileSaveStatus,setFileSaveStatus]=useState('')
   const [editorTabMenu,setEditorTabMenu]=useState(null)
   const [editorFilesMenu,setEditorFilesMenu]=useState(null)
+  // v5.408: VS Code-style two-pane editor split. A tab context-menu action can
+  // open any already loaded page to the left or right without replacing the
+  // current primary editor. The divider ratio is persisted between sessions.
+  const [editorSplit,setEditorSplit]=useState(null)
+  const editorSplitShellRef=useRef(null)
+  const editorSplitResizeCleanupRef=useRef(null)
+  const [editorSplitResizing,setEditorSplitResizing]=useState(false)
+  const [editorSplitRatio,setEditorSplitRatio]=useState(()=>{
+    try{
+      const saved=Number(localStorage.getItem('agentstudio.editorSplit.ratio'))
+      return Number.isFinite(saved)&&saved>=20&&saved<=80?saved:50
+    }catch{return 50}
+  })
+  const activeEditorPathRef=useRef('')
+  const secondaryEditorInstanceRef=useRef(null)
+  const secondaryNotebookEditorControllerRef=useRef(null)
   const [editorCloseConfirm,setEditorCloseConfirm]=useState(null)
   const [webBrowserTabs,setWebBrowserTabs]=useState(()=>[{
     id:DEFAULT_WEB_BROWSER_ID,
@@ -2822,7 +3274,13 @@ function IDE() {
   const focusOwnerRef=useRef('editor')
   const editorInstanceRef=useRef(null)
   const editorBookmarkDecorationIdsRef=useRef([])
+  const editorDebugDecorationIdsRef=useRef([])
   const [editorBookmarkRevision,setEditorBookmarkRevision]=useState(0)
+  const [editorBreakpointRevision,setEditorBreakpointRevision]=useState(0)
+  const [sourceDebugState,setSourceDebugState]=useState(null)
+  const [sourceDebugBusy,setSourceDebugBusy]=useState(false)
+  const [sourceDebugExpression,setSourceDebugExpression]=useState('')
+  const [sourceDebugConsole,setSourceDebugConsole]=useState([])
   const notebookEditorControllerRef=useRef(null)
   const editorTabsScrollRef=useRef(null)
   const [editorTextSearchOpen,setEditorTextSearchOpen]=useState(false)
@@ -3075,6 +3533,9 @@ function IDE() {
   })
   const [developmentFinalStatus,setDevelopmentFinalStatus]=useState(null)
   const [targetWorkflowError,setTargetWorkflowError]=useState('')
+  const [workflowRecoveryInfo,setWorkflowRecoveryInfo]=useState(null)
+  const [workflowProviderDiagnostic,setWorkflowProviderDiagnostic]=useState(null)
+  const [workflowRecoveryBusy,setWorkflowRecoveryBusy]=useState('')
   const [targetWorkflowQuality,setTargetWorkflowQuality]=useState(null)
   const [databaseDesignFinalizeBusy,setDatabaseDesignFinalizeBusy]=useState(false)
   const [liveDatabasePreview,setLiveDatabasePreview]=useState(null)
@@ -3227,6 +3688,7 @@ function IDE() {
   const pythonStopRequestedRef=useRef(false)
   const [cmdExecution,setCmdExecution]=useState({busy:false,executionId:'',path:'',pid:null})
   const [activeWorkflowJobId,setActiveWorkflowJobId]=useState('')
+  const activeWorkflowJobIdRef=useRef('')
   const [globalStopBusy,setGlobalStopBusy]=useState(false)
   const [sqlQueryResult,setSqlQueryResult]=useState(null)
   const [sqlResultTab,setSqlResultTab]=useState('DATA')
@@ -3395,6 +3857,60 @@ function IDE() {
     setCodeRightPanelTab('FILES')
   },[root])
 
+  useEffect(()=>{
+    try{localStorage.setItem('agentstudio.codeToolbar.actionWidth',String(Math.round(codeToolbarActionWidth)))}catch{}
+  },[codeToolbarActionWidth])
+
+  useEffect(()=>()=>{
+    try{codeToolbarResizeCleanupRef.current?.()}catch{}
+  },[])
+
+  const beginCodeToolbarSplitResize=(event)=>{
+    event.preventDefault()
+    event.stopPropagation()
+    const host=codeToolbarShellRef.current
+    if(!host) return
+
+    const rect=host.getBoundingClientRect()
+    const minimumActionWidth=220
+    const minimumTabRailWidth=Math.min(360,Math.max(180,rect.width*0.24))
+    const fixedLeadingWidth=104 // 편집 버튼 + 좌우 탭 이동 버튼 + splitter 여유
+    const maximumActionWidth=Math.max(
+      minimumActionWidth,
+      rect.width-minimumTabRailWidth-fixedLeadingWidth
+    )
+    const previousCursor=document.body.style.cursor
+    const previousSelect=document.body.style.userSelect
+    document.body.style.cursor='col-resize'
+    document.body.style.userSelect='none'
+    setCodeToolbarResizing(true)
+
+    const onMove=(moveEvent)=>{
+      const raw=rect.right-moveEvent.clientX
+      const next=Math.max(minimumActionWidth,Math.min(maximumActionWidth,raw))
+      setCodeToolbarActionWidth(next)
+    }
+    const cleanup=()=>{
+      window.removeEventListener('pointermove',onMove)
+      window.removeEventListener('pointerup',cleanup)
+      window.removeEventListener('pointercancel',cleanup)
+      document.body.style.cursor=previousCursor
+      document.body.style.userSelect=previousSelect
+      setCodeToolbarResizing(false)
+      codeToolbarResizeCleanupRef.current=null
+    }
+    codeToolbarResizeCleanupRef.current=cleanup
+    window.addEventListener('pointermove',onMove)
+    window.addEventListener('pointerup',cleanup)
+    window.addEventListener('pointercancel',cleanup)
+  }
+
+  const resetCodeToolbarSplit=()=>{
+    const host=codeToolbarShellRef.current
+    const width=host?.getBoundingClientRect?.().width||0
+    setCodeToolbarActionWidth(width>0?Math.max(300,Math.min(520,width*0.48)):520)
+  }
+
   const scrollCodeEditChatToBottom=(behavior='smooth')=>{
     requestAnimationFrame(()=>{
       const el=codeEditChatRef.current
@@ -3440,6 +3956,8 @@ function IDE() {
 
 
 
+  useEffect(()=>{activeWorkflowJobIdRef.current=activeWorkflowJobId},[activeWorkflowJobId])
+
   useEffect(()=>{const ws=connectJobs(evt=>{
     if(evt.type==='job'){
       setJobs(prev=>{
@@ -3455,6 +3973,19 @@ function IDE() {
         return next
       })
       if(evt.job.result?.output)setTerminal(evt.job.result.output)
+
+      // v5.393: Backend Job의 terminal event가 도착하는 즉시 전역 실행 상태를
+      // 해제합니다. Workflow 내부 결과가 DEBUG_STOPPED/VALIDATION_BLOCKED여도
+      // Background Job 자체는 SUCCESS로 종료될 수 있으므로 Job lifecycle을 별도로
+      // 동기화해야 상단 '실행 정지'가 남지 않습니다.
+      if(
+        String(evt.job?.id||'')===String(activeWorkflowJobIdRef.current||'')
+        && ['SUCCESS','FAILED','CANCELLED'].includes(String(evt.job?.status||'').toUpperCase())
+      ){
+        activeWorkflowJobIdRef.current=''
+        setActiveWorkflowJobId('')
+        setAgentBuildBusy(false)
+      }
 
       setPgvectorInstall(current=>{
         if(!current?.job_id || current.job_id!==evt.job.id) return current
@@ -3475,6 +4006,43 @@ function IDE() {
       })
     }
   });return()=>ws.close()},[])
+
+  // v5.393: 화면/탭을 이동했다 돌아와도 Frontend의 오래된 busy flag만 믿지 않고
+  // 실제 Backend Job 상태를 재조회합니다. Backend 재시작으로 Job이 사라진 경우도
+  // 실행 중으로 간주하지 않습니다.
+  useEffect(()=>{
+    const jobId=String(activeWorkflowJobId||'').trim()
+    if(!jobId) return undefined
+    let disposed=false
+
+    const reconcile=async()=>{
+      try{
+        const projectRoot=String(root||newAgentProjectRoot||'').trim()
+        const state=await api(`/workflow/runtime-status?job_id=${encodeURIComponent(jobId)}&project_root=${encodeURIComponent(projectRoot)}`)
+        if(disposed) return
+        const status=String(state?.job_status||'').toUpperCase()
+        const terminal=['SUCCESS','FAILED','CANCELLED','NOT_FOUND'].includes(status)
+        if(terminal&&state?.execution_active!==true){
+          activeWorkflowJobIdRef.current=''
+          setActiveWorkflowJobId('')
+          setAgentBuildBusy(false)
+          setDevelopmentProgress(prev=>prev?.active?{...prev,active:false}:prev)
+        }
+      }catch(_){
+        // 일시적인 네트워크 오류만으로 실행 상태를 강제로 지우지 않습니다.
+      }
+    }
+
+    const onFocus=()=>{void reconcile()}
+    void reconcile()
+    const timer=setInterval(()=>{void reconcile()},2500)
+    window.addEventListener('focus',onFocus)
+    return()=>{
+      disposed=true
+      clearInterval(timer)
+      window.removeEventListener('focus',onFocus)
+    }
+  },[activeWorkflowJobId,workspaceTab,root,newAgentProjectRoot])
 
 
   // v5.371 Global Command Palette: keep typing inside the palette local to the
@@ -3913,12 +4481,31 @@ function IDE() {
     window.requestAnimationFrame(()=>applyEditorBookmarkDecorations(editorInstanceRef.current,path))
   }
   const activeTextEditorBookmarks=isBookmarkableTextEditorFile(selected)?getEditorBookmarksForPath(selected):[]
+  const getEditorBreakpointsForPath=(filePath='')=>isSourceDebugFile(filePath)?loadTextEditorBreakpoints(editorBookmarkKeyForPath(filePath)):[]
+  const activeSourceBreakpoints=isSourceDebugFile(selected)?getEditorBreakpointsForPath(selected):[]
+  const applyEditorDebugDecorations=(editor=editorInstanceRef.current,filePath=selectedEditorFileRef.current||selected||'')=>{
+    if(!editor?.deltaDecorations) return
+    const path=normalizeProjectRelativePath(filePath)
+    const maxLine=Math.max(1,Number(editor.getModel?.()?.getLineCount?.()||1))
+    const currentLine=(sourceDebugState?.debug_active&&normalizeProjectRelativePath(sourceDebugState?.relative_path||'')===path)?Number(sourceDebugState?.line||0):0
+    const decorations=[]
+    getEditorBreakpointsForPath(path).filter(line=>line<=maxLine).forEach(line=>decorations.push({range:{startLineNumber:line,startColumn:1,endLineNumber:line,endColumn:1},options:{glyphMarginClassName:'editor-debug-breakpoint-glyph',glyphMarginHoverMessage:{value:`중단점 · Line ${line}`}}}))
+    if(currentLine>0&&currentLine<=maxLine)decorations.push({range:{startLineNumber:currentLine,startColumn:1,endLineNumber:currentLine,endColumn:1},options:{isWholeLine:true,className:'editor-debug-current-line'}})
+    editorDebugDecorationIdsRef.current=editor.deltaDecorations(editorDebugDecorationIdsRef.current||[],decorations)
+  }
+  const toggleEditorBreakpoint=(filePath=selectedEditorFileRef.current||selected||'',lineNumber=null,editor=editorInstanceRef.current)=>{
+    const path=normalizeProjectRelativePath(filePath);if(!isSourceDebugFile(path))return
+    const line=Number(lineNumber||editor?.getPosition?.()?.lineNumber||1);if(!Number.isInteger(line)||line<1)return
+    const key=editorBookmarkKeyForPath(path);const current=loadTextEditorBreakpoints(key);const exists=current.includes(line)
+    storeTextEditorBreakpoints(key,exists?current.filter(item=>item!==line):[...current,line]);setEditorBreakpointRevision(value=>value+1)
+    window.requestAnimationFrame(()=>applyEditorDebugDecorations(editor,path))
+  }
 
   useEffect(()=>{
     if(!editorInstanceRef.current) return
-    const timer=window.setTimeout(()=>applyEditorBookmarkDecorations(editorInstanceRef.current,selected),0)
+    const timer=window.setTimeout(()=>{applyEditorBookmarkDecorations(editorInstanceRef.current,selected);applyEditorDebugDecorations(editorInstanceRef.current,selected)},0)
     return()=>window.clearTimeout(timer)
-  },[selected,editorBookmarkRevision])
+  },[selected,editorBookmarkRevision,editorBreakpointRevision,sourceDebugState?.debug_active,sourceDebugState?.line])
 
   const workspaceSummary = loadedProjectAnalysis?.summary || currentProject?.description || '프로젝트 분석 정보가 아직 없습니다.'
   const isSqlFile=!!selected?.toLowerCase?.().endsWith('.sql')
@@ -7756,7 +8343,12 @@ function IDE() {
   useEffect(()=>{ editorFileContentsRef.current=editorFileContents },[editorFileContents])
   useEffect(()=>{ editorFileDirtyRef.current=editorFileDirty },[editorFileDirty])
   useEffect(()=>{ editorFileDiskMetaRef.current=editorFileDiskMeta },[editorFileDiskMeta])
-  useEffect(()=>{ selectedEditorFileRef.current=selected },[selected])
+  useEffect(()=>{
+    selectedEditorFileRef.current=selected
+    if(!editorSplit || activeEditorPathRef.current!==editorSplit.path){
+      activeEditorPathRef.current=selected||''
+    }
+  },[selected])
 
   useEffect(()=>{
     setFileTreeSelectedPaths([])
@@ -7764,6 +8356,8 @@ function IDE() {
     setFileTreeContextMenu(null)
     setExternalNotificationOpen(false)
     setExternalFileNotifications([])
+    setEditorSplit(null)
+    activeEditorPathRef.current=''
   },[root])
 
   const writeEditorFile=async(relativePath,content,{force=false,promptOnConflict=true}={})=>{
@@ -7850,11 +8444,11 @@ function IDE() {
     }
   }
 
-  const saveFile=async()=>{
+  const saveFile=async(pathOverride='')=>{
     // v5.372: Ctrl+S saves the actual active editor file even when the top
     // project selector is empty. Notebook/file-tree tabs retain their own root.
     const selectedPath=normalizeProjectRelativePath(
-      selectedEditorFileRef.current||selected||''
+      pathOverride||activeEditorPathRef.current||selectedEditorFileRef.current||selected||''
     )
 
     const hasKnownContent=
@@ -7926,7 +8520,12 @@ function IDE() {
 
     if(focusOwnerRef.current==='editor'){
       setTimeout(()=>{
-        try{ editorInstanceRef.current?.focus() }catch{}
+        try{
+          const target=editorSplit&&activeEditorPathRef.current===editorSplit.path
+            ? secondaryEditorInstanceRef.current
+            : editorInstanceRef.current
+          target?.focus?.()
+        }catch{}
       },0)
     }
   }
@@ -8040,14 +8639,14 @@ function IDE() {
       // Ctrl+S: 현재 열린 파일 저장. 상단 프로젝트 선택이 비어 있어도
       // editor/file-tree root가 있으면 Notebook/Source/SQL을 저장합니다.
       const shortcutPath=normalizeProjectRelativePath(
-        selectedEditorFileRef.current||selected||''
+        activeEditorPathRef.current||selectedEditorFileRef.current||selected||''
       )
       if(
         screen==='WORKSPACE'
         && workspaceTab==='CODE'
         && shortcutPath
       ){
-        saveFile()
+        saveFile(shortcutPath)
       }
     }
 
@@ -8452,6 +9051,7 @@ function IDE() {
 
   const activateEditorFile=(relativePath)=>{
     if(!relativePath) return
+    activeEditorPathRef.current=relativePath
 
     const hasCachedContent=Object.prototype.hasOwnProperty.call(editorFileContents,relativePath)
     const cachedRoot=String(editorFileRootRef.current?.[relativePath]||'').trim()
@@ -8477,6 +9077,75 @@ function IDE() {
     }
   }
 
+  const openEditorInSplit=(relativePath,side='RIGHT')=>{
+    if(!relativePath) return
+    const normalizedSide=String(side||'RIGHT').toUpperCase()==='LEFT'?'LEFT':'RIGHT'
+    setEditorSplit({path:relativePath,side:normalizedSide})
+    setEditorTabMenu(null)
+  }
+
+  const closeEditorSplit=()=>{
+    setEditorSplit(null)
+    activeEditorPathRef.current=selected||''
+    setEditorSplitResizing(false)
+    try{ editorSplitResizeCleanupRef.current?.() }catch{}
+    editorSplitResizeCleanupRef.current=null
+  }
+
+  const beginEditorSplitResize=(event)=>{
+    if(!editorSplitShellRef.current) return
+    event.preventDefault()
+    event.stopPropagation()
+    try{ event.currentTarget?.setPointerCapture?.(event.pointerId) }catch{}
+    setEditorSplitResizing(true)
+
+    const move=(moveEvent)=>{
+      const shell=editorSplitShellRef.current
+      if(!shell) return
+      const rect=shell.getBoundingClientRect()
+      if(rect.width<=0) return
+      let ratio=((moveEvent.clientX-rect.left)/rect.width)*100
+      ratio=Math.max(20,Math.min(80,ratio))
+      setEditorSplitRatio(ratio)
+    }
+    const finish=()=>{
+      setEditorSplitResizing(false)
+      window.removeEventListener('pointermove',move,true)
+      window.removeEventListener('pointerup',finish,true)
+      window.removeEventListener('pointercancel',finish,true)
+      editorSplitResizeCleanupRef.current=null
+    }
+    window.addEventListener('pointermove',move,true)
+    window.addEventListener('pointerup',finish,true)
+    window.addEventListener('pointercancel',finish,true)
+    editorSplitResizeCleanupRef.current=finish
+  }
+
+  const resetEditorSplitRatio=()=>setEditorSplitRatio(50)
+
+  useEffect(()=>{
+    try{ localStorage.setItem('agentstudio.editorSplit.ratio',String(Math.round(editorSplitRatio*10)/10)) }catch{}
+  },[editorSplitRatio])
+
+  useEffect(()=>()=>{
+    try{ editorSplitResizeCleanupRef.current?.() }catch{}
+  },[])
+
+  const updateEditorCodeForPath=(relativePath,value)=>{
+    if(!relativePath) return
+    setFocusOwnerSafe('editor')
+    activeEditorPathRef.current=relativePath
+    const next=value??''
+    if(relativePath===selected) setCode(next)
+    editorFileContentsRef.current={
+      ...editorFileContentsRef.current,
+      [relativePath]:next
+    }
+    setEditorFileContents(prev=>({...prev,[relativePath]:next}))
+    setEditorFileDirty(prev=>({...prev,[relativePath]:true}))
+    setFileSaveStatus('')
+  }
+
   const toggleEditorFilePin=(relativePath)=>{
     if(!relativePath) return
 
@@ -8499,6 +9168,10 @@ function IDE() {
     )
 
     setOpenEditorFiles(nextFiles)
+    setEditorSplit(prev=>prev&&closeSet.has(prev.path)?null:prev)
+    if(closeSet.has(activeEditorPathRef.current)){
+      activeEditorPathRef.current=closeSet.has(selected)?'':selected
+    }
 
     setEditorFileContents(prev=>{
       const next={...prev}
@@ -8669,6 +9342,7 @@ function IDE() {
 
     const requestedPath=relativePath
     if(!requestedPath) return
+    activeEditorPathRef.current=requestedPath
 
     const workspaceRoot=resolveWorkspaceRoot(rootOverride||fileTreeRootRef.current||'')
     const cachedRoot=String(editorFileRootRef.current?.[requestedPath]||'').trim()
@@ -9235,6 +9909,124 @@ function IDE() {
     })
   }
 
+
+  const terminalWorkflowJobStatuses=new Set(['SUCCESS','FAILED','CANCELLED'])
+  const terminalAgentWorkflowStatuses=new Set([
+    'COMPLETED','SUCCESS','FAILED','ERROR','INCOMPLETE','CODE_PLAN_INCOMPLETE',
+    'REPAIR_PLAN_INCOMPLETE','TEST_REPAIR_PLAN_FAILED','TEST_REPAIR_PLAN_INCOMPLETE',
+    'BUILD_FAILED','TEST_FAILED','PACKAGE_FAILED','LAUNCHER_GENERATION_FAILED',
+    'FILE_APPLY_FAILED','FAILED_NO_ARTIFACTS','REQUIREMENT_COVERAGE_FAILED',
+    'BUILD_ARTIFACT_STALLED','DEBUG_STOPPED','VALIDATION_BLOCKED','ABORTED','CANCELLED','STOPPED'
+  ])
+
+  const detectExplicitFrontendRequirement=(text='')=>{
+    const raw=String(text||'').trim()
+    const value=raw.toLowerCase().replace(/\s+/g,' ')
+    if(!value) return null
+
+    const hasAny=(items=[])=>items.some(item=>value.includes(String(item).toLowerCase()))
+    const headless=hasAny(['headless','ui 없음','화면 없음','프론트 없음','frontend 없음','api only'])
+    if(headless){
+      return {label:'UI 없음 / Headless Agent',framework:'Headless',language:'',headless:true,source:raw}
+    }
+
+    const typescript=hasAny(['typescript','type script','타입스크립트','tsx'])
+    const javascript=hasAny(['javascript','자바스크립트','jsx'])
+    let framework=''
+    if(hasAny(['react native','리액트 네이티브','리엑트 네이티브'])) framework='React Native'
+    else if(hasAny(['next.js','nextjs','next js'])) framework='Next.js'
+    else if(hasAny(['react','리액트','리엑트'])) framework='React'
+    else if(hasAny(['vue','뷰.js','뷰js','뷰 '])) framework='Vue'
+    else if(hasAny(['nuxt'])) framework='Nuxt'
+    else if(hasAny(['angular','앵귤러'])) framework='Angular'
+    else if(hasAny(['svelte','스벨트'])) framework='Svelte'
+    else if(hasAny(['astro'])) framework='Astro'
+    else if(hasAny(['solidjs','solid.js','solid js'])) framework='SolidJS'
+    else if(hasAny(['preact'])) framework='Preact'
+    else if(hasAny(['streamlit','스트림릿'])) framework='Streamlit'
+    else if(hasAny(['gradio','그라디오'])) framework='Gradio'
+    else if(hasAny(['blazor','블레이저'])) framework='Blazor'
+    else if(hasAny(['flutter','플러터'])) framework='Flutter'
+
+    const frontendIntent=hasAny([
+      '프론트','frontend','화면','웹 ui','웹ui','ui를','ui ','react','리액트','리엑트','vue','next','angular','svelte',
+      'streamlit','gradio','blazor','flutter','tsx','jsx','typescript','타입스크립트'
+    ])
+    if(!framework||!frontendIntent) return null
+
+    let language=''
+    if(typescript) language='TypeScript'
+    else if(javascript) language='JavaScript'
+    else if(['Angular'].includes(framework)) language='TypeScript'
+    else if(['Streamlit','Gradio'].includes(framework)) language='Python'
+    else if(framework==='Blazor') language='C#'
+    else if(framework==='Flutter') language='Dart'
+
+    return {
+      label:language?`${framework} + ${language}`:framework,
+      framework,
+      language,
+      headless:false,
+      source:raw
+    }
+  }
+
+  const applyExplicitRequirementSupersession=(message='')=>{
+    const frontend=detectExplicitFrontendRequirement(message)
+    if(!frontend) return null
+
+    const previousLayout=uiLayoutConfig&&typeof uiLayoutConfig==='object'?uiLayoutConfig:null
+    const previousHeadless=Boolean(previousLayout?.enabled===false||previousLayout?.template_id==='headless_agent')
+    const nextHeadless=frontend.headless===true
+    const supersedesHeadless=previousHeadless&&!nextHeadless
+
+    setRequirementManualOverrides(prev=>({...prev,ui:frontend.label}))
+    setConfirmedInterviewRequirements(prev=>({
+      ...(prev||{}),
+      ui:frontend.label,
+      frontend:{
+        framework:frontend.framework,
+        language:frontend.language,
+        headless:nextHeadless,
+        source:'LATEST_USER_OVERRIDE',
+        updated_at:new Date().toISOString()
+      },
+      ui_layout:supersedesHeadless?null:(prev?.ui_layout||null),
+      superseded_requirements:[
+        ...((Array.isArray(prev?.superseded_requirements)?prev.superseded_requirements:[])),
+        ...(supersedesHeadless?[{
+          key:'ui_layout',
+          previous:'UI 없음 / Headless Agent',
+          replacement:frontend.label,
+          reason:'최신 사용자 Frontend 요구사항이 기존 Headless UI와 충돌하여 대체되었습니다.',
+          at:new Date().toISOString()
+        }]:[])
+      ].slice(-20)
+    }))
+
+    if(supersedesHeadless){
+      setUiLayoutConfig(null)
+    }
+
+    // 이미 설계/생성 단계까지 갔더라도 최신 요구사항을 버리지 않습니다.
+    // 기존 설계는 previousTargetWorkflowPreview에 남기고 현재 설계만 stale 처리하여
+    // 다음 Workflow Preview에서 Incremental Designer가 영향 영역만 재설계합니다.
+    if(targetWorkflowPreview){
+      setPreviousTargetWorkflowPreview(targetWorkflowPreview)
+      setTargetWorkflowPreview(null)
+      setTargetWorkflowQuality(null)
+    }
+    if(agentBuildStage!=='REQUIREMENTS'){
+      setAgentBuildStage('REQUIREMENTS')
+    }
+    setAgentBuildMessage(
+      supersedesHeadless
+        ? `${frontend.label} 요구사항으로 변경했습니다. 기존 Headless UI는 대체되었으며 영향받는 Workflow/UI만 다시 설계합니다.`
+        : `${frontend.label} Frontend 요구사항을 최신 요구사항으로 반영했습니다. 영향받는 설계만 다시 검증합니다.`
+    )
+    setDevelopmentFinalStatus(null)
+    return frontend
+  }
 
   const getBuilderConversationSummary=()=>{
     const statuses=getRequirementKeywordStatus()
@@ -10039,6 +10831,14 @@ function IDE() {
       .map(item=>String(item?.content||'').trim())
       .filter(Boolean)
 
+    const latestFrontendRequirement=[...userMessages]
+      .reverse()
+      .map(text=>detectExplicitFrontendRequirement(text))
+      .find(Boolean)||null
+    const currentLayout=(uiLayoutConfig&&typeof uiLayoutConfig==='object')?uiLayoutConfig:null
+    const currentLayoutIsHeadless=Boolean(currentLayout?.enabled===false||currentLayout?.template_id==='headless_agent')
+    const latestFrontendSupersedesHeadless=Boolean(latestFrontendRequirement&&!latestFrontendRequirement.headless&&currentLayoutIsHeadless)
+
     const manualRequirementLines=Object.entries(requirementManualOverrides||{})
       .map(([id,value])=>{
         const def=requirementKeywordDefinitions.find(item=>item.id===id)
@@ -10072,12 +10872,32 @@ function IDE() {
           .reverse()
           .find(text=>text.includes('요구사항 분석 완료'))||'',
 
-      ui:has('streamlit')
-        ? 'Streamlit'
-        : has('react')
-          ? (has('vite')?'React + Vite':'React 기반 웹 GUI')
-          : '',
-      ui_layout:uiLayoutConfig?.template_id?{...uiLayoutConfig}:null,
+      ui:latestFrontendRequirement?.label
+        ||String(requirementManualOverrides?.ui||'').trim()
+        ||(has('streamlit')
+          ? 'Streamlit'
+          : has('react')
+            ? (has('typescript','타입스크립트','tsx')?'React + TypeScript':(has('vite')?'React + Vite':'React 기반 웹 GUI'))
+            : ''),
+      frontend:latestFrontendRequirement
+        ? {
+            framework:latestFrontendRequirement.framework,
+            language:latestFrontendRequirement.language,
+            headless:latestFrontendRequirement.headless===true,
+            source:'LATEST_USER_OVERRIDE'
+          }
+        : (confirmedInterviewRequirements?.frontend||null),
+      ui_layout:latestFrontendSupersedesHeadless
+        ? null
+        : (uiLayoutConfig?.template_id?{...uiLayoutConfig}:null),
+      superseded_requirements:latestFrontendSupersedesHeadless
+        ? [{
+            key:'ui_layout',
+            previous:'UI 없음 / Headless Agent',
+            replacement:latestFrontendRequirement?.label||'',
+            reason:'최신 사용자 Frontend 요구사항 우선',
+          }]
+        : (confirmedInterviewRequirements?.superseded_requirements||[]),
 
       backend:has('fastapi')
         ? (has('uvicorn')?'FastAPI + Uvicorn':'FastAPI')
@@ -10820,6 +11640,15 @@ function IDE() {
         }
       }
 
+      // v5.393: poll loop가 terminal Job 상태를 확인한 시점에 즉시 실행 lifecycle을
+      // 종료합니다. 이후 Workflow 결과 정리/진단 UI가 오래 걸려도 실행 정지 버튼은
+      // 실제 Backend Job과 동일하게 비활성화됩니다.
+      if(['SUCCESS','FAILED','CANCELLED'].includes(String(jobState?.status||'').toUpperCase())){
+        activeWorkflowJobIdRef.current=''
+        setActiveWorkflowJobId('')
+        setAgentBuildBusy(false)
+      }
+
       if(jobState?.status==='FAILED'){
         const jobError=new Error(
           jobState?.message||jobState?.result?.message||'Agent Factory Background Job 실행 실패'
@@ -11174,7 +12003,7 @@ function IDE() {
     }
   }
 
-  const previewTargetWorkflow=async(requestText)=>{
+  const previewTargetWorkflow=async(requestText,options={})=>{
     const request=(
       requestText
       || workflowReq
@@ -11194,6 +12023,8 @@ function IDE() {
 
     setTargetWorkflowLoading(true)
     setTargetWorkflowError('')
+    setWorkflowProviderDiagnostic(null)
+    if(!options?.preserveRecovery) setWorkflowRecoveryInfo(null)
     setWorkflowProgress({
       active:true,
       percent:5,
@@ -11244,7 +12075,8 @@ function IDE() {
           confirmed_requirements:buildConfirmedRequirementsFromChat(),
           attachment_ids:interviewAttachments.map(item=>item.attachment_id),
           attachment_memory:interviewAttachmentMemory,
-          previous_design:targetWorkflowPreview||previousTargetWorkflowPreview||{}
+          previous_design:targetWorkflowPreview||previousTargetWorkflowPreview||{},
+          safe_mode:Boolean(options?.safeMode)
         })
       })
 
@@ -11262,6 +12094,13 @@ function IDE() {
 
       if(result?.ok===false){
         throw new Error(result.message||'Workflow 분석 실패')
+      }
+
+      const recovery=result?.recovery||null
+      if(recovery?.used){
+        setWorkflowRecoveryInfo(recovery)
+      }else{
+        setWorkflowRecoveryInfo(null)
       }
 
       const nextAttachmentMemory=String(result?.attachment_memory||interviewAttachmentMemory||'')
@@ -11308,8 +12147,11 @@ function IDE() {
       setAgentBuildStage('WORKFLOW_READY')
       const revision=result?.design_runtime?.incremental_revision||{}
       const revisionMode=String(revision?.mode||'')
+      const safeRecovery=Boolean(result?.recovery?.used)
       setAgentBuildMessage(
-        revisionMode==='FULL_REUSE'
+        safeRecovery
+          ? 'AI Provider 오류로 안전 설계가 적용되었습니다. 검증된 Workflow/DB Module Registry로 계속 진행하거나 AI 설계를 다시 시도할 수 있습니다.'
+          : revisionMode==='FULL_REUSE'
           ? '변경된 요구사항이 없어 기존 Workflow/Architecture/DB 설계를 그대로 재사용했습니다. (설계 LLM 호출 0회)'
           : revisionMode==='PARTIAL_REVISE'
             ? `변경된 부분만 증분 설계했습니다. 영향 영역: ${(revision?.affected_sections||[]).join(', ')||'-'}`
@@ -11344,7 +12186,17 @@ function IDE() {
         progressTimer=null
       }
 
-      setTargetWorkflowError(String(e))
+      const errorText=String(e)
+      setTargetWorkflowError(errorText)
+      setWorkflowRecoveryInfo({
+        used:false,
+        kind:'WORKFLOW_PREVIEW_ERROR',
+        message:'Workflow/DB 자동 설계를 완료하지 못했습니다. 아래 복구 작업 중 하나를 선택할 수 있습니다.',
+        original_error:errorText,
+        can_retry_ai:true,
+        can_continue_safe:true,
+        can_rebuild_database:true
+      })
       setWorkflowProgress(prev=>({
         ...prev,
         active:false,
@@ -11355,6 +12207,72 @@ function IDE() {
       return false
     }finally{
       setTargetWorkflowLoading(false)
+    }
+  }
+
+  const recoverWorkflowWithSafeDesign=async()=>{
+    setWorkflowRecoveryBusy('SAFE')
+    try{
+      await previewTargetWorkflow('',{safeMode:true,preserveRecovery:true})
+    }finally{
+      setWorkflowRecoveryBusy('')
+    }
+  }
+
+  const retryDatabaseDesignPreview=async()=>{
+    const request=buildRequirementRequestFromCollectedInfo().trim()||workflowReq.trim()
+    if(!request){
+      setTargetWorkflowError('DB 초안을 다시 계산할 요구사항이 없습니다. 설계 인터뷰에서 요구사항을 먼저 입력하세요.')
+      return
+    }
+    setWorkflowRecoveryBusy('DB')
+    try{
+      const result=await api('/database-design/preview',{
+        method:'POST',
+        body:JSON.stringify({
+          request,
+          confirmed_requirements:buildConfirmedRequirementsFromChat()
+        })
+      })
+      const plan=result?.database_plan||{}
+      setLiveDatabasePreview({...plan,ddl_preview:String(result?.ddl_preview||'')})
+      setTargetWorkflowPreview(prev=>({
+        ...(prev||{}),
+        ok:true,
+        database_plan:plan,
+        design_runtime:{
+          ...((prev||{}).design_runtime||{}),
+          database_provider:'deterministic_module_registry',
+          database_recovery:'DATABASE_PREVIEW_REBUILT'
+        }
+      }))
+      setTargetWorkflowError('')
+      setWorkflowRecoveryInfo({
+        used:true,
+        kind:'DATABASE_PREVIEW_RECOVERY',
+        message:'AI Provider를 사용하지 않고 현재 요구사항으로 DB Module Registry 초안을 다시 계산했습니다. 내용을 확인한 뒤 DB 설계를 확정할 수 있습니다.',
+        can_retry_ai:true,
+        can_continue_safe:true,
+        can_rebuild_database:true
+      })
+      setWorkflowView('TARGET')
+      setWorkspaceTab('WORKFLOW')
+    }catch(error){
+      setTargetWorkflowError(String(error))
+    }finally{
+      setWorkflowRecoveryBusy('')
+    }
+  }
+
+  const inspectWorkflowProviderStatus=async()=>{
+    setWorkflowRecoveryBusy('PROVIDER')
+    try{
+      const result=await api('/llm/runtime-status')
+      setWorkflowProviderDiagnostic(result||{})
+    }catch(error){
+      setWorkflowProviderDiagnostic({ok:false,error:String(error)})
+    }finally{
+      setWorkflowRecoveryBusy('')
     }
   }
 
@@ -11392,6 +12310,11 @@ function IDE() {
       item?.role==='assistant'
       && String(item?.content||'').includes('요구사항 분석 완료')
     )
+
+    // v5.393: 인터뷰 완료/개발 실패 이후에도 최신 사용자 요구사항 변경을 즉시
+    // 구조화 상태에 반영합니다. 특히 Headless -> React + TypeScript 같은 충돌은
+    // 이전 확정값을 계속 노출하지 않고 최신 요구사항으로 supersede합니다.
+    applyExplicitRequirementSupersession(message)
 
     if(requirementsDone && isBuildContinueCommand(message)){
       setInput('')
@@ -11845,29 +12768,6 @@ function IDE() {
       <div className="builder-chat-head">
         <div><span className="ai-avatar">AI</span><div><strong>Agent 설계 인터뷰</strong><small>{aiInterviewLabel}</small></div></div>
         <div className="builder-head-actions">
-          <button type="button" className="builder-layout-button" onClick={()=>setUiLayoutGalleryOpen(true)}>▦ UI Layout</button>
-          <button
-            type="button"
-            className="builder-workflow-button"
-            onClick={()=>{
-              const request=
-                workflowReq
-                || buildRequirementRequestFromCollectedInfo()
-                || chat.find(x=>x.role==='user')?.content
-                || ''
-
-              if(request){
-                saveRequirementDraft()
-                setRoot(newAgentProjectRoot||root)
-                setScreen('WORKSPACE')
-                previewTargetWorkflow(request)
-              }else{
-                setTargetWorkflowError('먼저 만들 Agent의 요구사항을 입력하세요.')
-              }
-            }}
-          >
-            ◇ Workflow 보기
-          </button>
           <span className="live-dot">● 대화형 수집</span>
         </div>
       </div>
@@ -12531,7 +13431,7 @@ function IDE() {
   }
 
 
-  const executeNotebookPythonCode=async({pythonCode,filePath,projectRoot='',cellIndex=0,mode='selection',selectionOnly=false}={})=>{
+  const executeNotebookPythonCode=async({pythonCode,filePath,projectRoot='',cellIndex=0,mode='selection',selectionOnly=false,onOutputEvent}={})=>{
     const normalizedPath=normalizeProjectRelativePath(filePath||selectedEditorFileRef.current||selected||'')
     const workspaceRoot=resolveWorkspaceRoot(
       projectRoot
@@ -12628,8 +13528,10 @@ function IDE() {
         }
       }
 
-      const result=await api('/python/execute',{
+      let result=null
+      const streamResponse=await fetch(`${runtimeInfo().apiBase}/python/execute/stream`,{
         method:'POST',
+        headers:{'Content-Type':'application/json'},
         body:JSON.stringify({
           root:workspaceRoot,
           relative_path:normalizedPath,
@@ -12641,6 +13543,58 @@ function IDE() {
           cell_index:Number(cellIndex),
         })
       })
+      if(!streamResponse.ok){
+        const detail=await streamResponse.text()
+        throw new Error(`Notebook 스트리밍 실행 실패 (${streamResponse.status}): ${detail||streamResponse.statusText}`)
+      }
+      if(!streamResponse.body){
+        result=await api('/python/execute',{
+          method:'POST',
+          body:JSON.stringify({
+            root:workspaceRoot,
+            relative_path:normalizedPath,
+            code:executableCode,
+            mode:mode==='full'?'full':'selection',
+            session_id:runtimeSessionId,
+            capture_last_expression:true,
+            notebook_mode:true,
+            cell_index:Number(cellIndex),
+          })
+        })
+      }else{
+        const reader=streamResponse.body.getReader()
+        const decoder=new TextDecoder('utf-8')
+        let buffer=''
+        const consumePacket=(packet)=>{
+          if(!packet||typeof packet!=='object') return
+          if(packet.type==='event'){
+            try{ onOutputEvent?.(packet.event||{}) }catch{}
+          }else if(packet.type==='result'){
+            result=packet.result||null
+          }
+        }
+        while(true){
+          const {value,done}=await reader.read()
+          buffer+=decoder.decode(value||new Uint8Array(),{stream:!done})
+          let newlineIndex=buffer.indexOf('\n')
+          while(newlineIndex>=0){
+            const line=buffer.slice(0,newlineIndex).trim()
+            buffer=buffer.slice(newlineIndex+1)
+            if(line){
+              try{ consumePacket(JSON.parse(line)) }catch{}
+            }
+            newlineIndex=buffer.indexOf('\n')
+          }
+          if(done) break
+        }
+        const tail=buffer.trim()
+        if(tail){
+          try{ consumePacket(JSON.parse(tail)) }catch{}
+        }
+      }
+      if(!result){
+        result={ok:false,stdout:'',stderr:'',error_type:'NotebookStreamingError',error_message:'Notebook 스트리밍 실행의 최종 결과를 받지 못했습니다.',traceback:''}
+      }
 
       const stdout=String(result?.stdout||'')
       const stderr=String(result?.stderr||'')
@@ -12690,6 +13644,129 @@ function IDE() {
     }finally{
       setPythonExecutionState(prev=>(prev.runtimeSessionId===runtimeSessionId||prev.sessionId===runtimeSessionId)?{busy:false,root:'',sessionId:'',runtimeSessionId:'',terminalSessionId:'',label:'',kind:''}:prev)
       pythonStopRequestedRef.current=false
+    }
+  }
+
+
+  const resolveSourceDebugRoot=(filePath='')=>{
+    const normalizedPath=normalizeProjectRelativePath(filePath||selectedEditorFileRef.current||selected||'')
+    return resolveWorkspaceRoot(editorFileRootRef.current?.[normalizedPath]||editorFileRootRef.current?.[selectedEditorFileRef.current]||fileTreeRootRef.current||'')
+  }
+
+  const writeSourceDebugOutput=async(result,label='소스 디버그')=>{
+    let targetId=activeTerminalId
+    let target=terminalSessions.find(t=>t.id===targetId)
+    if(!target||target.processState==='exited'){
+      targetId=await addTerminal()
+      if(!targetId) return
+    }
+    await waitForTerminalContainer(targetId)
+    const term=await ensureXtermInstance(targetId)
+    if(!term) return
+    term.write(`\r\n\x1b[36m[${label}]\x1b[0m\r\n`)
+    const stdout=String(result?.stdout||'')
+    const stderr=String(result?.stderr||'')
+    if(stdout) term.write(stdout.replace(/\r\n|\r|\n/g,'\r\n'))
+    if(stderr) term.write('\x1b[33m'+stderr.replace(/\r\n|\r|\n/g,'\r\n')+'\x1b[0m')
+    if(!stdout&&!stderr) term.write('\x1b[90m(출력 없음)\x1b[0m\r\n')
+    term.write(`\r\n\x1b[90mAdapter: ${String(result?.adapter||'Source Runner')} · Step Debug: ${result?.step_debug?'지원':'실행 모드'}\x1b[0m\r\n`)
+    term.scrollToBottom()
+    setActiveTerminalId(targetId)
+  }
+
+  const handleSourceDebugResponse=(result,filePath='')=>{
+    const next=result&&typeof result==='object'?{...result,relative_path:normalizeProjectRelativePath(filePath||selectedEditorFileRef.current||selected||'')}:null;if(!next)return
+    setSourceDebugState(next)
+    if(next.debug_active&&Number(next.line)>0){const editor=editorInstanceRef.current;editor?.revealLineInCenter?.(Number(next.line));editor?.setPosition?.({lineNumber:Number(next.line),column:1});window.requestAnimationFrame(()=>applyEditorDebugDecorations(editor,next.relative_path))}
+  }
+
+  const startSourceFileDebug=async()=>{
+    const filePath=normalizeProjectRelativePath(selectedEditorFileRef.current||selected||'');if(!isSourceDebugFile(filePath)||sourceDebugBusy)return
+    const workspaceRoot=resolveSourceDebugRoot(filePath);if(!workspaceRoot){setProjectSwitcherOpen(true);window.alert('소스 디버깅을 시작할 프로젝트 경로를 확인하지 못했습니다.');return}
+    const sourceCode=String(editorInstanceRef.current?.getValue?.()??code??'');if(!sourceCode.trim())return
+    const breakpoints=getEditorBreakpointsForPath(filePath);setSourceDebugBusy(true);setSourceDebugConsole([])
+    try{
+      if(sourceDebugSupportsStep(filePath)){
+        const sessionId=`source::${filePath.toLocaleLowerCase()}`
+        const result=await api('/python/debug/start',{method:'POST',body:JSON.stringify({root:workspaceRoot,relative_path:filePath,code:sourceCode,session_id:sessionId,cell_index:0,breakpoints})})
+        handleSourceDebugResponse(result,filePath)
+      }else{
+        setSourceDebugState({debug_active:false,event:'running',relative_path:filePath,adapter:'Source Runner',step_debug:false})
+        const result=await api('/source/debug/run',{method:'POST',body:JSON.stringify({root:workspaceRoot,relative_path:filePath,code:sourceCode})})
+        await writeSourceDebugOutput(result,`소스 실행 · ${filePath}`);setSourceDebugState({...result,event:'finished',debug_active:false,relative_path:filePath})
+      }
+    }catch(e){setSourceDebugState({ok:false,event:'error',debug_active:false,error_message:String(e),relative_path:filePath});window.alert(`소스 디버그/실행 시작 실패: ${e}`)}finally{setSourceDebugBusy(false)}
+  }
+
+  const commandSourceFileDebug=async(command,expression='')=>{
+    const filePath=normalizeProjectRelativePath(sourceDebugState?.relative_path||selectedEditorFileRef.current||selected||'')
+    if(!sourceDebugSupportsStep(filePath)||!sourceDebugState?.debug_active||sourceDebugBusy)return
+    const workspaceRoot=resolveSourceDebugRoot(filePath);if(!workspaceRoot)return
+    const sessionId=`source::${filePath.toLocaleLowerCase()}`;setSourceDebugBusy(true)
+    try{
+      const result=await api('/python/debug/command',{method:'POST',body:JSON.stringify({root:workspaceRoot,session_id:sessionId,command,expression})})
+      if(command==='evaluate'){const text=String(result?.evaluate_error||(result?.evaluate_result??''));setSourceDebugConsole(prev=>[...prev,{expression,result:text,error:!!result?.evaluate_error}].slice(-50));setSourceDebugExpression('')}
+      handleSourceDebugResponse(result,filePath)
+    }catch(e){setSourceDebugState(prev=>({...prev,debug_active:false,event:'error',error_message:String(e)}));window.alert(`소스 디버그 명령 실패: ${e}`)}finally{setSourceDebugBusy(false)}
+  }
+
+  const startNotebookCellDebug=async({pythonCode,filePath,projectRoot='',cellIndex=0,breakpoints=[]}={})=>{
+    const normalizedPath=normalizeProjectRelativePath(filePath||selectedEditorFileRef.current||selected||'')
+    const workspaceRoot=resolveWorkspaceRoot(
+      projectRoot
+      ||editorFileRootRef.current?.[normalizedPath]
+      ||editorFileRootRef.current?.[selectedEditorFileRef.current]
+      ||fileTreeRootRef.current
+      ||''
+    )
+    if(!workspaceRoot){
+      setProjectSwitcherOpen(true)
+      window.alert('Notebook 디버깅을 시작할 프로젝트 경로를 확인하지 못했습니다.')
+      return null
+    }
+    const runtimeSessionId=`notebook::${normalizedPath.toLocaleLowerCase()}`
+    try{
+      return await api('/python/debug/start',{
+        method:'POST',
+        body:JSON.stringify({
+          root:workspaceRoot,
+          relative_path:normalizedPath,
+          code:String(pythonCode||''),
+          session_id:runtimeSessionId,
+          cell_index:Number(cellIndex)||0,
+          breakpoints:Array.isArray(breakpoints)?breakpoints:[],
+        })
+      })
+    }catch(e){
+      window.alert(`Notebook 셀 디버그 시작 실패: ${e}`)
+      return {ok:false,event:'error',debug_active:false,error_type:'NotebookDebugStartError',error_message:String(e),traceback:String(e)}
+    }
+  }
+
+  const commandNotebookCellDebug=async({command,expression='',filePath,projectRoot=''}={})=>{
+    const normalizedPath=normalizeProjectRelativePath(filePath||selectedEditorFileRef.current||selected||'')
+    const workspaceRoot=resolveWorkspaceRoot(
+      projectRoot
+      ||editorFileRootRef.current?.[normalizedPath]
+      ||editorFileRootRef.current?.[selectedEditorFileRef.current]
+      ||fileTreeRootRef.current
+      ||''
+    )
+    if(!workspaceRoot) return null
+    const runtimeSessionId=`notebook::${normalizedPath.toLocaleLowerCase()}`
+    try{
+      return await api('/python/debug/command',{
+        method:'POST',
+        body:JSON.stringify({
+          root:workspaceRoot,
+          session_id:runtimeSessionId,
+          command:String(command||''),
+          expression:String(expression||''),
+        })
+      })
+    }catch(e){
+      window.alert(`Notebook 디버그 명령 실패: ${e}`)
+      return {ok:false,event:'error',debug_active:false,error_type:'NotebookDebugCommandError',error_message:String(e),traceback:String(e)}
     }
   }
 
@@ -12760,6 +13837,16 @@ function IDE() {
 
       const path=normalizeProjectRelativePath(selectedEditorFileRef.current||selected||'').toLowerCase()
 
+      if(sourceDebugState?.debug_active&&sourceDebugSupportsStep(path)){
+        let command=''
+        if(event.key==='F5'&&!event.shiftKey)command='continue'
+        else if(event.key==='F10')command='step_over'
+        else if(event.key==='F11'&&event.shiftKey)command='step_out'
+        else if(event.key==='F11')command='step_into'
+        else if(event.key==='F5'&&event.shiftKey)command='stop'
+        if(command){event.preventDefault();event.stopPropagation();commandSourceFileDebug(command);return}
+      }
+
       if(event.key==='F5' && (path.endsWith('.ps1')||path.endsWith('.py')||path.endsWith('.cmd')||path.endsWith('.sql')||path.endsWith('.ipynb'))){
         event.preventDefault()
         event.stopPropagation()
@@ -12794,7 +13881,7 @@ function IDE() {
 
     window.addEventListener('keydown',onEditorRunShortcut,true)
     return()=>window.removeEventListener('keydown',onEditorRunShortcut,true)
-  },[workspaceTab,selected,code,activeWorkspaceRoot,sqlQueryBusy,sqlConnectionStatus?.connected])
+  },[workspaceTab,selected,code,activeWorkspaceRoot,sqlQueryBusy,sqlConnectionStatus?.connected,sourceDebugState?.debug_active,sourceDebugBusy])
 
   const removeTerminal=(id)=>{
     if(terminalSessions.length===1) return
@@ -13094,8 +14181,9 @@ function IDE() {
         )
       }
 
+      const proposalExplanation=result?.proposal_explanation||null
       const explanation =
-        (result.message || '코드 수정 제안을 만들었습니다.')
+        (proposalExplanation?.summary || result.message || '코드 수정 제안을 만들었습니다.')
         +(Array.isArray(result?.attachment_warnings)&&result.attachment_warnings.length
           ? `\n[참고 파일 알림] ${result.attachment_warnings.join(' / ')}`
           : '')
@@ -13112,6 +14200,7 @@ function IDE() {
         contextBudget:result.context_budget||null,
         baseCode:currentCode,
         explanation,
+        proposalExplanation,
         instruction:prompt,
         createdAt:new Date().toISOString()
       })
@@ -13126,7 +14215,10 @@ function IDE() {
           role:'assistant',
           content:
             explanation
-            +' 우측 `AI 변경 제안` 탭에서 코드를 확인한 뒤 Apply를 눌러 현재 소스와 비교할 수 있습니다.'
+            +(proposalExplanation
+              ? `\n값/표현 선택 이유 ${Number(proposalExplanation.value_reasons?.length||0)}건, 코드 설명 ${Number(proposalExplanation.code_walkthrough?.length||0)}건을 함께 정리했습니다.`
+              : '')
+            +' 우측 `AI 변경 제안` 탭에서 설명과 코드를 확인한 뒤 Apply를 눌러 현재 소스와 비교할 수 있습니다.'
         }
       ])
 
@@ -15188,6 +16280,98 @@ function IDE() {
     }
   }
 
+  const renderSecondaryEditorContent=(relativePath)=>{
+    if(!relativePath) return <div className="editor-split-empty">분할 화면에서 볼 파일을 선택하세요.</div>
+    const paneCode=editorFileContents[relativePath]??''
+    const paneRoot=resolveWorkspaceRoot(editorFileRootRef.current?.[relativePath]||fileTreeRootRef.current||'')
+    const markActive=()=>{
+      activeEditorPathRef.current=relativePath
+      setFocusOwnerSafe('editor')
+    }
+
+    if(fileLoading&&fileLoadingPath===relativePath){
+      return <div className="editor-load-error-shell"><div className="editor-load-error-card"><span className="editor-load-error-icon">…</span><div><strong>파일을 불러오는 중입니다.</strong><code>{relativePath}</code></div></div></div>
+    }
+    if(editorLoadErrors[relativePath]){
+      return <div className="editor-load-error-shell"><div className="editor-load-error-card"><span className="editor-load-error-icon">!</span><div><strong>파일을 불러오지 못했습니다.</strong><p>{editorLoadErrors[relativePath]?.message||'파일 읽기 오류가 발생했습니다.'}</p><code>{relativePath}</code></div></div></div>
+    }
+    if(isCsvSpreadsheetFile(relativePath)){
+      return <CsvSpreadsheetViewer value={paneCode} filePath={relativePath} onChange={next=>updateEditorCodeForPath(relativePath,next)} />
+    }
+    if(isDatabaseDiagramFile(relativePath)){
+      return <DatabaseDiagramViewer value={paneCode} filePath={relativePath} />
+    }
+    if(isPdfFile(relativePath)){
+      return <PdfViewer
+        filePath={relativePath}
+        projectRoot={paneRoot}
+        revision={pdfPreviewRevision[normalizeProjectRelativePath(relativePath)]||0}
+        page={pdfSearchNavigation[normalizeProjectRelativePath(relativePath)]?.page||0}
+        searchQuery={pdfSearchNavigation[normalizeProjectRelativePath(relativePath)]?.query||''}
+        navigationToken={pdfSearchNavigation[normalizeProjectRelativePath(relativePath)]?.nonce||0}
+        matchSnippet={pdfSearchNavigation[normalizeProjectRelativePath(relativePath)]?.snippet||''}
+      />
+    }
+    if(isPresentationFile(relativePath)){
+      return <PresentationViewer filePath={relativePath} projectRoot={paneRoot} revision={presentationPreviewRevision[normalizeProjectRelativePath(relativePath)]||0} />
+    }
+    if(isNotebookFile(relativePath)){
+      return <NotebookEditor
+        value={paneCode}
+        filePath={relativePath}
+        projectRoot={paneRoot}
+        onChange={v=>updateEditorCodeForPath(relativePath,v)}
+        onExecutePython={executeNotebookPythonCode}
+        onStopPython={stopPythonExecution}
+        onDebugPython={startNotebookCellDebug}
+        onDebugCommand={commandNotebookCellDebug}
+        controllerRef={secondaryNotebookEditorControllerRef}
+        onEditorFocus={markActive}
+      />
+    }
+    return <Editor
+      className="main-monaco-editor split-monaco-editor"
+      height="100%"
+      path={getEditorModelPath(editorFileRootRef.current?.[relativePath]||root,relativePath)}
+      language={getEditorLanguage(relativePath)}
+      value={paneCode}
+      onChange={v=>updateEditorCodeForPath(relativePath,v)}
+      beforeMount={(monaco)=>{
+        const ts=monaco.languages.typescript
+        const sharedCompilerOptions={
+          target:ts.ScriptTarget.ES2022 ?? ts.ScriptTarget.Latest,
+          allowNonTsExtensions:true,allowJs:true,checkJs:false,
+          moduleResolution:ts.ModuleResolutionKind.NodeJs ?? ts.ModuleResolutionKind.Node10,
+          module:ts.ModuleKind.ESNext ?? ts.ModuleKind.CommonJS,
+          jsx:ts.JsxEmit.ReactJSX ?? ts.JsxEmit.React,
+          esModuleInterop:true,allowSyntheticDefaultImports:true
+        }
+        ts.typescriptDefaults.setEagerModelSync(true)
+        ts.javascriptDefaults.setEagerModelSync(true)
+        ts.typescriptDefaults.setCompilerOptions(sharedCompilerOptions)
+        ts.javascriptDefaults.setCompilerOptions(sharedCompilerOptions)
+        ts.typescriptDefaults.setDiagnosticsOptions({noSyntaxValidation:false,noSemanticValidation:true,noSuggestionDiagnostics:false})
+        ts.javascriptDefaults.setDiagnosticsOptions({noSyntaxValidation:false,noSemanticValidation:true,noSuggestionDiagnostics:false})
+      }}
+      onMount={(editor,monaco)=>{
+        secondaryEditorInstanceRef.current=editor
+        const model=editor.getModel()
+        const expectedLanguage=getEditorLanguage(relativePath)
+        if(model&&expectedLanguage) monaco.editor.setModelLanguage(model,expectedLanguage)
+        editor.onDidFocusEditorText(markActive)
+      }}
+      theme="vs-dark"
+      options={{
+        minimap:{enabled:false},glyphMargin:true,lineNumbers:'on',lineNumbersMinChars:3,
+        lineDecorationsWidth:14,fontSize:13,automaticLayout:true,tabSize:2,insertSpaces:true,
+        detectIndentation:true,formatOnPaste:true,autoClosingBrackets:'never',autoClosingQuotes:'never',
+        autoClosingDelete:'never',autoClosingOvertype:'never',autoSurround:'never',
+        bracketPairColorization:{enabled:true},guides:{bracketPairs:true},suggestOnTriggerCharacters:true,
+        quickSuggestions:{other:true,comments:false,strings:true}
+      }}
+    />
+  }
+
   const renderWorkspaceScreen=()=>{
     const leftSummary=getBuilderConversationSummary()
     const designBuilderSteps=[
@@ -15528,32 +16712,6 @@ function IDE() {
               </div>
 
               <div className="builder-head-actions">
-                <button type="button" className="builder-layout-button" onClick={()=>setUiLayoutGalleryOpen(true)}>▦ UI Layout</button>
-                <button
-                  type="button"
-                  className="builder-workflow-button"
-                  onClick={()=>{
-                    const request=
-                      workflowReq
-                      ||buildRequirementRequestFromCollectedInfo()
-                      ||chat.find(x=>x.role==='user')?.content
-                      ||''
-
-                    if(request){
-                      saveRequirementDraft()
-                      setRoot(newAgentProjectRoot||root)
-                      setWorkspaceTab('WORKFLOW')
-                      setWorkflowView('TARGET')
-                      previewTargetWorkflow(request)
-                    }else{
-                      setTargetWorkflowError(
-                        '먼저 만들 Agent의 요구사항을 입력하세요.'
-                      )
-                    }
-                  }}
-                >
-                  ◇ Workflow 보기
-                </button>
                 <span className="live-dot">● 대화형 수집</span>
               </div>
             </div>
@@ -15811,7 +16969,38 @@ function IDE() {
               </div>
             </div>}
 
-            {targetWorkflowError&&<div className="workflow-error">{targetWorkflowError}</div>}
+            {(targetWorkflowError||workflowRecoveryInfo?.used)&&<div className={`workflow-recovery-card ${targetWorkflowError?'error':'warning'}`}>
+              <div className="workflow-recovery-head">
+                <div>
+                  <span>{targetWorkflowError?'!':'↻'}</span>
+                  <div>
+                    <strong>{targetWorkflowError?'Workflow / DB 자동 설계를 완료하지 못했습니다.':'안전 설계로 복구되었습니다.'}</strong>
+                    <small>{workflowRecoveryInfo?.message||'AI Provider 호출 또는 설계 검증 중 오류가 발생했습니다.'}</small>
+                  </div>
+                </div>
+                {workflowRecoveryInfo?.kind&&<em>{workflowRecoveryInfo.kind}</em>}
+              </div>
+              {targetWorkflowError&&<pre className="workflow-recovery-error-detail">{targetWorkflowError}</pre>}
+              <div className="workflow-recovery-actions">
+                <button type="button" onClick={()=>previewTargetWorkflow('',{preserveRecovery:true})} disabled={targetWorkflowLoading||Boolean(workflowRecoveryBusy)}>
+                  {targetWorkflowLoading?'재시도 중...':'↻ AI 설계 다시 시도'}
+                </button>
+                <button type="button" className="primary" onClick={()=>recoverWorkflowWithSafeDesign()} disabled={targetWorkflowLoading||Boolean(workflowRecoveryBusy)}>
+                  {workflowRecoveryBusy==='SAFE'?'안전 설계 생성 중...':'✓ 안전 설계로 계속'}
+                </button>
+                <button type="button" onClick={()=>retryDatabaseDesignPreview()} disabled={Boolean(workflowRecoveryBusy)}>
+                  {workflowRecoveryBusy==='DB'?'DB 계산 중...':'▦ DB 초안만 다시 계산'}
+                </button>
+                <button type="button" onClick={()=>inspectWorkflowProviderStatus()} disabled={Boolean(workflowRecoveryBusy)}>
+                  {workflowRecoveryBusy==='PROVIDER'?'확인 중...':'AI Provider 상태 확인'}
+                </button>
+                <button type="button" onClick={()=>setWorkspaceTab('DESIGN')}>설계 인터뷰로 돌아가기</button>
+              </div>
+              {workflowProviderDiagnostic&&<div className="workflow-provider-diagnostic">
+                <strong>AI Provider 진단</strong>
+                <pre>{JSON.stringify(workflowProviderDiagnostic,null,2)}</pre>
+              </div>}
+            </div>}
 
             {targetWorkflowQuality&&<div className={`workflow-quality-bar ${targetWorkflowQuality.warning?'warning':'ok'}`}>
               <div>
@@ -15883,6 +17072,21 @@ function IDE() {
                 </div>}
                 {(targetWorkflowPreview.database_plan.validation?.errors||[]).length>0&&<div className="database-design-error">
                   {(targetWorkflowPreview.database_plan.validation.errors||[]).map((error,index)=><div key={index}>× {error}</div>)}
+                  <div className="database-design-recovery-actions">
+                    <button type="button" onClick={()=>retryDatabaseDesignPreview()} disabled={Boolean(workflowRecoveryBusy)}>▦ DB 초안 다시 계산</button>
+                    <button type="button" onClick={()=>recoverWorkflowWithSafeDesign()} disabled={Boolean(workflowRecoveryBusy)}>✓ 안전 규칙으로 재설계</button>
+                    <button type="button" onClick={()=>inspectWorkflowProviderStatus()} disabled={Boolean(workflowRecoveryBusy)}>AI Provider 확인</button>
+                    <button type="button" onClick={()=>setWorkspaceTab('DESIGN')}>요구사항 수정</button>
+                  </div>
+                </div>}
+
+                {targetWorkflowPreview?.design_runtime?.database_error&&<div className="database-design-provider-warning">
+                  <strong>AI DB 보강은 실패했지만 안전한 DB Module Registry 설계를 사용 중입니다.</strong>
+                  <small>{String(targetWorkflowPreview.design_runtime.database_error)}</small>
+                  <div className="database-design-recovery-actions">
+                    <button type="button" onClick={()=>previewTargetWorkflow('',{preserveRecovery:true})} disabled={targetWorkflowLoading||Boolean(workflowRecoveryBusy)}>AI DB 보강 다시 시도</button>
+                    <button type="button" onClick={()=>retryDatabaseDesignPreview()} disabled={Boolean(workflowRecoveryBusy)}>현재 요구사항으로 DB 재계산</button>
+                  </div>
                 </div>}
 
                 <div className="database-design-policy">{targetWorkflowPreview.database_plan.jsonb_policy}</div>
@@ -15915,10 +17119,8 @@ function IDE() {
             ? 'full-code-pane persistent-code-editor visible'
             : 'full-code-pane persistent-code-editor hidden'
         }>
-          <div className="file-path-bar">{selected||'파일을 선택하세요.'}</div>
-          
           <div className="code-editor-stack">
-<div className="code-file-tabs-shell">
+<div className={`code-file-tabs-shell ${codeToolbarResizing?'resizing':''}`} ref={codeToolbarShellRef}>
             <button
               type="button"
               className={
@@ -15977,6 +17179,7 @@ function IDE() {
                     className={[
                       'code-file-tab',
                       active?'active':'',
+                      editorSplit?.path===path?'split-open':'',
                       pinned?'pinned':''
                     ].filter(Boolean).join(' ')}
                     title={getEditorFileFullPath(path)}
@@ -16060,7 +17263,23 @@ function IDE() {
               ›
             </button>
 
-            <div className="code-file-actions-fixed">
+            <div
+              className={`code-toolbar-horizontal-splitter ${codeToolbarResizing?'active':''}`}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="열린 파일 영역과 실행 도구 영역 너비 조절"
+              title="좌우로 드래그해 열린 파일 / 실행 도구 영역 너비 조절 · 더블클릭: 기본 너비"
+              onPointerDown={beginCodeToolbarSplitResize}
+              onDoubleClick={resetCodeToolbarSplit}
+            >
+              <span aria-hidden="true" />
+            </div>
+
+            <div
+              className="code-file-actions-fixed"
+              style={{width:`${Math.round(codeToolbarActionWidth)}px`,flexBasis:`${Math.round(codeToolbarActionWidth)}px`}}
+            >
+              <span className="code-file-actions-spacer" aria-hidden="true" />
               <button
                 type="button"
                 className="powershell-run-button editor-find-toolbar-button"
@@ -16084,6 +17303,19 @@ function IDE() {
                   <span className="editor-bookmark-count" title="현재 파일에 저장된 줄 북마크 수"><i aria-hidden="true" />{activeTextEditorBookmarks.length}</span>
                   <button type="button" disabled={!activeTextEditorBookmarks.length} title="다음 북마크로 이동" onClick={()=>moveToEditorBookmark(1)}>▶</button>
                   {activeTextEditorBookmarks.length>0&&<button type="button" className="editor-bookmark-clear-button" title="현재 파일의 북마크 모두 해제" onClick={clearEditorBookmarks}>해제</button>}
+                </div>
+              }
+              {isSourceDebugFile(selected)&&!editorLoadErrors[selected]&&
+                <div className="source-debug-actions" aria-label="소스 파일 디버그 도구">
+                  <button type="button" className={`powershell-run-button source-debug-start ${sourceDebugBusy?'busy':''}`} disabled={sourceDebugBusy||!!sourceDebugState?.debug_active} title={sourceDebugSupportsStep(selected)?'현재 소스 파일을 중단점과 함께 디버그합니다.':'실행 Adapter로 현재 편집 버퍼를 실행합니다.'} onClick={()=>startSourceFileDebug()}>
+                    {sourceDebugBusy?'🐞 시작 중…':(sourceDebugSupportsStep(selected)?'🐞 디버그':'🐞 디버그/실행')}
+                  </button>
+                  <span className="source-debug-breakpoint-count" title="왼쪽 빨간 glyph 여백을 클릭해 중단점 추가/해제">● {activeSourceBreakpoints.length}</span>
+                  <button type="button" disabled={sourceDebugBusy||!sourceDebugState?.debug_active} title="계속 F5" onClick={()=>commandSourceFileDebug('continue')}>▶</button>
+                  <button type="button" disabled={sourceDebugBusy||!sourceDebugState?.debug_active} title="다음 줄 F10" onClick={()=>commandSourceFileDebug('step_over')}>↷</button>
+                  <button type="button" disabled={sourceDebugBusy||!sourceDebugState?.debug_active} title="함수 안 F11" onClick={()=>commandSourceFileDebug('step_into')}>↓</button>
+                  <button type="button" disabled={sourceDebugBusy||!sourceDebugState?.debug_active} title="함수 밖 Shift+F11" onClick={()=>commandSourceFileDebug('step_out')}>↑</button>
+                  <button type="button" className="danger" disabled={sourceDebugBusy||!sourceDebugState?.debug_active} title="종료 Shift+F5" onClick={()=>commandSourceFileDebug('stop')}>■</button>
                 </div>
               }
               {selected?.toLowerCase?.().endsWith('.ps1')&&
@@ -16284,6 +17516,28 @@ function IDE() {
             >
               <button
                 type="button"
+                className="editor-tab-split-action"
+                onClick={()=>openEditorInSplit(editorTabMenu.path,'RIGHT')}
+              >
+                오른쪽으로 화면 열기
+              </button>
+              <button
+                type="button"
+                className="editor-tab-split-action"
+                onClick={()=>openEditorInSplit(editorTabMenu.path,'LEFT')}
+              >
+                왼쪽으로 화면 열기
+              </button>
+              {editorSplit&&<button
+                type="button"
+                className="editor-tab-split-close-action"
+                onClick={closeEditorSplit}
+              >
+                분할 화면 닫기
+              </button>}
+              <div className="editor-tab-context-separator" aria-hidden="true" />
+              <button
+                type="button"
                 onClick={()=>
                   toggleEditorFilePin(
                     editorTabMenu.path
@@ -16313,6 +17567,15 @@ function IDE() {
             </div>
           }
 
+<div
+            className={`code-editor-document-layout ${editorSplit?'split':''} ${editorSplitResizing?'resizing':''} ${editorSplit?.side==='LEFT'?'split-left':'split-right'}`}
+            ref={editorSplitShellRef}
+          >
+            <div
+              className="code-editor-primary-pane"
+              style={editorSplit?{flexBasis:`${editorSplit.side==='LEFT'?100-editorSplitRatio:editorSplitRatio}%`}:undefined}
+              onMouseDown={()=>{activeEditorPathRef.current=selected||''}}
+            >
 {fileLoading&&fileLoadingPath===selected
             ? <div className="editor-load-error-shell">
                 <div className="editor-load-error-card">
@@ -16369,6 +17632,12 @@ function IDE() {
                   }}
                 />
               </div>
+            : isCsvSpreadsheetFile(selected)
+              ? <CsvSpreadsheetViewer
+                  value={code}
+                  filePath={selected}
+                  onChange={next=>updateActiveEditorCode(next)}
+                />
             : isDatabaseDiagramFile(selected)
               ? <DatabaseDiagramViewer
                   value={code}
@@ -16398,10 +17667,26 @@ function IDE() {
                   onChange={v=>updateActiveEditorCode(v)}
                   onExecutePython={executeNotebookPythonCode}
                   onStopPython={stopPythonExecution}
+                  onDebugPython={startNotebookCellDebug}
+                  onDebugCommand={commandNotebookCellDebug}
                   controllerRef={notebookEditorControllerRef}
-                  onEditorFocus={()=>setFocusOwnerSafe('editor')}
+                  onEditorFocus={()=>{activeEditorPathRef.current=selected||'';setFocusOwnerSafe('editor')}}
                 />
-              : <Editor
+              : <>
+                {isSourceDebugFile(selected)&&sourceDebugState&&<div className="source-debug-dock">
+                  <div className="source-debug-dock-head">
+                    <strong>{sourceDebugState?.debug_active?'디버그 일시정지':sourceDebugState?.event==='finished'?'소스 실행 완료':'소스 디버그'}</strong>
+                    <span>{sourceDebugState?.adapter||(sourceDebugSupportsStep(selected)?'Python bdb':'Source Runner')}</span>
+                    {sourceDebugState?.debug_active&&<span>Line {Number(sourceDebugState?.line||1)}</span>}
+                    {!sourceDebugSupportsStep(selected)&&<em>Run Adapter · 단계 디버그는 언어별 Debug Adapter 연결 시 활성화</em>}
+                  </div>
+                  {sourceDebugState?.debug_active&&<div className="source-debug-dock-body">
+                    <section><header>변수 <span>{(sourceDebugState?.variables||[]).length}</span></header><div className="source-debug-variable-list">{(sourceDebugState?.variables||[]).map((item,index)=><div key={`${item?.name}-${index}`}><b>{item?.name}</b><i>{item?.type}</i><code>{item?.value}</code></div>)}{!(sourceDebugState?.variables||[]).length&&<small>표시할 변수가 없습니다.</small>}</div></section>
+                    <section><header>호출 스택 <span>{(sourceDebugState?.stack||[]).length}</span></header><div className="source-debug-stack-list">{(sourceDebugState?.stack||[]).map((item,index)=><div key={`${item?.file}-${item?.line}-${index}`}><b>{item?.function||'<module>'}</b><span>Line {item?.line}</span></div>)}</div></section>
+                    <section className="source-debug-console-box"><header>디버그 콘솔</header><div className="source-debug-console-history">{sourceDebugConsole.map((item,index)=><div className={item.error?'error':''} key={`${item.expression}-${index}`}><span>› {item.expression}</span><code>{item.result}</code></div>)}</div><form onSubmit={event=>{event.preventDefault();if(sourceDebugExpression.trim())commandSourceFileDebug('evaluate',sourceDebugExpression.trim())}}><input value={sourceDebugExpression} onChange={event=>setSourceDebugExpression(event.target.value)} placeholder="현재 프레임에서 표현식 평가"/><button type="submit" disabled={sourceDebugBusy||!sourceDebugExpression.trim()}>평가</button></form></section>
+                  </div>}
+                </div>}
+                <Editor
             beforeMount={(monaco)=>{
               const ts=monaco.languages.typescript
               const sharedCompilerOptions={
@@ -16441,6 +17726,7 @@ function IDE() {
               }
 
               editor.onDidFocusEditorText(()=>{
+                activeEditorPathRef.current=selectedEditorFileRef.current||selected||''
                 setFocusOwnerSafe('editor')
               })
 
@@ -16456,15 +17742,14 @@ function IDE() {
               // available for fast mouse navigation.
               editor.onMouseDown?.((event)=>{
                 const targetType=Number(event?.target?.type)
-                if(![2,3,4].includes(targetType)) return
                 const lineNumber=Number(event?.target?.position?.lineNumber)
                 if(!Number.isInteger(lineNumber)||lineNumber<1) return
-                toggleEditorLineBookmark(selectedEditorFileRef.current||selected||'',lineNumber,editor)
+                if(targetType===2&&isSourceDebugFile(selectedEditorFileRef.current||selected||'')){toggleEditorBreakpoint(selectedEditorFileRef.current||selected||'',lineNumber,editor);return}
+                if([3,4].includes(targetType))toggleEditorLineBookmark(selectedEditorFileRef.current||selected||'',lineNumber,editor)
               })
-              editor.onDidChangeModel?.(()=>{
-                window.setTimeout(()=>applyEditorBookmarkDecorations(editor,selectedEditorFileRef.current||selected||''),0)
-              })
+              editor.onDidChangeModel?.(()=>{window.setTimeout(()=>{applyEditorBookmarkDecorations(editor,selectedEditorFileRef.current||selected||'');applyEditorDebugDecorations(editor,selectedEditorFileRef.current||selected||'')},0)})
               applyEditorBookmarkDecorations(editor,selectedEditorFileRef.current||selected||'')
+              applyEditorDebugDecorations(editor,selectedEditorFileRef.current||selected||'')
             }}
             className="main-monaco-editor"
             height="100%"
@@ -16495,7 +17780,42 @@ function IDE() {
               suggestOnTriggerCharacters:true,
               quickSuggestions:{other:true,comments:false,strings:true}
             }}
-          />}
+          />
+              </>}
+            </div>
+
+            {editorSplit&&<>
+              <div
+                className={`code-editor-vertical-splitter ${editorSplitResizing?'active':''}`}
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="좌우 편집 화면 너비 조절"
+                title="좌우로 드래그해 화면 너비 조절 · 더블클릭: 50:50"
+                onPointerDown={beginEditorSplitResize}
+                onDoubleClick={resetEditorSplitRatio}
+              ><span aria-hidden="true" /></div>
+              <section
+                className={`code-editor-secondary-pane ${editorSplit.side==='LEFT'?'left':'right'}`}
+                style={{flexBasis:`${editorSplit.side==='LEFT'?editorSplitRatio:100-editorSplitRatio}%`}}
+                onMouseDown={()=>{activeEditorPathRef.current=editorSplit.path}}
+              >
+                <header className="code-editor-secondary-header">
+                  <div title={getEditorFileFullPath(editorSplit.path)}>
+                    <span>{editorSplit.side==='LEFT'?'왼쪽 화면':'오른쪽 화면'}</span>
+                    <strong>{editorSplit.path.replace(/\\/g,'/').split('/').pop()||editorSplit.path}</strong>
+                    {editorFileDirty[editorSplit.path]&&<i title="저장되지 않은 변경">●</i>}
+                  </div>
+                  <div>
+                    <button type="button" title="분할 방향 바꾸기" onClick={()=>setEditorSplit(prev=>prev?{...prev,side:prev.side==='LEFT'?'RIGHT':'LEFT'}:prev)}>⇄</button>
+                    <button type="button" title="분할 화면 닫기" onClick={closeEditorSplit}>×</button>
+                  </div>
+                </header>
+                <div className="code-editor-secondary-body" onFocusCapture={()=>{activeEditorPathRef.current=editorSplit.path}}>
+                  {renderSecondaryEditorContent(editorSplit.path)}
+                </div>
+              </section>
+            </>}
+          </div>
 
           </div>
         </div>
@@ -18420,9 +19740,56 @@ function IDE() {
                     </small>}
                   </div>
                 }
-                {codeEditProposal.explanation&&
-                  <p className="code-proposal-explanation">{codeEditProposal.explanation}</p>
+                {codeEditProposal.proposalExplanation
+                  ? <div className="code-proposal-learning">
+                      <div className="code-proposal-learning-head">
+                        <strong>변경 이유 및 코드 설명</strong>
+                        <small>제안 코드를 적용하기 전에 값 선택 이유와 실행 의미를 확인하세요.</small>
+                      </div>
+                      {codeEditProposal.proposalExplanation.summary&&
+                        <div className="code-proposal-learning-summary">
+                          {codeEditProposal.proposalExplanation.summary}
+                        </div>
+                      }
+                      {Array.isArray(codeEditProposal.proposalExplanation.value_reasons)&&codeEditProposal.proposalExplanation.value_reasons.length>0&&
+                        <div className="code-proposal-learning-section">
+                          <strong>왜 이 값/표현을 사용하나요?</strong>
+                          <div className="code-proposal-reason-list">
+                            {codeEditProposal.proposalExplanation.value_reasons.map((item,index)=>
+                              <div className="code-proposal-reason-item" key={`reason-${index}`}>
+                                {item?.value&&<code>{item.value}</code>}
+                                <p>{item?.reason||''}</p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      }
+                      {Array.isArray(codeEditProposal.proposalExplanation.code_walkthrough)&&codeEditProposal.proposalExplanation.code_walkthrough.length>0&&
+                        <div className="code-proposal-learning-section">
+                          <strong>코드 설명</strong>
+                          <div className="code-proposal-reason-list">
+                            {codeEditProposal.proposalExplanation.code_walkthrough.map((item,index)=>
+                              <div className="code-proposal-reason-item" key={`walk-${index}`}>
+                                {item?.code&&<code>{item.code}</code>}
+                                <p>{item?.explanation||''}</p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      }
+                      {Array.isArray(codeEditProposal.proposalExplanation.notes)&&codeEditProposal.proposalExplanation.notes.length>0&&
+                        <div className="code-proposal-learning-section code-proposal-learning-notes">
+                          <strong>확인할 점</strong>
+                          <ul>
+                            {codeEditProposal.proposalExplanation.notes.map((note,index)=><li key={`note-${index}`}>{note}</li>)}
+                          </ul>
+                        </div>
+                      }
+                    </div>
+                  : codeEditProposal.explanation&&
+                    <p className="code-proposal-explanation">{codeEditProposal.explanation}</p>
                 }
+                <div className="code-proposal-editor-label">제안 코드</div>
                 <div className="code-proposal-editor-wrap">
                   <Editor
                     key={codeEditProposal.createdAt||codeEditProposal.path}
@@ -18730,12 +20097,16 @@ function IDE() {
 
   const runningBackgroundJobs=Object.values(jobs||{}).filter(job=>['QUEUED','PENDING','RUNNING','WAITING_USER'].includes(String(job?.status||'').toUpperCase()))
   const busyTerminalSessions=terminalSessions.filter(item=>item?.busy)
+  const activeWorkflowJob=activeWorkflowJobId?jobs?.[activeWorkflowJobId]:null
+  const activeWorkflowJobRunning=Boolean(
+    activeWorkflowJobId
+    &&(!activeWorkflowJob||['QUEUED','PENDING','RUNNING','WAITING_USER'].includes(String(activeWorkflowJob?.status||'').toUpperCase()))
+  )
   const hasActiveExecution=Boolean(
     pythonExecutionState.busy
     ||sqlQueryBusy
     ||cmdExecution.busy
-    ||agentBuildBusy
-    ||activeWorkflowJobId
+    ||activeWorkflowJobRunning
     ||busyTerminalSessions.length
     ||runningBackgroundJobs.length
   )
