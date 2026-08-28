@@ -51,6 +51,57 @@
   height: 170px;
 }
 
+/* Dataset trace columns: Dataset ID -> source misjudgment ID. */
+.llm-dataset-table:has(th[data-learning-trace]) {
+  min-width: 1560px !important;
+  table-layout: fixed !important;
+}
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(1) { width: 80px !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(2) { width: 205px !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(3) { width: 205px !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(4) { width: 130px !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(5) { width: 360px !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(6) { width: 75px !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(7) { width: 135px !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(8) { width: 165px !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(9) { width: 205px !important; }
+
+.learning-trace-id {
+  display: block;
+  max-width: 100%;
+  font: 10.5px/1.45 Consolas, 'Courier New', monospace;
+  color: #9fc5ef;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.learning-problem-trace {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #27364a;
+  background: #0d1621;
+}
+.learning-problem-trace code {
+  font: 11px/1.45 Consolas, 'Courier New', monospace;
+  color: #9fc5ef;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+/* Problem viewer now includes each generated Problem ID. */
+.llm-problem-list table:has(th[data-learning-trace]) {
+  min-width: 1420px !important;
+}
+.llm-problem-list table:has(th[data-learning-trace]) th:nth-child(1) { width: 50px !important; }
+.llm-problem-list table:has(th[data-learning-trace]) th:nth-child(2) { width: 210px !important; }
+.llm-problem-list table:has(th[data-learning-trace]) th:nth-child(3) { width: 130px !important; }
+.llm-problem-list table:has(th[data-learning-trace]) th:nth-child(4) { width: 350px !important; }
+.llm-problem-list table:has(th[data-learning-trace]) th:nth-child(5) { width: 280px !important; }
+.llm-problem-list table:has(th[data-learning-trace]) th:nth-child(6) { width: 400px !important; }
+
 /* Use the available page height for the list and let the learning page/body scroll. */
 .llm-learning-page {
   overflow-y: auto !important;
