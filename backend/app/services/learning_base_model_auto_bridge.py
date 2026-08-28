@@ -8,6 +8,10 @@ AgentStudio's learned model is a reproducible derived Ollama model:
 
 Users must not have to manually pull/select qwen3.5:4b before applying learning.
 This bridge wraps the existing rebuild job before API routes import the service.
+
+After a successful learning apply, the current PC's applied Dataset -> misjudgment-case
+mapping is reconciled immediately. This prevents a Dataset that was just trained/applied
+from leaving its historical source error visible until a later restart/list repair.
 """
 
 # Keep the Learning Center queue aligned with the auto-confirm threshold.
@@ -66,6 +70,38 @@ async def _ensure_recommended_base_for_learning(job_id: str) -> None:
         )
 
 
+async def _reconcile_applied_learning(job_id: str) -> None:
+    """Repair exact case/group mappings immediately after a successful apply."""
+    job = apply_service._APPLY_JOBS.get(job_id, {})
+    if str(job.get("status") or "") != "completed":
+        return
+    try:
+        # Lazy import avoids a startup circular dependency: main loads this bridge before
+        # learning_visibility_bridge, while this function only runs after startup.
+        from app.services.learning_visibility_bridge import backfill_current_pc_learning_group_mappings
+
+        mapping = await backfill_current_pc_learning_group_mappings()
+        result = dict(job.get("result") or {})
+        result["learning_mapping_reconciled"] = True
+        result["learning_mapping_repaired_dataset_count"] = int(mapping.get("repaired_dataset_count") or 0)
+        result["learning_mapping_case_count"] = int(mapping.get("learned_case_count") or 0)
+        result["learning_mapping_family_count"] = int(mapping.get("learned_family_count") or 0)
+        job["result"] = result
+        job["mapping_reconciliation"] = mapping
+        job["message"] = (
+            f"{job.get('message') or '학습 적용 완료'} · "
+            f"오판 매핑 확인 {result['learning_mapping_case_count']}건"
+        )
+    except Exception as exc:
+        # Model application itself succeeded. Keep the job completed but expose the mapping
+        # repair warning so the UI/log can diagnose it instead of silently leaving stale rows.
+        job["mapping_reconciliation_error"] = str(exc) or type(exc).__name__
+        job["message"] = (
+            f"{job.get('message') or '학습 적용 완료'} · 오판 매핑 보정 경고: "
+            f"{str(exc) or type(exc).__name__}"
+        )
+
+
 async def _run_rebuild_job_with_auto_base(
     job_id: str,
     target_dataset_id: str = "",
@@ -92,6 +128,7 @@ async def _run_rebuild_job_with_auto_base(
         target_dataset_id=target_dataset_id,
         include_all=include_all,
     )
+    await _reconcile_applied_learning(job_id)
 
 
 # start_learning_apply_job/start_full_learning_apply_job resolve this module global
