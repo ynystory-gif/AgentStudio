@@ -15,8 +15,10 @@ body.agentstudio-large-preview-open{overflow:hidden!important}
 .ui-layout-theme-preview-modal.agentstudio-theme-actual-preview .ui-layout-theme-preview-modal-body{
   position:relative!important;
   min-height:0!important;
-  overflow:hidden!important;
-  padding:0!important;
+  overflow:auto!important;
+  overscroll-behavior:contain!important;
+  scrollbar-gutter:stable both-edges!important;
+  padding:22px!important;
   background:
     linear-gradient(rgba(76,111,139,.08) 1px,transparent 1px),
     linear-gradient(90deg,rgba(76,111,139,.08) 1px,transparent 1px),
@@ -25,16 +27,17 @@ body.agentstudio-large-preview-open{overflow:hidden!important}
 }
 
 .ui-layout-theme-preview-modal.agentstudio-theme-actual-preview .ui-theme-preview{
-  position:absolute!important;
-  left:50%!important;
-  top:50%!important;
+  position:relative!important;
+  left:auto!important;
+  top:auto!important;
   width:var(--agentstudio-preview-width)!important;
   height:var(--agentstudio-preview-height)!important;
   min-width:var(--agentstudio-preview-width)!important;
   min-height:var(--agentstudio-preview-height)!important;
   max-width:none!important;
-  transform:translate(-50%,-50%) scale(var(--agentstudio-preview-scale,1))!important;
-  transform-origin:center center!important;
+  margin:auto!important;
+  transform:scale(var(--agentstudio-preview-scale,1))!important;
+  transform-origin:top center!important;
   display:block!important;
 }
 
@@ -106,5 +109,8 @@ body.agentstudio-large-preview-open{overflow:hidden!important}
   .ui-layout-theme-preview-modal.agentstudio-theme-actual-preview{
     width:calc(100vw - 8px)!important;
     height:calc(100vh - 8px)!important;
+  }
+  .ui-layout-theme-preview-modal.agentstudio-theme-actual-preview .ui-layout-theme-preview-modal-body{
+    padding:12px!important;
   }
 }
