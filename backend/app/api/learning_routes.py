@@ -5,7 +5,6 @@ from pydantic import BaseModel
 
 from app.services.llm_learning_service import (
     add_manual_misjudgment_case,
-    apply_to_ollama,
     generate_problem_dataset,
     learning_summary,
     list_datasets,
@@ -15,6 +14,11 @@ from app.services.llm_learning_service import (
     review_misjudgment_case,
     sync_misjudgment_candidates,
     validate_dataset,
+)
+from app.services.llm_learning_pc_application_service import (
+    apply_to_ollama_for_current_pc,
+    list_pc_applications,
+    set_current_pc_application_enabled,
 )
 
 router = APIRouter(prefix="/learning", tags=["LLM Learning"])
@@ -69,9 +73,17 @@ class OllamaApplyRequest(BaseModel):
     adapter_path: str = ""
 
 
+class PcApplicationEnableRequest(BaseModel):
+    enabled: bool
+
+
 @router.get("/summary")
 async def summary():
-    return await learning_summary()
+    result = await learning_summary()
+    applications = await list_pc_applications(include_all_pcs=True)
+    result["pc_applications"] = applications.get("items", [])
+    result["application_scope"] = "per_pc"
+    return result
 
 
 @router.post("/misjudgments/sync")
@@ -117,7 +129,23 @@ async def generate_dataset(req: ProblemGenerationRequest):
 
 @router.get("/datasets")
 async def datasets():
-    return await list_datasets()
+    result = await list_datasets()
+    applications = await list_pc_applications(include_all_pcs=True)
+    by_dataset: dict[str, list[dict]] = {}
+    for item in applications.get("items", []):
+        by_dataset.setdefault(str(item.get("dataset_id") or ""), []).append(item)
+    current_pc = applications.get("current_pc_name", "")
+    for dataset in result.get("items", []):
+        rows = by_dataset.get(str(dataset.get("id") or ""), [])
+        dataset["pc_applications"] = rows
+        dataset["current_pc_application"] = next(
+            (row for row in rows if row.get("pc_name") == current_pc),
+            None,
+        )
+    result["current_pc_name"] = current_pc
+    result["dataset_scope"] = "shared_all_pcs"
+    result["application_scope"] = "per_pc"
+    return result
 
 
 @router.post("/datasets/{dataset_id}/validate")
@@ -148,11 +176,32 @@ async def evaluation(dataset_id: str, req: EvaluationRequest):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/datasets/{dataset_id}/pc-applications")
+async def pc_applications(dataset_id: str):
+    return await list_pc_applications(dataset_id=dataset_id, include_all_pcs=True)
+
+
+@router.get("/pc-applications")
+async def all_pc_applications(current_pc_only: bool = Query(default=False)):
+    return await list_pc_applications(include_all_pcs=not current_pc_only)
+
+
 @router.post("/datasets/{dataset_id}/apply-ollama")
 async def apply(dataset_id: str, req: OllamaApplyRequest):
+    """Apply the shared trained dataset/model only to the PC making this request."""
     try:
-        return await apply_to_ollama(dataset_id, req.model_name, req.adapter_path)
+        return await apply_to_ollama_for_current_pc(dataset_id, req.model_name, req.adapter_path)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.patch("/datasets/{dataset_id}/current-pc-application")
+async def toggle_current_pc_application(dataset_id: str, req: PcApplicationEnableRequest):
+    try:
+        return await set_current_pc_application_enabled(dataset_id, req.enabled)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
