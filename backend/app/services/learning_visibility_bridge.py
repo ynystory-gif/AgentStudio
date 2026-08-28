@@ -10,6 +10,10 @@ New Datasets receive ``source_group_case_ids`` when problems are collected. Lega
 Datasets are backfilled from their representative source and application cutoff. The
 backfill can run both at AgentStudio startup and lazily during list reads, so existing
 Datasets do not need to be regenerated or relearned.
+
+Important: an existing mapping is not assumed to be complete.  Every applied Dataset is
+reconciled against historical same-family cases up to its application time.  This repairs
+partial mappings created by older builds without treating a later recurrence as learned.
 """
 
 # Block internal Teacher/Validator/problem-generation telemetry before it can re-enter
@@ -52,12 +56,13 @@ def _group_key(case_ids: set[str]) -> str:
 async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
     """Return exact learned case ids and family metadata for current PC.
 
-    For modern Datasets the exact group snapshot comes from deployment_json.
-    For legacy Datasets that only have source_case_id, reconstruct the family only up to
-    the PC application timestamp, persist that mapping, and use it from then on.
+    For modern Datasets the group snapshot comes from deployment_json.  For every applied
+    Dataset we additionally reconcile that snapshot against same-family historical cases
+    that occurred on or before the application time.  This means partial legacy mappings
+    are repaired even when ``source_group_case_ids`` already exists.
     """
     pc_name = current_pc_name()
-    backfilled = 0
+    repaired = 0
 
     async with SessionLocal() as session:
         apps = (
@@ -88,7 +93,8 @@ async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
         ).scalars().all() if source_ids else []
         source_by_id = {str(row.id): row for row in source_rows}
 
-        # Load all candidate rows once for deterministic legacy backfill.
+        # Load all cases once so reconciliation is deterministic and does not issue one
+        # query per Dataset.
         all_cases = (
             await session.execute(select(LlmMisjudgmentCase))
         ).scalars().all()
@@ -101,6 +107,7 @@ async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
             dataset = dataset_by_id.get(str(app.dataset_id))
             if dataset is None:
                 continue
+
             applied_at = app.applied_at or app.updated_at or datetime.utcnow()
             deployment = dict(dataset.deployment_json or {})
             mapped_ids = {
@@ -112,28 +119,37 @@ async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
             source_row = source_by_id.get(str(dataset.source_case_id or ""))
             source_dict = _case_dict(source_row) if source_row is not None else {}
 
-            if not mapped_ids:
-                # Legacy Dataset: recover the historical family snapshot. Never include
-                # occurrences newer than applied_at; those remain true recurrences.
-                if source_row is not None:
-                    for row in all_cases:
-                        candidate = _case_dict(row)
-                        if _case_time(candidate) <= applied_at and collection._same_family(source_dict, candidate):
-                            mapped_ids.add(str(row.id))
-                if dataset.source_case_id:
-                    mapped_ids.add(str(dataset.source_case_id))
+            # Always reconcile, even when a mapping already exists. Older builds could
+            # persist only the representative source_case_id. Applying a Dataset teaches
+            # the whole error family that existed at application time, so all historical
+            # same-family rows belong to the learned snapshot. Cases after applied_at are
+            # deliberately excluded and remain visible as true recurrences.
+            reconciled_ids = set(mapped_ids)
+            if source_row is not None:
+                for row in all_cases:
+                    candidate = _case_dict(row)
+                    if (
+                        str(candidate.get("status") or "").lower() != "rejected"
+                        and _case_time(candidate) <= applied_at
+                        and collection._same_family(source_dict, candidate)
+                    ):
+                        reconciled_ids.add(str(row.id))
+            if dataset.source_case_id:
+                reconciled_ids.add(str(dataset.source_case_id))
 
-                if mapped_ids:
-                    deployment["source_case_id"] = str(dataset.source_case_id or "")
-                    deployment["source_group_case_ids"] = sorted(mapped_ids)
-                    deployment["source_group_key"] = _group_key(mapped_ids)
-                    deployment["source_group_mapped_at"] = datetime.utcnow().isoformat()
-                    deployment["source_group_mapping_version"] = 1
-                    deployment["source_group_mapping_backfilled"] = True
-                    dataset.deployment_json = deployment
-                    changed = True
-                    backfilled += 1
+            if reconciled_ids != mapped_ids or not deployment.get("source_group_key"):
+                deployment["source_case_id"] = str(dataset.source_case_id or "")
+                deployment["source_group_case_ids"] = sorted(reconciled_ids)
+                deployment["source_group_key"] = _group_key(reconciled_ids) if reconciled_ids else ""
+                deployment["source_group_mapped_at"] = datetime.utcnow().isoformat()
+                deployment["source_group_mapping_version"] = 2
+                deployment["source_group_mapping_reconciled"] = True
+                deployment["source_group_mapping_case_count"] = len(reconciled_ids)
+                dataset.deployment_json = deployment
+                changed = True
+                repaired += 1
 
+            mapped_ids = reconciled_ids
             learned_ids.update(mapped_ids)
             group_key = str(deployment.get("source_group_key") or "")
             if not group_key and mapped_ids:
@@ -149,20 +165,21 @@ async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
         if changed:
             await session.commit()
 
-    return learned_ids, families, backfilled
+    return learned_ids, families, repaired
 
 
 async def backfill_current_pc_learning_group_mappings() -> dict:
-    """Persist missing group mappings for already-applied legacy Datasets.
+    """Repair missing or incomplete group mappings for already-applied Datasets.
 
-    This is intentionally safe to call repeatedly. Existing explicit mappings are left
-    untouched; only legacy Datasets without ``source_group_case_ids`` are repaired.
+    Safe to call repeatedly. It never adds cases that happened after the Dataset's current
+    PC application time, so genuine post-learning recurrences remain actionable.
     """
-    learned_ids, families, backfilled = await _current_pc_learned_case_ids()
+    learned_ids, families, repaired = await _current_pc_learned_case_ids()
     return {
         "ok": True,
         "pc_name": current_pc_name(),
-        "backfilled_dataset_count": backfilled,
+        "repaired_dataset_count": repaired,
+        "backfilled_dataset_count": repaired,
         "learned_case_count": len(learned_ids),
         "learned_family_count": len(families),
     }
@@ -174,7 +191,7 @@ async def list_aggregated_misjudgment_cases_current_pc_unlearned_only(
     limit: int = 500,
 ) -> dict:
     result = await _original_list_aggregated_misjudgment_cases(provider, status, limit)
-    learned_case_ids, learned_families, backfilled = await _current_pc_learned_case_ids()
+    learned_case_ids, learned_families, repaired = await _current_pc_learned_case_ids()
 
     aggregated = list(result.get("items") or [])
     all_group_ids: set[str] = set()
@@ -212,12 +229,11 @@ async def list_aggregated_misjudgment_cases_current_pc_unlearned_only(
             if float(member.get("confidence") or 0.0) < 0.75:
                 continue
 
-            # Primary rule: exact key mapping from Dataset snapshot.
+            # Primary rule: exact case-id mapping reconciled from applied Datasets.
             if member_id and member_id in learned_case_ids:
                 hidden_learned_members += 1
                 continue
 
-            # A post-learning recurrence is intentionally not in the stored snapshot.
             actionable.append(member)
 
         if not actionable:
@@ -269,7 +285,8 @@ async def list_aggregated_misjudgment_cases_current_pc_unlearned_only(
     result["providers"] = providers
     result["current_pc_learned_case_count"] = len(learned_case_ids)
     result["current_pc_learned_family_count"] = len(learned_families)
-    result["legacy_group_mapping_backfilled"] = backfilled
+    result["legacy_group_mapping_backfilled"] = repaired
+    result["group_mapping_repaired_dataset_count"] = repaired
     result["hidden_learned_member_count"] = hidden_learned_members
     result["hidden_learned_group_count"] = hidden_learned_groups
     result["visible_scope"] = "explicit_group_key_unlearned_or_recurrence_only"
