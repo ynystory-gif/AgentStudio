@@ -5,6 +5,7 @@ import { AuthGate } from './components/auth/AuthGate'
 import { LlmLearningCenter } from './components/learning/LlmLearningCenter'
 import { LearningProblemProgressEnhancer } from './components/learning/LearningProblemProgressEnhancer'
 import { LearningPageStateRestoreEnhancer } from './components/learning/LearningPageStateRestoreEnhancer'
+import { LearningFullApplyEnhancer } from './components/learning/LearningFullApplyEnhancer'
 import { LayoutThemeDynamicSourceEnhancer } from './components/layout/LayoutThemeDynamicSourceEnhancer'
 import { ImportedThemePreviewEnhancer } from './components/layout/ImportedThemePreviewEnhancer'
 import { LargeLayoutPreviewEnhancer } from './components/layout/LargeLayoutPreviewEnhancer'
@@ -15,6 +16,6 @@ import './components/layout/large-layout-preview.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <AuthGate><App /><LlmLearningCenter /><LearningProblemProgressEnhancer /><LearningPageStateRestoreEnhancer /><LayoutThemeDynamicSourceEnhancer /><ImportedThemePreviewEnhancer /><LargeLayoutPreviewEnhancer /></AuthGate>
+    <AuthGate><App /><LlmLearningCenter /><LearningProblemProgressEnhancer /><LearningPageStateRestoreEnhancer /><LearningFullApplyEnhancer /><LayoutThemeDynamicSourceEnhancer /><ImportedThemePreviewEnhancer /><LargeLayoutPreviewEnhancer /></AuthGate>
   </React.StrictMode>
 )
