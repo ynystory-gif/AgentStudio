@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
+from datetime import datetime
 
 from app.core.machine_identity import current_pc_name
 from app.models.learning_entities import LlmLearningDataset, LlmMisjudgmentCase
@@ -94,7 +96,34 @@ async def _get_problem_collection_job_with_generation_progress(job_id: str) -> d
     return job
 
 
-# Patch the single internal hook used by synchronous and Job-based problem collection.
+async def _start_problem_collection_job_allow_single(
+    target_per_case: int = 100,
+    max_cases: int = 20,
+    provider: str = "ollama",
+) -> dict:
+    """Start a collection job without the legacy minimum of 10 problems per topic."""
+    target = max(1, min(int(target_per_case or 100), 500))
+    maximum = max(1, min(int(max_cases or 20), 20))
+    for job in collection._PROBLEM_JOBS.values():
+        if job.get("status") == "running":
+            return dict(job)
+
+    job_id = uuid.uuid4().hex
+    collection._set_problem_job(
+        job_id,
+        1,
+        "queued",
+        "문제 수집 작업을 준비합니다.",
+        status="running",
+        target_per_topic=target,
+        max_topics=maximum,
+        created_at=datetime.utcnow().isoformat(),
+    )
+    asyncio.create_task(collection._run_problem_collection_job(job_id, target, maximum, provider))
+    return dict(collection._PROBLEM_JOBS[job_id])
+
+
+# Patch the internal hooks before learning_routes imports them from the collection module.
 collection._generate_candidate_dataset = _generate_candidate_dataset_with_priority
-# The API imports this function from the collection module after the bridge is loaded in main.py.
 collection.get_problem_collection_job = _get_problem_collection_job_with_generation_progress
+collection.start_problem_collection_job = _start_problem_collection_job_allow_single
