@@ -15,6 +15,10 @@ from fastapi.responses import JSONResponse
 from app.core.database import init_db, migrate_agentstudio_schema, ensure_runtime_metadata_tables
 # Must load before API routes so direct imports of read_usage_summary receive the DB-backed version.
 import app.services.llm_usage_db_bridge  # noqa: F401
+# v5.426: problem collection must reuse AgentStudio's configured high-level model
+# priority instead of pinning Ollama. This bridge patches the single internal
+# Dataset-generation hook used by both sync and Job-based learning collection.
+import app.services.learning_teacher_bridge  # noqa: F401
 from app.api.routes import router
 from app.api.learning_diagnostics_routes import router as learning_diagnostics_router
 from app.api.learning_routes import router as learning_router
@@ -105,7 +109,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.425", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.426", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
