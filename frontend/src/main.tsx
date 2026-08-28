@@ -14,6 +14,7 @@ import { ImportedThemePreviewEnhancer } from './components/layout/ImportedThemeP
 import { LargeLayoutPreviewEnhancer } from './components/layout/LargeLayoutPreviewEnhancer'
 import './styles.css'
 import './components/learning/llm-learning.css'
+import './components/learning/learning-case-list-cleanup.css'
 import './components/learning/nav-order-fix.css'
 import './components/layout/large-layout-preview.css'
 
