@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.database import SessionLocal
+from app.core.machine_identity import current_pc_name
 from app.models.entities import UITheme
 from app.services.ui_theme_service import analyze_theme_from_url, build_rules, merge_theme_analyses
 
@@ -15,16 +16,16 @@ router = APIRouter(prefix="/ui-themes", tags=["UI Theme Dynamic Import"])
 class DynamicThemeImageReference(BaseModel):
     file_name: str = ""
     reference_role: str = "default"
-    tokens: dict = {}
-    component_rules: dict = {}
-    layout_rules: dict = {}
-    preview_colors: list[str] = []
+    tokens: dict = Field(default_factory=dict)
+    component_rules: dict = Field(default_factory=dict)
+    layout_rules: dict = Field(default_factory=dict)
+    preview_colors: list[str] = Field(default_factory=list)
 
 
 class DynamicThemeImportRequest(BaseModel):
     name: str = ""
-    urls: list[str] = []
-    images: list[DynamicThemeImageReference] = []
+    urls: list[str] = Field(default_factory=list)
+    images: list[DynamicThemeImageReference] = Field(default_factory=list)
     scope: str = "GLOBAL"
 
 
@@ -84,7 +85,10 @@ async def import_ui_theme_dynamic(req: DynamicThemeImportRequest):
     if not analyses:
         raise HTTPException(status_code=422, detail="추가한 참고 자료를 분석하지 못했습니다. " + " | ".join(warnings[:5]))
 
-    merged = merge_theme_analyses(analyses)
+    try:
+        merged = merge_theme_analyses(analyses)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Theme 통합 분석 실패: {str(exc) or type(exc).__name__}") from exc
     tokens = dict(merged.get("tokens") or {})
     component_rules = dict(merged.get("component_rules") or {})
     layout_rules = dict(merged.get("layout_rules") or {})
@@ -98,6 +102,7 @@ async def import_ui_theme_dynamic(req: DynamicThemeImportRequest):
     source_parts = [*urls, *[str(item.file_name or "").strip() for item in images if str(item.file_name or "").strip()]]
     now = datetime.utcnow()
     row = UITheme(
+        pc_name=current_pc_name(),
         name=name,
         theme_type="IMPORTED",
         source_type=source_type,
@@ -120,6 +125,7 @@ async def import_ui_theme_dynamic(req: DynamicThemeImportRequest):
         "ok": True,
         "theme": {
             "id": row.id,
+            "pc_name": row.pc_name,
             "name": row.name,
             "source_type": row.source_type,
             "source_url": row.source_url,
