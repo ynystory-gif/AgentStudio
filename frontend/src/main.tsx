@@ -8,6 +8,7 @@ import { LearningPageStateRestoreEnhancer } from './components/learning/Learning
 import { LearningFullApplyEnhancer } from './components/learning/LearningFullApplyEnhancer'
 import { LearningModelStackEnhancer } from './components/learning/LearningModelStackEnhancer'
 import { LearningUnlearnedListEnhancer } from './components/learning/LearningUnlearnedListEnhancer'
+import { LearningCollectionLimitEnhancer } from './components/learning/LearningCollectionLimitEnhancer'
 import { LayoutThemeDynamicSourceEnhancer } from './components/layout/LayoutThemeDynamicSourceEnhancer'
 import { ImportedThemePreviewEnhancer } from './components/layout/ImportedThemePreviewEnhancer'
 import { LargeLayoutPreviewEnhancer } from './components/layout/LargeLayoutPreviewEnhancer'
@@ -18,6 +19,6 @@ import './components/layout/large-layout-preview.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <AuthGate><App /><LlmLearningCenter /><LearningProblemProgressEnhancer /><LearningPageStateRestoreEnhancer /><LearningFullApplyEnhancer /><LearningModelStackEnhancer /><LearningUnlearnedListEnhancer /><LayoutThemeDynamicSourceEnhancer /><ImportedThemePreviewEnhancer /><LargeLayoutPreviewEnhancer /></AuthGate>
+    <AuthGate><App /><LlmLearningCenter /><LearningProblemProgressEnhancer /><LearningPageStateRestoreEnhancer /><LearningFullApplyEnhancer /><LearningModelStackEnhancer /><LearningUnlearnedListEnhancer /><LearningCollectionLimitEnhancer /><LayoutThemeDynamicSourceEnhancer /><ImportedThemePreviewEnhancer /><LargeLayoutPreviewEnhancer /></AuthGate>
   </React.StrictMode>
 )
