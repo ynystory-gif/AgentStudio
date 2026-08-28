@@ -5,7 +5,7 @@ import uuid
 from app.core.machine_identity import current_pc_name
 from app.models.learning_entities import LlmLearningDataset, LlmMisjudgmentCase
 from app.services import learning_collection_service as collection
-from app.services.learning_teacher_router import generate_dataset_with_priority
+from app.services.learning_teacher_router_v2 import generate_dataset_with_priority_v2
 from app.services.llm_learning_service import _case_dict
 
 
@@ -22,7 +22,7 @@ async def _generate_candidate_dataset_with_priority(
     provider.
     """
     case = _case_dict(case_row)
-    generated = await generate_dataset_with_priority(case, target_count)
+    generated = await generate_dataset_with_priority_v2(case, target_count)
     pc_name = current_pc_name()
     teacher = {
         "provider": generated["teacher_provider"],
