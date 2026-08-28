@@ -18,7 +18,6 @@ import app.services.llm_usage_db_bridge  # noqa: F401
 from app.api.routes import router
 from app.api.learning_routes import router as learning_router
 from app.api.auth_routes import router as auth_router
-from app.api.ui_theme_dynamic_routes import router as ui_theme_dynamic_router
 from app.services.langgraph_runtime import agent_graph_runtime
 from app.services.mcp_registry import mcp_registry_monitor
 from app.services.settings_service import migrate_env_settings_to_db, load_db_settings_into_runtime, register_current_machine, resolve_pending_machine_name
@@ -104,7 +103,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.423", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.424", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -173,7 +172,6 @@ async def _agentstudio_startup_probe():
 app.include_router(auth_router, prefix="/api")
 app.include_router(router, prefix="/api")
 app.include_router(learning_router, prefix="/api")
-app.include_router(ui_theme_dynamic_router, prefix="/api")
 
 from app.api.terminal_ws import router as terminal_ws_router
 app.include_router(terminal_ws_router)
