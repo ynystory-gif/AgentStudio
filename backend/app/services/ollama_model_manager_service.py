@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -127,11 +128,51 @@ def _restart_local_ollama_sync(ollama_exe: str, model_root: Path, base_url: str)
     return {"base_url": base, "env": env}
 
 
-def _pull_model_sync(ollama_exe: str, env: dict[str, str]) -> str:
-    result = subprocess.run([ollama_exe, "pull", LATEST_RECOMMENDED_MODEL], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", timeout=7200, check=False)
-    output = str(result.stdout or "")
-    if result.returncode != 0:
-        raise RuntimeError(f"{LATEST_RECOMMENDED_MODEL} 다운로드 실패 (ExitCode={result.returncode}): {output[-4000:]}")
+def _set_job(job_id: str, progress: int, stage: str, message: str, **extra) -> None:
+    job = _MODEL_JOBS.setdefault(job_id, {})
+    job.update({"id": job_id, "progress": max(0, min(100, int(progress))), "stage": stage, "message": message, "updated_at": datetime.utcnow().isoformat(), **extra})
+
+
+def _pull_model_with_progress_sync(job_id: str, ollama_exe: str, env: dict[str, str]) -> str:
+    process = subprocess.Popen(
+        [ollama_exe, "pull", LATEST_RECOMMENDED_MODEL],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    if process.stdout is None:
+        raise RuntimeError("Ollama 다운로드 출력을 읽을 수 없습니다.")
+    output_parts: list[str] = []
+    buffer = ""
+    while True:
+        char = process.stdout.read(1)
+        if char == "" and process.poll() is not None:
+            break
+        if not char:
+            time.sleep(0.05)
+            continue
+        output_parts.append(char)
+        buffer += char
+        if char in {"\r", "\n"} or len(buffer) > 500:
+            clean = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", buffer).strip()
+            match = re.search(r"(\d{1,3})%", clean)
+            if match:
+                percent = max(0, min(100, int(match.group(1))))
+                overall = 35 + int(percent * 0.50)
+                _set_job(job_id, overall, "download", f"qwen3.5:4b 다운로드 중... {percent}%", status="running")
+            elif "pulling manifest" in clean.lower():
+                _set_job(job_id, 37, "download", "qwen3.5:4b manifest 확인 중...", status="running")
+            elif clean:
+                _set_job(job_id, int(_MODEL_JOBS.get(job_id, {}).get("progress") or 35), "download", clean[-180:], status="running")
+            buffer = ""
+    return_code = process.wait(timeout=30)
+    output = "".join(output_parts)
+    if return_code != 0:
+        raise RuntimeError(f"{LATEST_RECOMMENDED_MODEL} 다운로드 실패 (ExitCode={return_code}): {output[-4000:]}")
     return output
 
 
@@ -151,11 +192,6 @@ async def get_recommended_model_status() -> dict:
     return {"ok": True, "recommended_model": LATEST_RECOMMENDED_MODEL, "current_model": current_model, "common_models_root": common_root, "ollama_executable": ollama_exe, "ready": bool(common_root and ollama_exe), "pc_name": current_pc_name()}
 
 
-def _set_job(job_id: str, progress: int, stage: str, message: str, **extra) -> None:
-    job = _MODEL_JOBS.setdefault(job_id, {})
-    job.update({"id": job_id, "progress": max(0, min(100, int(progress))), "stage": stage, "message": message, "updated_at": datetime.utcnow().isoformat(), **extra})
-
-
 async def _run_download_job(job_id: str, status: dict) -> None:
     try:
         common_root = str(status.get("common_models_root") or "").strip()
@@ -168,8 +204,8 @@ async def _run_download_job(job_id: str, status: dict) -> None:
         await asyncio.to_thread(_persist_windows_ollama_models, str(model_root))
         _set_job(job_id, 22, "restart", "Ollama 서버를 공통 모델 경로로 재시작 중...", status="running")
         restart = await asyncio.to_thread(_restart_local_ollama_sync, ollama_exe, model_root, str(settings.ollama_base_url or "http://127.0.0.1:11434"))
-        _set_job(job_id, 35, "download", "qwen3.5:4b 다운로드 중... 약 3.4GB로 네트워크에 따라 시간이 걸릴 수 있습니다.", status="running")
-        output = await asyncio.to_thread(_pull_model_sync, ollama_exe, dict(restart["env"]))
+        _set_job(job_id, 35, "download", "qwen3.5:4b 다운로드 시작... 약 3.4GB입니다.", status="running")
+        output = await asyncio.to_thread(_pull_model_with_progress_sync, job_id, ollama_exe, dict(restart["env"]))
         _set_job(job_id, 88, "verify", "다운로드 완료. Ollama 모델 목록을 검증 중...", status="running")
         list_output = await asyncio.to_thread(_verify_model_sync, ollama_exe, dict(restart["env"]))
         _set_job(job_id, 94, "apply", "현재 PC 기본 모델을 qwen3.5:4b로 변경 중...", status="running")
@@ -207,7 +243,6 @@ async def get_recommended_model_job(job_id: str) -> dict:
 
 
 async def download_and_apply_recommended_model() -> dict:
-    """Backward-compatible synchronous endpoint implementation."""
     job = await start_recommended_model_job()
     job_id = job["id"]
     while True:
