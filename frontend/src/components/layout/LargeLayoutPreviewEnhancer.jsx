@@ -1,12 +1,13 @@
 import { useEffect } from 'react'
 
 /*
- * The actual-size preview belongs to Theme 미리보기 -> 전체 미리보기.
+ * Actual-size preview belongs only to Theme 미리보기 -> 전체 미리보기.
  *
- * UILayoutThemePreview already owns the real React interactions (menu hover/click,
- * submenu, user menu, input focus, mobile menu, etc.).  This enhancer only gives
- * that existing interactive preview a device-sized stage.  It intentionally does
- * NOT add buttons to layout-template gallery cards.
+ * Important: do not observe every class/style mutation in AgentStudio. The main
+ * workspace changes classes frequently (hover/active/menu/job state), and a
+ * document-wide MutationObserver can create a hot rescan loop that makes normal
+ * buttons feel unresponsive.  This enhancer therefore uses a very small polling
+ * check and only touches the Theme preview modal while it actually exists.
  */
 const VIEWPORTS={
   desktop:{width:1440,height:900,label:'Desktop 1440×900'},
@@ -21,11 +22,6 @@ const previewViewport=modal=>{
   return 'desktop'
 }
 
-const clearLegacyCardButtons=()=>{
-  document.querySelectorAll('[data-agentstudio-large-preview-button]').forEach(button=>button.remove())
-  document.querySelectorAll('.agentstudio-large-layout-preview').forEach(node=>node.classList.remove('agentstudio-large-layout-preview'))
-}
-
 const fitThemePreview=modal=>{
   if(!(modal instanceof HTMLElement))return
   const body=modal.querySelector('.ui-layout-theme-preview-modal-body')
@@ -37,7 +33,6 @@ const fitThemePreview=modal=>{
   const spec=VIEWPORTS[mode]||VIEWPORTS.desktop
   modal.dataset.agentstudioPreviewViewport=mode
   preview.dataset.agentstudioViewportLabel=spec.label
-
   preview.style.setProperty('--agentstudio-preview-width',`${spec.width}px`)
   preview.style.setProperty('--agentstudio-preview-height',`${spec.height}px`)
 
@@ -47,39 +42,70 @@ const fitThemePreview=modal=>{
   preview.style.setProperty('--agentstudio-preview-scale',String(scale))
 }
 
-const enhanceThemePreviewModal=modal=>{
-  if(!(modal instanceof HTMLElement))return
-  modal.classList.add('agentstudio-theme-actual-preview')
-  document.body.classList.add('agentstudio-large-preview-open')
-  requestAnimationFrame(()=>fitThemePreview(modal))
-}
-
 export function LargeLayoutPreviewEnhancer(){
   useEffect(()=>{
     let stopped=false
+    let activeModal=null
+    let lastMode=''
+    let lastSize=''
 
-    const scan=()=>{
+    // Remove any DOM buttons left by an older hot-reloaded build once only.
+    document.querySelectorAll('[data-agentstudio-large-preview-button]').forEach(button=>button.remove())
+    document.querySelectorAll('.agentstudio-large-layout-preview').forEach(node=>node.classList.remove('agentstudio-large-layout-preview'))
+
+    const sync=()=>{
       if(stopped)return
-      clearLegacyCardButtons()
-      const modals=[...document.querySelectorAll('.ui-layout-theme-preview-modal')]
-      modals.forEach(enhanceThemePreviewModal)
-      if(!modals.length)document.body.classList.remove('agentstudio-large-preview-open')
+      const modal=document.querySelector('.ui-layout-theme-preview-modal')
+
+      if(!(modal instanceof HTMLElement)){
+        if(activeModal){
+          activeModal.classList.remove('agentstudio-theme-actual-preview')
+          delete activeModal.dataset.agentstudioPreviewViewport
+          activeModal=null
+          lastMode=''
+          lastSize=''
+        }
+        document.body.classList.remove('agentstudio-large-preview-open')
+        return
+      }
+
+      if(activeModal!==modal){
+        activeModal=modal
+        lastMode=''
+        lastSize=''
+        if(!modal.classList.contains('agentstudio-theme-actual-preview'))modal.classList.add('agentstudio-theme-actual-preview')
+        if(!document.body.classList.contains('agentstudio-large-preview-open'))document.body.classList.add('agentstudio-large-preview-open')
+      }
+
+      const mode=previewViewport(modal)
+      const body=modal.querySelector('.ui-layout-theme-preview-modal-body')
+      const size=body instanceof HTMLElement?`${body.clientWidth}x${body.clientHeight}`:''
+      if(mode!==lastMode||size!==lastSize){
+        lastMode=mode
+        lastSize=size
+        requestAnimationFrame(()=>fitThemePreview(modal))
+      }
     }
 
-    const observer=new MutationObserver(scan)
-    observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['class']})
-    const timer=window.setInterval(scan,500)
-    const onResize=()=>document.querySelectorAll('.ui-layout-theme-preview-modal.agentstudio-theme-actual-preview').forEach(fitThemePreview)
+    // 250 ms is more than enough for opening/viewport switching and avoids any
+    // global DOM mutation feedback loop.
+    const timer=window.setInterval(sync,250)
+    const onResize=()=>{
+      lastSize=''
+      if(activeModal)requestAnimationFrame(()=>fitThemePreview(activeModal))
+    }
     window.addEventListener('resize',onResize)
-    scan()
+    sync()
 
     return()=>{
       stopped=true
       window.clearInterval(timer)
-      observer.disconnect()
       window.removeEventListener('resize',onResize)
+      if(activeModal){
+        activeModal.classList.remove('agentstudio-theme-actual-preview')
+        delete activeModal.dataset.agentstudioPreviewViewport
+      }
       document.body.classList.remove('agentstudio-large-preview-open')
-      clearLegacyCardButtons()
     }
   },[])
   return null
