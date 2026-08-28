@@ -13,6 +13,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.database import init_db, migrate_agentstudio_schema, ensure_runtime_metadata_tables
+# Must load before API routes so direct imports of read_usage_summary receive the DB-backed version.
+import app.services.llm_usage_db_bridge  # noqa: F401
 from app.api.routes import router
 from app.api.learning_routes import router as learning_router
 from app.api.auth_routes import router as auth_router
@@ -101,7 +103,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.421", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.422", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
