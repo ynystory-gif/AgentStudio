@@ -3,6 +3,7 @@ import { api, clearAuthToken, getAuthToken, setAuthToken } from '../../api'
 import './auth.css'
 
 type Member={id:string;login_id:string;name:string;email:string;role:string;is_active:boolean;pcs:string[]}
+type PcRow={pc_name:string;host_name:string;os_name:string;last_seen_at:string}
 
 export function AuthGate({children}:{children:ReactNode}){
   const [ready,setReady]=useState(false)
@@ -46,9 +47,17 @@ export function AuthGate({children}:{children:ReactNode}){
 }
 
 function MemberAdmin({onClose}:{onClose:()=>void}){
-  const [items,setItems]=useState<Member[]>([]);const [message,setMessage]=useState('')
-  const load=()=>api<any>('/auth/members').then(r=>setItems(r.items||[])).catch(e=>setMessage(String(e)))
+  const [items,setItems]=useState<Member[]>([])
+  const [pcs,setPcs]=useState<PcRow[]>([])
+  const [message,setMessage]=useState('')
+  const load=async()=>{
+    try{
+      const [memberResult,pcResult]=await Promise.all([api<any>('/auth/members'),api<any>('/auth/pcs')])
+      setItems(memberResult.items||[]);setPcs(pcResult.items||[])
+    }catch(e){setMessage(String(e))}
+  }
   useEffect(()=>{load()},[])
-  const save=async(row:Member)=>{try{await api(`/auth/members/${row.id}`,{method:'PATCH',body:JSON.stringify({name:row.name,email:row.email,role:row.role,is_active:row.is_active})});await api(`/auth/members/${row.id}/pcs`,{method:'PUT',body:JSON.stringify({pcs:row.pcs})});setMessage('저장되었습니다.')}catch(e){setMessage(String(e))}}
-  return <div className="member-admin-overlay"><section className="member-admin"><header><div><strong>회원 관리</strong><small>회원별 권한과 관리 PC를 설정합니다.</small></div><button onClick={onClose}>✕</button></header>{message&&<div className="auth-message">{message}</div>}<div className="member-table"><table><thead><tr><th>아이디</th><th>이름</th><th>이메일</th><th>권한</th><th>사용</th><th>관리 PC</th><th></th></tr></thead><tbody>{items.map((row,i)=><tr key={row.id}><td>{row.login_id}</td><td><input value={row.name} onChange={e=>setItems(v=>v.map((x,n)=>n===i?{...x,name:e.target.value}:x))}/></td><td><input value={row.email} onChange={e=>setItems(v=>v.map((x,n)=>n===i?{...x,email:e.target.value}:x))}/></td><td><select value={row.role} onChange={e=>setItems(v=>v.map((x,n)=>n===i?{...x,role:e.target.value}:x))}><option>USER</option><option>ADMIN</option></select></td><td><input type="checkbox" checked={row.is_active} onChange={e=>setItems(v=>v.map((x,n)=>n===i?{...x,is_active:e.target.checked}:x))}/></td><td><input value={(row.pcs||[]).join(', ')} onChange={e=>setItems(v=>v.map((x,n)=>n===i?{...x,pcs:e.target.value.split(',').map(s=>s.trim()).filter(Boolean)}:x))} placeholder="A-PC, B-PC"/></td><td><button onClick={()=>save(row)}>저장</button></td></tr>)}</tbody></table></div></section></div>
+  const togglePc=(index:number,pcName:string,checked:boolean)=>setItems(v=>v.map((x,n)=>n===index?{...x,pcs:checked?Array.from(new Set([...(x.pcs||[]),pcName])):(x.pcs||[]).filter(p=>p!==pcName)}:x))
+  const save=async(row:Member)=>{try{await api(`/auth/members/${row.id}`,{method:'PATCH',body:JSON.stringify({name:row.name,email:row.email,role:row.role,is_active:row.is_active})});await api(`/auth/members/${row.id}/pcs`,{method:'PUT',body:JSON.stringify({pcs:row.pcs})});setMessage(`${row.login_id} 회원 정보가 저장되었습니다.`);await load()}catch(e){setMessage(String(e))}}
+  return <div className="member-admin-overlay"><section className="member-admin"><header><div><strong>회원 관리</strong><small>회원 정보·권한·사용 가능 PC를 관리합니다.</small></div><button onClick={onClose}>✕</button></header>{message&&<div className="auth-message">{message}</div>}<div className="member-table"><table><thead><tr><th>아이디</th><th>이름</th><th>이메일</th><th>권한</th><th>사용</th><th>관리 PC</th><th></th></tr></thead><tbody>{items.map((row,i)=><tr key={row.id}><td>{row.login_id}</td><td><input value={row.name} onChange={e=>setItems(v=>v.map((x,n)=>n===i?{...x,name:e.target.value}:x))}/></td><td><input value={row.email} onChange={e=>setItems(v=>v.map((x,n)=>n===i?{...x,email:e.target.value}:x))}/></td><td><select value={row.role} onChange={e=>setItems(v=>v.map((x,n)=>n===i?{...x,role:e.target.value}:x))}><option>USER</option><option>ADMIN</option></select></td><td><input type="checkbox" checked={row.is_active} onChange={e=>setItems(v=>v.map((x,n)=>n===i?{...x,is_active:e.target.checked}:x))}/></td><td><div className="member-pc-list">{pcs.length?pcs.map(pc=><label key={pc.pc_name} title={`${pc.host_name||''} ${pc.os_name||''}`.trim()}><input type="checkbox" checked={(row.pcs||[]).includes(pc.pc_name)} onChange={e=>togglePc(i,pc.pc_name,e.target.checked)}/><span>{pc.pc_name}</span></label>):<small>등록된 PC가 없습니다.</small>}</div></td><td><button onClick={()=>save(row)}>저장</button></td></tr>)}</tbody></table></div></section></div>
 }
