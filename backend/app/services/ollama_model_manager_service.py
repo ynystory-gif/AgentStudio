@@ -78,6 +78,31 @@ async def _set_pc_setting(key: str, value: str) -> None:
         await session.commit()
 
 
+def _persist_backend_env_value(key: str, value: str) -> None:
+    """Persist PC-local model selection so the next backend boot keeps the same model.
+
+    app_settings can move to a runtime Supabase DB after bootstrap, so only writing the
+    runtime DB is not enough for the next process start. backend/.env is local to this PC
+    and is therefore the correct durable bootstrap fallback for OLLAMA_MODEL and the
+    common model root.
+    """
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines() if env_path.exists() else []
+    prefix = f"{key}="
+    replaced = False
+    output: list[str] = []
+    for line in lines:
+        if line.strip().startswith(prefix):
+            output.append(f"{key}={value}")
+            replaced = True
+        else:
+            output.append(line)
+    if not replaced:
+        output.append(f"{key}={value}")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+
+
 def _http_ok(url: str) -> bool:
     try:
         with urllib.request.urlopen(url, timeout=2) as response:
@@ -186,10 +211,28 @@ def _verify_model_sync(ollama_exe: str, env: dict[str, str]) -> str:
 
 async def get_recommended_model_status() -> dict:
     settings = get_settings()
-    common_root = await _pc_setting("COMMON_MODELS_ROOT") or str(settings.common_models_root or "").strip() or str(os.environ.get("COMMON_MODELS_ROOT", "") or "").strip()
-    current_model = await _pc_setting("OLLAMA_MODEL") or str(settings.ollama_model or "").strip()
+    common_root = await _pc_setting("COMMON_MODELS_ROOT") or str(os.environ.get("COMMON_MODELS_ROOT", "") or "").strip() or str(settings.common_models_root or "").strip()
+    current_model = await _pc_setting("OLLAMA_MODEL") or str(os.environ.get("OLLAMA_MODEL", "") or "").strip() or str(settings.ollama_model or "").strip()
     ollama_exe = next(iter(_candidate_ollama_executables()), "")
     return {"ok": True, "recommended_model": LATEST_RECOMMENDED_MODEL, "current_model": current_model, "common_models_root": common_root, "ollama_executable": ollama_exe, "ready": bool(common_root and ollama_exe), "pc_name": current_pc_name()}
+
+
+async def persist_current_ollama_model(model_name: str, common_root: str = "") -> None:
+    model = str(model_name or "").strip()
+    if not model:
+        raise ValueError("적용할 Ollama 모델 이름이 없습니다.")
+    root = str(common_root or await _pc_setting("COMMON_MODELS_ROOT") or os.environ.get("COMMON_MODELS_ROOT", "") or "").strip()
+    await _set_pc_setting("OLLAMA_MODEL", model)
+    if root:
+        await _set_pc_setting("COMMON_MODELS_ROOT", root)
+    await asyncio.to_thread(_persist_backend_env_value, "OLLAMA_MODEL", model)
+    if root:
+        await asyncio.to_thread(_persist_backend_env_value, "COMMON_MODELS_ROOT", root)
+    os.environ["OLLAMA_MODEL"] = model
+    if root:
+        os.environ["COMMON_MODELS_ROOT"] = root
+        os.environ["OLLAMA_MODELS"] = root
+    get_settings.cache_clear()
 
 
 async def _run_download_job(job_id: str, status: dict) -> None:
@@ -209,12 +252,7 @@ async def _run_download_job(job_id: str, status: dict) -> None:
         _set_job(job_id, 88, "verify", "다운로드 완료. Ollama 모델 목록을 검증 중...", status="running")
         list_output = await asyncio.to_thread(_verify_model_sync, ollama_exe, dict(restart["env"]))
         _set_job(job_id, 94, "apply", "현재 PC 기본 모델을 qwen3.5:4b로 변경 중...", status="running")
-        await _set_pc_setting("COMMON_MODELS_ROOT", str(model_root))
-        await _set_pc_setting("OLLAMA_MODEL", LATEST_RECOMMENDED_MODEL)
-        os.environ["COMMON_MODELS_ROOT"] = str(model_root)
-        os.environ["OLLAMA_MODELS"] = str(model_root)
-        os.environ["OLLAMA_MODEL"] = LATEST_RECOMMENDED_MODEL
-        get_settings.cache_clear()
+        await persist_current_ollama_model(LATEST_RECOMMENDED_MODEL, str(model_root))
         _set_job(job_id, 100, "done", "qwen3.5:4b 다운로드 및 현재 PC 적용이 완료되었습니다.", status="completed", result={"model": LATEST_RECOMMENDED_MODEL, "common_models_root": str(model_root), "ollama_base_url": restart["base_url"], "output_tail": output[-1200:], "list_tail": list_output[-800:]})
     except Exception as exc:
         _set_job(job_id, int(_MODEL_JOBS.get(job_id, {}).get("progress") or 0), "failed", str(exc) or type(exc).__name__, status="failed", error=str(exc) or type(exc).__name__)
