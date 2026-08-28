@@ -5,7 +5,15 @@ type DynamicState={urls:string[];files:(File|null)[];roles:string[];busy:boolean
 
 const installed=new WeakSet<HTMLElement>()
 
-function esc(value:string){return String(value||'').replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]||ch))}
+function esc(value:string){
+  return String(value||'').replace(/[&<>"']/g,ch=>{
+    if(ch==='&')return '&amp;'
+    if(ch==='<')return '&lt;'
+    if(ch==='>')return '&gt;'
+    if(ch==='"')return '&quot;'
+    return '&#39;'
+  })
+}
 
 function ensureStyle(){
   if(document.getElementById('agentstudio-dynamic-theme-source-style'))return
@@ -25,7 +33,8 @@ async function imageReference(file:File,role:string){
   const bitmap=await createImageBitmap(file)
   const size=64
   const canvas=document.createElement('canvas');canvas.width=size;canvas.height=size
-  const ctx=canvas.getContext('2d',{willReadFrequently:true})!
+  const ctx=canvas.getContext('2d',{willReadFrequently:true})
+  if(!ctx){bitmap.close?.();throw new Error('이미지 분석 Canvas를 만들 수 없습니다.')}
   ctx.drawImage(bitmap,0,0,size,size);bitmap.close?.()
   const data=ctx.getImageData(0,0,size,size).data
   const counts=new Map<string,number>()
@@ -93,7 +102,7 @@ function install(panel:HTMLElement){
     if(!urls.length&&!selected.length){status.textContent='URL 또는 이미지를 하나 이상 추가하세요.';status.className='ui-layout-dynamic-status error';return}
     state.busy=true;if(action){action.disabled=true;action.textContent='통합 분석·저장 중...'}
     try{
-      const images=[] as any[]
+      const images:any[]=[]
       for(let i=0;i<selected.length;i++){status.textContent=`이미지 분석 중 ${i+1}/${selected.length} · ${selected[i].file.name}`;images.push(await imageReference(selected[i].file,state.roles[selected[i].index]||'default'))}
       status.textContent=`URL ${urls.length}개 · 이미지 ${images.length}개 통합 분석 중...`
       const result=await api<any>('/ui-themes/import-dynamic',{method:'POST',body:JSON.stringify({name,urls,images,scope:'GLOBAL'})})
