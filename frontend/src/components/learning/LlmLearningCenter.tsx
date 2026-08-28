@@ -159,9 +159,9 @@ export function LlmLearningCenter() {
     const rawTopics=window.prompt('처리할 오판 주제 수를 입력하세요. (1~20)','1')
     if(rawTopics===null)return
     const maxCases=Math.max(1,Math.min(20,Number(rawTopics)||1))
-    const rawCount=window.prompt('오판 주제 하나당 생성할 후보 문제 수를 입력하세요. (10~500)','100')
+    const rawCount=window.prompt('오판 주제 하나당 생성할 후보 문제 수를 입력하세요. (1~500)','100')
     if(rawCount===null)return
-    const targetPerCase=Math.max(10,Math.min(500,Number(rawCount)||100))
+    const targetPerCase=Math.max(1,Math.min(500,Number(rawCount)||100))
     setMessage(`문제 수집 준비 · 오판 주제 ${maxCases}개 × 주제당 ${targetPerCase}문제 = 최대 ${maxCases*targetPerCase}문제`)
     try{
       const job=await api<any>('/learning/problems/collect-job',{method:'POST',body:JSON.stringify({target_per_case:targetPerCase,max_cases:maxCases,provider:'ollama'})})
@@ -205,7 +205,7 @@ export function LlmLearningCenter() {
     {progressBlock(modelJob,'모델 다운로드/적용')}{progressBlock(problemJob,'문제 수집')}{progressBlock(applyJob,'학습 적용')}
     <div className="llm-learning-metrics"><div><b>{candidateCount}</b><span>75% 미만 검토 후보</span></div><div><b>{confirmedCount}</b><span>자동/확정 오판 주제</span></div><div><b>{datasets.length}</b><span>공용 Dataset</span></div><div><b>{summary.current_ollama_model||'-'}</b><span>현재 Ollama</span></div></div>
     <div className="llm-learning-toolbar"><button className={tab==='cases'?'active':''} onClick={()=>setTab('cases')}>1. 오판 수집</button><button className={tab==='datasets'?'active':''} onClick={()=>setTab('datasets')}>2. 수집 문제 / Dataset</button><button className={tab==='training'?'active':''} onClick={()=>setTab('training')}>3. PC별 학습 적용 관리</button><span/><button disabled={!!busy||problemRunning||applyRunning} onClick={()=>run('오판 수집',()=>api('/learning/misjudgments/sync',{method:'POST'}))}>↻ 오판 수집</button><button className="primary" disabled={!!busy||problemRunning||applyRunning} onClick={startProblemCollection}>＋ 문제 수집</button></div>
-    <div className="llm-problem-help"><b>문제 수집:</b> 처리할 오판 주제 수를 1~20개에서 선택한 뒤, 주제 하나당 생성할 문제 수를 정합니다. 예: 오판 주제 1개 × 100문제 = 최대 100문제.</div>
+    <div className="llm-problem-help"><b>문제 수집:</b> 처리할 오판 주제 수를 1~20개에서 선택한 뒤, 주제 하나당 생성할 문제 수를 1~500개에서 정합니다. 예: 오판 주제 1개 × 1문제 = 최대 1문제.</div>
     {message&&<div className="llm-learning-message">{busy?`${busy} 중... `:''}{message}</div>}
     <div className="llm-learning-body">
       {tab==='cases'&&<><div className="llm-learning-filter"><label>모델 제공자 <select value={provider} onChange={e=>setProvider(e.target.value)}><option value="">전체</option>{providers.map(p=><option key={p}>{p}</option>)}</select></label><em>학습 적용 후에도 같은 오판이 다시 발생하면 새 사례로 다시 표시됩니다.</em></div><table className="llm-case-table"><thead><tr><th>상태</th><th>횟수</th><th>최근 발생</th><th>수집 PC</th><th>Provider / Model</th><th>감지 사유</th><th>사용자 요청 / 잘못된 결과</th><th>작업</th></tr></thead><tbody>{cases.map(row=><tr key={row.id}><td><b>{row.status}</b><small>{Math.round((row.confidence||0)*100)}%</small></td><td><b className="occurrence-count">{row.occurrence_count||1}</b></td><td className="date-cell">{fmtDate(row.last_occurred_at||row.updated_at)}</td><td><b>{row.source_pc_name||'-'}</b></td><td><b>{row.provider}</b><small>{row.model}</small></td><td>{row.detection_reason}</td><td><div className="case-text-scroll"><b>[사용자 요청]</b><pre>{row.user_request||'-'}</pre><b>[잘못된 결과]</b><pre>{row.wrong_output||'-'}</pre>{row.correction_evidence&&<><b>[수정 증거]</b><pre>{row.correction_evidence}</pre></>}</div></td><td><div className="llm-learning-actions"><button onClick={()=>rejectGroup(row)}>제외</button></div></td></tr>)}</tbody></table></>}
