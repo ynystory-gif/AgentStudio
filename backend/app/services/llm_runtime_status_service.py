@@ -9,6 +9,7 @@ import httpx
 from app.core.config import get_settings
 from app.services.codex_app_server_service import codex_app_server_manager
 from app.services.model_router import LLMTask, provider_candidates_for
+from app.services.ollama_model_manager_service import get_recommended_model_status
 
 
 def _tcp_open(host: str, port: int) -> bool:
@@ -27,38 +28,16 @@ async def _ollama_status(base_url: str) -> dict:
     port_open = await asyncio.to_thread(_tcp_open, host, port)
 
     if not port_open:
-        return {
-            "connected": False,
-            "url": normalized,
-            "port_open": False,
-            "message": "Ollama 연결 안됨",
-            "models": [],
-        }
+        return {"connected": False, "url": normalized, "port_open": False, "message": "Ollama 연결 안됨", "models": []}
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=1.0)) as client:
             response = await client.get(f"{normalized}/api/tags")
             response.raise_for_status()
-            models = [
-                str(item.get("name") or "")
-                for item in response.json().get("models", [])
-                if item.get("name")
-            ]
-        return {
-            "connected": True,
-            "url": normalized,
-            "port_open": True,
-            "message": "Ollama 연결됨",
-            "models": models,
-        }
+            models = [str(item.get("name") or "") for item in response.json().get("models", []) if item.get("name")]
+        return {"connected": True, "url": normalized, "port_open": True, "message": "Ollama 연결됨", "models": models}
     except Exception as exc:
-        return {
-            "connected": False,
-            "url": normalized,
-            "port_open": True,
-            "message": f"Ollama 응답 오류: {type(exc).__name__}",
-            "models": [],
-        }
+        return {"connected": False, "url": normalized, "port_open": True, "message": f"Ollama 응답 오류: {type(exc).__name__}", "models": []}
 
 
 def _provider_model(provider: str, *, openai_model: str, ollama_model: str) -> str:
@@ -74,6 +53,8 @@ def _provider_model(provider: str, *, openai_model: str, ollama_model: str) -> s
 
 async def get_llm_runtime_status() -> dict:
     settings = get_settings()
+    selected = await get_recommended_model_status()
+    selected_ollama_model = str(selected.get("current_model") or settings.ollama_model or "").strip()
     ollama = await _ollama_status(settings.ollama_base_url)
     openai_configured = bool((settings.openai_api_key or "").strip())
     codex_status = codex_app_server_manager.status()
@@ -93,11 +74,7 @@ async def get_llm_runtime_status() -> dict:
         primary = candidates[0]
         routing[label] = {
             "provider": primary,
-            "model": _provider_model(
-                primary,
-                openai_model=settings.openai_model,
-                ollama_model=settings.ollama_model,
-            ),
+            "model": _provider_model(primary, openai_model=settings.openai_model, ollama_model=selected_ollama_model),
             "candidates": candidates,
         }
 
@@ -131,17 +108,9 @@ async def get_llm_runtime_status() -> dict:
                 "enabled": bool(settings.openai_enabled),
                 "configured": openai_configured,
                 "model": settings.openai_model,
-                "status": (
-                    "비사용"
-                    if not settings.openai_enabled
-                    else ("설정됨" if openai_configured else "API Key 미설정")
-                ),
+                "status": "비사용" if not settings.openai_enabled else ("설정됨" if openai_configured else "API Key 미설정"),
             },
-            "ollama": {
-                **ollama,
-                "enabled": True,
-                "model": settings.ollama_model,
-            },
+            "ollama": {**ollama, "enabled": True, "model": selected_ollama_model},
             "codex": {
                 "enabled": bool(settings.codex_enabled),
                 "installed": bool(codex_status.get("installed")),
@@ -153,11 +122,7 @@ async def get_llm_runtime_status() -> dict:
                 "status": (
                     "비사용"
                     if not settings.codex_enabled
-                    else (
-                        "ChatGPT 연결됨"
-                        if codex_status.get("account")
-                        else ("Codex 준비됨 · 로그인 필요" if codex_status.get("initialized") else "Codex 시작 필요")
-                    )
+                    else ("ChatGPT 연결됨" if codex_status.get("account") else ("Codex 준비됨 · 로그인 필요" if codex_status.get("initialized") else "Codex 시작 필요"))
                 ),
             },
         },
