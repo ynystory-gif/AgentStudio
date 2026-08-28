@@ -1,16 +1,6 @@
 from __future__ import annotations
 
-"""Persist explicit misjudgment-group mappings on generated learning Datasets.
-
-A Dataset historically stored only one representative ``source_case_id`` even though the
-Learning Center groups several similar misjudgment rows into one visible topic.  That made
-post-training visibility depend on fuzzy matching.  This bridge stores the exact group
-snapshot used by a Dataset in ``deployment_json`` so the chain is explicit:
-
-    misjudgment case ids -> Dataset -> PC application
-
-No schema migration is required; the mapping lives in the existing JSON deployment field.
-"""
+"""Persist explicit relational + compatibility mappings on generated learning Datasets."""
 
 import hashlib
 from datetime import datetime
@@ -31,11 +21,11 @@ def _group_key(case_ids: list[str]) -> str:
     return "misgrp:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
 
 
-async def _family_snapshot(source_case_id: str) -> list[str]:
+async def _family_snapshot(source_case_id: str) -> tuple[list[str], str]:
     async with SessionLocal() as session:
         source = await session.get(LlmMisjudgmentCase, source_case_id)
         if source is None:
-            return [source_case_id] if source_case_id else []
+            return ([source_case_id] if source_case_id else []), ""
         source_dict = _case_dict(source)
         rows = (
             await session.execute(
@@ -53,7 +43,7 @@ async def _family_snapshot(source_case_id: str) -> list[str]:
             ids.append(str(row.id))
     if source_case_id and source_case_id not in ids:
         ids.append(source_case_id)
-    return sorted(set(ids))
+    return sorted(set(ids)), str(source.group_id or "")
 
 
 async def _generate_candidate_dataset_with_group_mapping(
@@ -61,20 +51,25 @@ async def _generate_candidate_dataset_with_group_mapping(
     target_count: int,
     provider: str,
 ):
+    # Collection starts with relational-schema sync, so case_row.group_id is normally
+    # available here. Re-read it to avoid carrying a stale ORM instance across sessions.
     dataset = await _original_generate_candidate_dataset(case_row, target_count, provider)
-    group_case_ids = await _family_snapshot(str(case_row.id))
+    group_case_ids, relational_group_id = await _family_snapshot(str(case_row.id))
+    dataset.group_id = relational_group_id
+
+    # Keep legacy JSON during migration, but relational group_id/group-case rows are now
+    # authoritative for new data.
     deployment = dict(dataset.deployment_json or {})
     deployment.update({
         "source_case_id": str(case_row.id),
         "source_group_case_ids": group_case_ids,
         "source_group_key": _group_key(group_case_ids),
+        "relational_group_id": relational_group_id,
         "source_group_mapped_at": datetime.utcnow().isoformat(),
-        "source_group_mapping_version": 1,
+        "source_group_mapping_version": 3,
     })
     dataset.deployment_json = deployment
     return dataset
 
 
-# The problem-collection job resolves this module global at runtime.  main imports this
-# bridge after the Teacher bridge, so the wrapper preserves the Teacher implementation.
 collection._generate_candidate_dataset = _generate_candidate_dataset_with_group_mapping
