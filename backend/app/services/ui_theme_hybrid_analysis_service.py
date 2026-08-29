@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 
-from app.services.ui_theme_browser_analysis_service import analyze_rendered_theme_layout
+from app.services.ui_theme_browser_process_service import analyze_rendered_theme_layout
 from app.services.ui_theme_fetch_context_service import analyze_theme_source_context, fetch_theme_source_context
 from app.services.ui_theme_killable_process_service import run_theme_worker
 
@@ -59,7 +59,6 @@ def _apply_layout_convenience(analysis: dict, contract: dict) -> None:
 
 
 async def _analyze_static_theme(url: str) -> dict:
-    """One network pass + two killable worker processes for static Theme analysis."""
     context = await fetch_theme_source_context(url)
     analysis = await analyze_theme_source_context(context)
     contract = await run_theme_worker(
@@ -87,12 +86,6 @@ async def _analyze_static_theme(url: str) -> dict:
 
 
 async def analyze_theme_hybrid(url: str) -> dict:
-    """Fast static pass plus bounded rendered-CDP pass.
-
-    Every CPU-heavy regex and synchronous Playwright step executes in a disposable
-    process, so cancellation/timeout can actually terminate the work instead of leaving
-    a non-daemon worker thread alive inside FastAPI.
-    """
     try:
         analysis=await asyncio.wait_for(_analyze_static_theme(url),timeout=_STATIC_TIMEOUT_SECONDS)
     except Exception as exc:
