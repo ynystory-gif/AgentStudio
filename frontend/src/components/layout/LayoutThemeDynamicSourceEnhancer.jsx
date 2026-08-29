@@ -23,7 +23,7 @@ function ensureStyle(){
   .ui-layout-dynamic-section{display:grid;gap:7px}.ui-layout-dynamic-title{display:flex;align-items:center;justify-content:space-between;gap:8px}.ui-layout-dynamic-title strong{font-size:11px;color:#b8d1e7}.ui-layout-dynamic-title button{padding:5px 9px}
   .ui-layout-dynamic-row{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center}.ui-layout-dynamic-row.image{grid-template-columns:minmax(0,1fr) 150px auto}.ui-layout-dynamic-row input[type=text],.ui-layout-dynamic-row select{width:100%;min-width:0}.ui-layout-dynamic-row input[type=file]{width:100%;font-size:11px;color:#9eb4c8}.ui-layout-dynamic-row button.remove{min-width:34px;color:#f0a0a0}
   .ui-layout-dynamic-status{font-size:10px;color:#91a8bc;min-height:16px}.ui-layout-dynamic-status.error{color:#ff9b9b}.ui-layout-dynamic-status.ok{color:#7ee2a8}
-  .ui-layout-dynamic-progress{display:none;border:1px solid #294258;border-radius:8px;background:#09131c;padding:9px;gap:7px}.ui-layout-dynamic-progress.active{display:grid}.ui-layout-dynamic-progress-head{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:10px}.ui-layout-dynamic-progress-head strong{color:#c7def1;font-size:11px}.ui-layout-dynamic-progress-head span{color:#89a7bd;font-variant-numeric:tabular-nums}.ui-layout-dynamic-progress-track{height:10px;border-radius:999px;background:#172838;overflow:hidden;position:relative}.ui-layout-dynamic-progress-bar{height:100%;width:0%;min-width:0;border-radius:999px;background:linear-gradient(90deg,#2d8cff,#65b8ff,#2d8cff);background-size:200% 100%;transition:width .28s ease;animation:agentstudio-theme-progress-stripe 1.2s linear infinite}.ui-layout-dynamic-progress.done .ui-layout-dynamic-progress-bar{animation:none}.ui-layout-dynamic-progress-message{font-size:10px;color:#a8c0d4;white-space:normal;word-break:break-word;line-height:1.45}.ui-layout-dynamic-progress-stage{font-size:9px;color:#6f8ca2;text-transform:uppercase;letter-spacing:.04em}
+  .ui-layout-dynamic-progress{display:none;border:1px solid #294258;border-radius:8px;background:#09131c;padding:9px;gap:7px}.ui-layout-dynamic-progress.active{display:grid}.ui-layout-dynamic-progress.warning{border-color:#8d642c;background:#17120a}.ui-layout-dynamic-progress-head{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:10px}.ui-layout-dynamic-progress-head strong{color:#c7def1;font-size:11px}.ui-layout-dynamic-progress-head span{color:#89a7bd;font-variant-numeric:tabular-nums}.ui-layout-dynamic-progress-track{height:10px;border-radius:999px;background:#172838;overflow:hidden;position:relative}.ui-layout-dynamic-progress-bar{height:100%;width:0%;min-width:0;border-radius:999px;background:linear-gradient(90deg,#2d8cff,#65b8ff,#2d8cff);background-size:200% 100%;transition:width .28s ease;animation:agentstudio-theme-progress-stripe 1.2s linear infinite}.ui-layout-dynamic-progress.done .ui-layout-dynamic-progress-bar{animation:none}.ui-layout-dynamic-progress-message{font-size:10px;color:#a8c0d4;white-space:normal;word-break:break-word;line-height:1.45}.ui-layout-dynamic-progress-stage{font-size:9px;color:#6f8ca2;text-transform:uppercase;letter-spacing:.04em}.ui-layout-dynamic-progress-meta{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:9px;color:#7894aa}.ui-layout-dynamic-progress-warning{display:none;padding:7px 8px;border-radius:6px;background:#32220c;color:#ffc66d;font-size:10px;line-height:1.4}.ui-layout-dynamic-progress.warning .ui-layout-dynamic-progress-warning{display:block}.ui-layout-dynamic-progress-actions{display:flex;justify-content:flex-end}.ui-layout-dynamic-cancel{display:none;padding:5px 10px;border:1px solid #71454b;background:#241419;color:#ffb2b7;border-radius:6px}.ui-layout-dynamic-progress.active .ui-layout-dynamic-cancel{display:inline-flex}.ui-layout-dynamic-progress.done .ui-layout-dynamic-cancel{display:none}.ui-layout-dynamic-cancel:disabled{opacity:.55;cursor:not-allowed}
   @keyframes agentstudio-theme-progress-stripe{0%{background-position:0 0}100%{background-position:200% 0}}
   .ui-layout-wireframe.agentstudio-phone-wireframe{width:118px!important;max-width:118px!important;height:226px!important;min-height:226px!important;aspect-ratio:9/18!important;margin:8px auto!important;border:6px solid #172331!important;border-radius:24px!important;box-shadow:0 8px 22px rgba(0,0,0,.36)!important;overflow:hidden!important;position:relative!important}
   .ui-layout-wireframe.agentstudio-phone-wireframe:before{content:'';position:absolute;z-index:10;top:4px;left:50%;transform:translateX(-50%);width:34px;height:5px;border-radius:999px;background:#172331;opacity:.95}
@@ -83,42 +83,62 @@ const elapsedText=start=>{
   return `${mm}:${ss}`
 }
 
-function setProgress(host,pct,message,stage,start,{done=false,error=false}={}){
+function setProgress(host,pct,message,stage,start,{done=false,error=false,warning=false,stalledSeconds=0,urlTimeout=45,jobTimeout=300,canCancel=true}={}){
   const box=host.querySelector('[data-analysis-progress]')
   const bar=host.querySelector('[data-analysis-progress-bar]')
   const percent=host.querySelector('[data-analysis-progress-percent]')
   const msg=host.querySelector('[data-analysis-progress-message]')
   const stageEl=host.querySelector('[data-analysis-progress-stage]')
+  const heartbeat=host.querySelector('[data-analysis-heartbeat]')
+  const limits=host.querySelector('[data-analysis-limits]')
+  const warn=host.querySelector('[data-analysis-progress-warning]')
+  const cancel=host.querySelector('[data-analysis-cancel]')
   if(!box||!bar||!percent||!msg||!stageEl)return
   const value=Math.max(0,Math.min(100,Math.round(Number(pct)||0)))
   box.classList.add('active')
   box.classList.toggle('done',done)
+  box.classList.toggle('warning',warning&&!done&&!error)
   box.style.borderColor=error?'#6f3030':''
   bar.style.width=`${value}%`
-  percent.textContent=`${value}% · ${elapsedText(start)}`
+  percent.textContent=`${value}% · 경과 ${elapsedText(start)}`
   msg.textContent=message||'분석 중입니다.'
   stageEl.textContent=stage||'ANALYSIS'
+  if(heartbeat)heartbeat.textContent=`마지막 진행 갱신 ${Math.max(0,Number(stalledSeconds)||0)}초 전`
+  if(limits)limits.textContent=`URL 제한 ${urlTimeout}초 · 전체 제한 ${Math.round(jobTimeout/60)}분`
+  if(warn)warn.textContent=`${Math.max(0,Number(stalledSeconds)||0)}초 동안 진행 단계가 갱신되지 않았습니다. 외부 사이트 응답 지연일 수 있습니다. 45초 URL 제한 또는 5분 전체 제한 후 자동으로 다음 처리/중단됩니다.`
+  if(cancel){cancel.disabled=!canCancel||done;cancel.textContent=canCancel?'작업 취소':'취소 처리 중...'}
 }
 
-async function waitForJob(host,job,start){
+async function waitForJob(host,job,start,state){
   let current=job
   let displayed=Math.max(12,12+Number(current?.progress||0)*.88)
-  while(current&& !['completed','failed'].includes(String(current.status||''))){
+  while(current&& !['completed','failed','cancelled'].includes(String(current.status||''))){
     const actual=Math.max(12,12+Number(current.progress||0)*.88)
     displayed=Math.max(displayed,actual)
-    // The striped bar is the activity indicator. A small bounded nudge makes a
-    // long single-URL network pass visibly alive without pretending it completed.
-    displayed=Math.min(96,Math.max(actual,displayed+0.35))
-    setProgress(host,displayed,current.message||'통합 분석이 진행 중입니다.',current.stage||'analysis',start)
-    await sleep(350)
+    displayed=Math.min(96,Math.max(actual,displayed+0.2))
+    const stalled=Number(current.stalled_seconds||0)
+    setProgress(host,displayed,current.message||'통합 분석이 진행 중입니다.',current.stage||'analysis',start,{
+      warning:Boolean(current.stalled),
+      stalledSeconds:stalled,
+      urlTimeout:Number(current.url_timeout_seconds||45),
+      jobTimeout:Number(current.job_timeout_seconds||300),
+      canCancel:Boolean(current.can_cancel),
+    })
+    state.jobId=current.job_id||state.jobId
+    await sleep(500)
     current=await api(`/ui-themes/import-dynamic/jobs/${encodeURIComponent(job.job_id)}`)
   }
+  state.jobId=''
   if(!current)throw new Error('Theme 통합 분석 작업 상태를 확인할 수 없습니다.')
+  if(current.status==='cancelled'){
+    setProgress(host,Math.max(1,displayed),current.message||'작업이 취소되었습니다.','cancelled',start,{error:false,done:true,canCancel:false})
+    throw new Error(current.message||'통합 분석 작업이 취소되었습니다.')
+  }
   if(current.status==='failed'){
-    setProgress(host,Math.max(1,displayed),current.error||current.message||'통합 분석 저장에 실패했습니다.','failed',start,{error:true})
+    setProgress(host,Math.max(1,displayed),current.error||current.message||'통합 분석 저장에 실패했습니다.',current.stage||'failed',start,{error:true,done:true,canCancel:false})
     throw new Error(current.error||current.message||'통합 분석 저장에 실패했습니다.')
   }
-  setProgress(host,100,current.message||'Theme 저장이 완료되었습니다.','completed',start,{done:true})
+  setProgress(host,100,current.message||'Theme 저장이 완료되었습니다.','completed',start,{done:true,canCancel:false})
   return current.result||current
 }
 
@@ -143,18 +163,28 @@ function install(panel){
   const countBadge=sourceHead?.querySelector('span')
   if(countBadge)countBadge.style.display='none'
 
-  const state={urls:[''],files:[null],roles:['default'],busy:false}
+  const state={urls:[''],files:[null],roles:['default'],busy:false,jobId:'',cancelRequested:false}
   const host=document.createElement('div');host.className='ui-layout-dynamic-source'
-  host.innerHTML=`<div class="ui-layout-dynamic-head"><b>동적 스타일 참고 자료</b><span>URL/이미지는 필요한 만큼 추가하여 통합 분석합니다.</span></div><div class="ui-layout-dynamic-section"><div class="ui-layout-dynamic-title"><strong>웹사이트 URL</strong><button type="button" data-add-url>＋ URL 추가</button></div><div data-dynamic-urls></div></div><div class="ui-layout-dynamic-section"><div class="ui-layout-dynamic-title"><strong>화면 캡처 이미지</strong><button type="button" data-add-image>＋ 이미지 추가</button></div><div data-dynamic-images></div></div><div class="ui-layout-dynamic-progress" data-analysis-progress><div class="ui-layout-dynamic-progress-head"><strong>통합 분석 · 저장 진행률</strong><span data-analysis-progress-percent>0% · 00:00</span></div><div class="ui-layout-dynamic-progress-track"><div class="ui-layout-dynamic-progress-bar" data-analysis-progress-bar></div></div><div class="ui-layout-dynamic-progress-message" data-analysis-progress-message>대기 중</div><div class="ui-layout-dynamic-progress-stage" data-analysis-progress-stage>READY</div></div><div class="ui-layout-dynamic-status"></div>`
+  host.innerHTML=`<div class="ui-layout-dynamic-head"><b>동적 스타일 참고 자료</b><span>URL/이미지는 필요한 만큼 추가하여 통합 분석합니다.</span></div><div class="ui-layout-dynamic-section"><div class="ui-layout-dynamic-title"><strong>웹사이트 URL</strong><button type="button" data-add-url>＋ URL 추가</button></div><div data-dynamic-urls></div></div><div class="ui-layout-dynamic-section"><div class="ui-layout-dynamic-title"><strong>화면 캡처 이미지</strong><button type="button" data-add-image>＋ 이미지 추가</button></div><div data-dynamic-images></div></div><div class="ui-layout-dynamic-progress" data-analysis-progress><div class="ui-layout-dynamic-progress-head"><strong>통합 분석 · 저장 진행률</strong><span data-analysis-progress-percent>0% · 경과 00:00</span></div><div class="ui-layout-dynamic-progress-track"><div class="ui-layout-dynamic-progress-bar" data-analysis-progress-bar></div></div><div class="ui-layout-dynamic-progress-message" data-analysis-progress-message>대기 중</div><div class="ui-layout-dynamic-progress-stage" data-analysis-progress-stage>READY</div><div class="ui-layout-dynamic-progress-meta"><span data-analysis-heartbeat>마지막 진행 갱신 0초 전</span><span data-analysis-limits>URL 제한 45초 · 전체 제한 5분</span></div><div class="ui-layout-dynamic-progress-warning" data-analysis-progress-warning></div><div class="ui-layout-dynamic-progress-actions"><button type="button" class="ui-layout-dynamic-cancel" data-analysis-cancel>작업 취소</button></div></div><div class="ui-layout-dynamic-status"></div>`
   const themeNameLabel=labels.find(label=>label.querySelector('span')?.textContent?.includes('Theme 이름'))
   if(themeNameLabel?.parentElement===panel)themeNameLabel.insertAdjacentElement('afterend',host);else panel.insertBefore(host,panel.children[1]||null)
   const status=host.querySelector('.ui-layout-dynamic-status')
   if(!status)return
   render(host,state,status)
 
-  host.addEventListener('click',event=>{
+  host.addEventListener('click',async event=>{
     const target=event.target
-    if(!(target instanceof HTMLElement)||state.busy)return
+    if(!(target instanceof HTMLElement))return
+    if(target.closest('[data-analysis-cancel]')){
+      if(!state.busy||!state.jobId||state.cancelRequested)return
+      state.cancelRequested=true
+      const cancelButton=host.querySelector('[data-analysis-cancel]')
+      if(cancelButton){cancelButton.disabled=true;cancelButton.textContent='취소 처리 중...'}
+      status.textContent='통합 분석 작업 취소를 요청했습니다.';status.className='ui-layout-dynamic-status'
+      try{await api(`/ui-themes/import-dynamic/jobs/${encodeURIComponent(state.jobId)}/cancel`,{method:'POST'})}catch(error){state.cancelRequested=false;status.textContent=String(error?.message||error);status.className='ui-layout-dynamic-status error'}
+      return
+    }
+    if(state.busy)return
     if(target.closest('[data-add-url]')){state.urls.push('');render(host,state,status);return}
     if(target.closest('[data-add-image]')){state.files.push(null);state.roles.push('default');render(host,state,status);return}
     const ru=target.closest('[data-remove-url]');if(ru&&state.urls.length>1){state.urls.splice(Number(ru.dataset.removeUrl),1);render(host,state,status);return}
@@ -171,29 +201,30 @@ function install(panel){
     const name=String(nameInput?.value||'').trim();const urls=state.urls.map(x=>x.trim()).filter(Boolean);const selected=state.files.map((file,index)=>({file,index})).filter(x=>x.file)
     if(!name){status.textContent='Theme 이름을 입력하세요.';status.className='ui-layout-dynamic-status error';return}
     if(!urls.length&&!selected.length){status.textContent='URL 또는 이미지를 하나 이상 추가하세요.';status.className='ui-layout-dynamic-status error';return}
-    state.busy=true
+    state.busy=true;state.jobId='';state.cancelRequested=false
     const started=Date.now()
     if(action){action.disabled=true;action.textContent='통합 분석·저장 중...'}
     panel.querySelectorAll('[data-add-url],[data-add-image],[data-remove-url],[data-remove-image],input,select').forEach(el=>{if(el!==nameInput)el.disabled=true})
     try{
       const images=[]
-      setProgress(host,2,'통합 분석 작업을 준비하고 있습니다.','prepare',started)
+      setProgress(host,2,'통합 분석 작업을 준비하고 있습니다.','prepare',started,{canCancel:false})
       for(let i=0;i<selected.length;i++){
         const pct=2+Math.round(((i+1)/Math.max(1,selected.length))*10)
-        setProgress(host,pct,`화면 캡처 전처리 중 ${i+1}/${selected.length} · ${selected[i].file.name}`,'image_prepare',started)
+        setProgress(host,pct,`화면 캡처 전처리 중 ${i+1}/${selected.length} · ${selected[i].file.name}`,'image_prepare',started,{canCancel:false})
         images.push(await imageReference(selected[i].file,state.roles[selected[i].index]||'default'))
       }
-      setProgress(host,12,`URL ${urls.length}개 · 이미지 ${images.length}개 통합 분석 작업을 시작합니다.`,'queue',started)
-      status.textContent='통합 분석·저장이 진행 중입니다. 아래 진행률에서 현재 단계를 확인할 수 있습니다.';status.className='ui-layout-dynamic-status'
+      setProgress(host,12,`URL ${urls.length}개 · 이미지 ${images.length}개 통합 분석 작업을 시작합니다.`,'queue',started,{canCancel:false})
+      status.textContent='통합 분석·저장이 진행 중입니다. 진행률, 마지막 갱신 시각과 제한시간을 확인할 수 있습니다.';status.className='ui-layout-dynamic-status'
       const job=await api('/ui-themes/import-dynamic/jobs',{method:'POST',body:JSON.stringify({name,urls,images,scope:'GLOBAL'})})
-      const result=await waitForJob(host,job,started)
+      state.jobId=job?.job_id||''
+      const result=await waitForJob(host,job,started,state)
       status.textContent=result?.message||'Theme 저장이 완료되었습니다.';status.className='ui-layout-dynamic-status ok'
       window.setTimeout(()=>window.location.reload(),900)
     }catch(error){
       status.textContent=String(error?.message||error);status.className='ui-layout-dynamic-status error'
       const box=host.querySelector('[data-analysis-progress]');if(box)box.style.borderColor='#6f3030'
     }finally{
-      state.busy=false
+      state.busy=false;state.jobId='';state.cancelRequested=false
       if(action){action.disabled=false;action.textContent='분석 후 Theme 저장'}
       panel.querySelectorAll('[data-add-url],[data-add-image],[data-remove-url],[data-remove-image],input,select').forEach(el=>{el.disabled=false})
       render(host,state,status)
