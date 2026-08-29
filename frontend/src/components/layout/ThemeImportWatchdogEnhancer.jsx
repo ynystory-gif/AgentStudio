@@ -1,6 +1,17 @@
 import { useEffect } from 'react'
 
 const MAX_SECONDS=180
+const MISSING_BOX_GRACE_MS=5000
+
+// Module-level runtime deliberately survives React StrictMode mount/unmount cycles and
+// AuthGate/layout rerenders. The elapsed clock is UX state and must not be rebuilt from
+// each backend polling response or from a newly-created progress DOM node.
+const runtime={
+  startedAt:0,
+  lastSeenAt:0,
+  active:false,
+  timeoutHandled:false,
+}
 
 function parseElapsed(text=''){
   const match=String(text).match(/경과\s+(\d{1,3}):(\d{2})/)
@@ -11,53 +22,69 @@ function formatElapsed(seconds){
   const value=Math.max(0,Math.floor(seconds||0))
   return `${String(Math.floor(value/60)).padStart(2,'0')}:${String(value%60).padStart(2,'0')}`
 }
+function resetRuntime(){
+  runtime.startedAt=0
+  runtime.lastSeenAt=0
+  runtime.active=false
+  runtime.timeoutHandled=false
+}
 
 export function ThemeImportWatchdogEnhancer(){
   useEffect(()=>{
-    let startAt=0
-    let activeBox=null
-    let timeoutHandled=false
-
-    const reset=()=>{startAt=0;activeBox=null;timeoutHandled=false}
     const tick=()=>{
+      const now=Date.now()
       const box=document.querySelector('[data-analysis-progress].active:not(.done)')
-      if(!box){reset();return}
-      if(activeBox!==box){
-        activeBox=box
+
+      if(!box){
+        // React can briefly replace the modal/progress subtree. Do not reset the clock
+        // immediately; otherwise an ongoing job can repeatedly jump back or freeze.
+        if(runtime.active && runtime.lastSeenAt && now-runtime.lastSeenAt>MISSING_BOX_GRACE_MS){
+          resetRuntime()
+        }
+        return
+      }
+
+      if(!runtime.active){
         const percent=box.querySelector('[data-analysis-progress-percent]')
         const already=parseElapsed(percent?.textContent||'')
-        startAt=Date.now()-already*1000
-        timeoutHandled=false
+        runtime.startedAt=now-already*1000
+        runtime.active=true
+        runtime.timeoutHandled=false
       }
-      if(!startAt)startAt=Date.now()
-      const elapsed=Math.max(0,Math.floor((Date.now()-startAt)/1000))
+      if(!runtime.startedAt)runtime.startedAt=now
+      runtime.lastSeenAt=now
+
+      const elapsed=Math.max(0,Math.floor((now-runtime.startedAt)/1000))
       const percent=box.querySelector('[data-analysis-progress-percent]')
       if(percent){
         const pct=(String(percent.textContent||'').match(/(\d{1,3})%/)||[])[1]||'0'
         percent.textContent=`${pct}% · 경과 ${formatElapsed(elapsed)}`
       }
+
       const heartbeat=box.querySelector('[data-analysis-heartbeat]')
-      if(heartbeat&&elapsed>=60&&!String(heartbeat.textContent||'').includes('브라우저 Watchdog')){
-        const current=String(heartbeat.textContent||'').trim()
-        heartbeat.textContent=`${current}${current?' · ':''}브라우저 Watchdog 정상 동작 중`
+      if(heartbeat&&elapsed>=30){
+        const backendText=String(heartbeat.textContent||'').replace(/\s*·\s*프론트 타이머[^·]*/g,'').trim()
+        heartbeat.textContent=`${backendText}${backendText?' · ':''}프론트 타이머 ${formatElapsed(elapsed)} 정상 동작 중`
       }
-      if(elapsed<MAX_SECONDS||timeoutHandled)return
-      timeoutHandled=true
+
+      if(elapsed<MAX_SECONDS||runtime.timeoutHandled)return
+      runtime.timeoutHandled=true
 
       const warning=box.querySelector('[data-analysis-progress-warning]')
       if(warning){
-        warning.textContent='전체 제한 3분을 초과했습니다. 서버 응답 여부와 관계없이 화면 작업을 시간 초과로 전환하고 취소를 요청합니다.'
+        warning.textContent='전체 제한 3분을 초과했습니다. Backend Hard Timeout과 별개로 화면도 시간 초과 상태로 전환하고 취소를 요청합니다.'
         warning.style.display='block'
       }
       box.classList.add('warning')
       const message=box.querySelector('[data-analysis-progress-message]')
-      if(message)message.textContent='전체 통합 분석 제한시간 3분을 초과했습니다. 작업 취소를 요청했습니다.'
+      if(message)message.textContent='전체 통합 분석 제한시간 3분을 초과했습니다. Backend 종료 상태를 확인하고 작업 취소를 요청합니다.'
       const stage=box.querySelector('[data-analysis-progress-stage]')
       if(stage)stage.textContent='CLIENT_TIMEOUT'
       const cancel=box.querySelector('[data-analysis-cancel]')
       if(cancel&&!cancel.disabled){
         try{cancel.click()}catch{}
       }
+
       window.setTimeout(()=>{
         if(!box.isConnected||box.classList.contains('done'))return
         box.classList.add('done')
@@ -67,7 +94,9 @@ export function ThemeImportWatchdogEnhancer(){
       },1500)
     }
 
-    const timer=window.setInterval(tick,1000)
+    // 250ms makes the visible seconds stable even when backend polling is delayed.
+    // The displayed value still changes only once per second because it is floored.
+    const timer=window.setInterval(tick,250)
     tick()
     return()=>window.clearInterval(timer)
   },[])
