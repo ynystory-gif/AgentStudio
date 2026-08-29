@@ -15,8 +15,15 @@ router = APIRouter(prefix="/learning", tags=["LLM Learning"])
 
 @router.post("/full-learning-apply-job")
 async def full_learning_apply_job():
-    """Rebuild the single current-PC cumulative model from every usable shared Dataset."""
+    """Rebuild the prompt/curriculum model only while no merged weight model is active."""
     try:
+        weight_state = await get_active_weight_model_status()
+        if weight_state.get("weight_model_active"):
+            raise ValueError(
+                "현재 PC는 실제 QLoRA 가중치가 Merge된 theanova-learn:latest를 사용 중입니다. "
+                "기존 '모두 학습 적용'은 이 독립 모델을 덮어쓸 수 있으므로 차단했습니다. "
+                "새 Dataset은 '독립 모델 재학습'으로 반영하세요."
+            )
         return await start_full_learning_apply_job()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
