@@ -23,6 +23,8 @@ import app.services.learning_teacher_bridge  # noqa: F401
 import app.services.learning_base_model_auto_bridge  # noqa: F401
 # Hide exact Dataset source cases already applied on the current PC before routes bind the function.
 import app.services.learning_visibility_bridge  # noqa: F401
+# Bind the static + Chrome CDP Theme analyzer before dynamic Theme routes import its function.
+import app.services.ui_theme_hybrid_bridge  # noqa: F401
 from app.api.routes import router
 from app.api.learning_diagnostics_routes import router as learning_diagnostics_router
 from app.api.learning_routes import router as learning_router
