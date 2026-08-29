@@ -18,7 +18,10 @@ _MAX_HTML_BYTES = 1_000_000
 _MAX_CSS_BYTES = 500_000
 _MAX_STYLESHEETS = 6
 _CSS_FETCH_CONCURRENCY = 3
-_STATIC_WORKER_TIMEOUT_SECONDS = 28
+# Linear/modern Next.js sites can legitimately need more than 28 seconds for the
+# regex/token pass. Keep this below the 100-second per-URL budget so Layout/CDP still
+# has time to run, while the worker remains killable on timeout.
+_STATIC_WORKER_TIMEOUT_SECONDS = 45
 
 
 def _stylesheet_urls(html: str, final_url: str) -> list[str]:
@@ -116,5 +119,6 @@ async def analyze_theme_source_context(context: dict) -> dict:
         "css_concurrency": int(context.get("css_concurrency") or 0),
         "fetch_warnings": list(context.get("warnings") or []),
         "worker_mode": "KILLABLE_PROCESS",
+        "worker_timeout_seconds": _STATIC_WORKER_TIMEOUT_SECONDS,
     }
     return analysis
