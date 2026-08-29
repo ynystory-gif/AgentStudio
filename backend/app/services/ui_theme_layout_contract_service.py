@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import html as html_lib
 import re
-from urllib.parse import urljoin
 
-import httpx
-
-from app.services.ui_theme_service import _safe_get, analyze_theme_from_url, validate_public_theme_url
+from app.services.ui_theme_fetch_context_service import (
+    analyze_theme_source_context,
+    fetch_theme_source_context,
+)
 
 
 _DRAWER_SELECTOR_TOKENS = (
@@ -146,8 +146,8 @@ def build_layout_contract(html: str, css_text: str) -> dict:
     header_detected = bool(re.search(r"<header\b", source, re.IGNORECASE))
     menu_items = _extract_menu_items(source)
     return {
-        "version": 1,
-        "source": "HTML_CSS_LAYOUT_ANALYSIS",
+        "version": 2,
+        "source": "SHARED_HTML_CSS_LAYOUT_ANALYSIS",
         "header": {"detected": header_detected},
         "desktop": {"sidebar_present": aside_detected},
         "mobile": {
@@ -169,47 +169,19 @@ def build_layout_contract(html: str, css_text: str) -> dict:
 
 
 async def analyze_theme_with_layout_contract(url: str) -> dict:
-    """Analyze design tokens plus actual navigation/layout behavior from the same public URL.
+    """Analyze Theme + interaction + layout from one shared network context.
 
-    Network work remains async. CPU-heavy HTML/CSS regex analysis is moved to a worker
-    thread so the FastAPI event loop stays responsive and asyncio timeouts/cancellation
-    can still fire while large stylesheets are being inspected.
+    The HTML is fetched once. Only rel=stylesheet resources are selected and up to six
+    CSS files are downloaded with bounded concurrency. Theme token analysis and layout
+    analysis then reuse the same HTML/CSS text, eliminating the previous second URL pass.
+    CPU-heavy regex work is kept off the FastAPI event loop.
     """
-    analysis = await analyze_theme_from_url(url)
-    target = await validate_public_theme_url(url)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36 THEANOVA-AgentStudio-LayoutImporter/5.429",
-        "Accept": "text/html,application/xhtml+xml,text/css,*/*;q=0.6",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
-    }
-    html = ""
-    css_parts: list[str] = []
-    fetched_css = 0
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=7.0), headers=headers) as client:
-            response, final_url = await _safe_get(client, target)
-            html = response.text[:1_000_000]
-            css_parts.append(html)
-            hrefs = re.findall(r"<link[^>]+href=[\"']([^\"']+)[\"'][^>]*>", html, re.IGNORECASE)
-            for href in list(dict.fromkeys(hrefs))[:12]:
-                css_url = urljoin(final_url, href)
-                try:
-                    css_response, _ = await _safe_get(client, css_url)
-                    content_type = (css_response.headers.get("content-type") or "").casefold()
-                    if "css" not in content_type and not css_url.casefold().split("?", 1)[0].endswith(".css"):
-                        continue
-                    css_parts.append(css_response.text[:500_000])
-                    fetched_css += 1
-                    if fetched_css >= 6:
-                        break
-                except Exception:
-                    continue
-    except Exception:
-        html = ""
-        css_parts = []
-
-    css_text = "\n".join(css_parts)
+    context = await fetch_theme_source_context(url)
+    analysis = await analyze_theme_source_context(context)
+    html = str(context.get("html") or "")
+    css_text = str(context.get("css_text") or "")
     contract = await asyncio.to_thread(build_layout_contract, html, css_text)
+
     layout = dict(analysis.get("layout_rules") or {})
     layout["layoutContract"] = contract
     layout["mobileDrawerSide"] = ((contract.get("mobile") or {}).get("drawer") or {}).get("side", "left")
@@ -217,8 +189,14 @@ async def analyze_theme_with_layout_contract(url: str) -> dict:
     layout["desktopSidebarPresent"] = bool((contract.get("desktop") or {}).get("sidebar_present"))
     layout["sourceNavigationItems"] = list((contract.get("navigation") or {}).get("items") or [])
     analysis["layout_rules"] = layout
+
     source_meta = dict(analysis.get("source_meta") or {})
     source_meta["layout_contract"] = contract
-    source_meta["layout_css_files"] = fetched_css
+    source_meta["layout_css_files"] = int(context.get("css_files") or 0)
+    source_meta["network_passes"] = 1
+    source_meta["stylesheet_only"] = True
+    source_meta["parallel_stylesheet_fetch"] = True
+    source_meta["stylesheet_candidates"] = len(context.get("stylesheet_urls") or [])
+    source_meta["fetch_warnings"] = list(context.get("warnings") or [])
     analysis["source_meta"] = source_meta
     return analysis
