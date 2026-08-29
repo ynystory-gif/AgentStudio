@@ -43,7 +43,6 @@ export function AuthGate({children}:{children:ReactNode}){
         const r=await withTimeout(api<any>('/auth/me'))
         if(disposed)return
         setMember(r.member)
-        // PC status is useful metadata, but it must never block the application shell.
         void loadPcStatus().catch(()=>{})
       }catch(err){
         clearAuthToken()
@@ -126,7 +125,7 @@ export function AuthGate({children}:{children:ReactNode}){
     e.preventDefault();setBusy(true);setMessage('')
     const fd=new FormData(e.currentTarget)
     try{
-      const r=await withTimeout(api<any>('/auth/login'))
+      const r=await withTimeout(api<any>('/auth/login',{method:'POST',body:JSON.stringify({login_id:fd.get('login_id'),password:fd.get('password'),remember_me:remember})}))
       setAuthToken(r.token,remember);setMember(r.member)
       setPcStatus({current_pc_name:String(r.current_pc_name||''),registered:Boolean(r.current_pc_registered),member_pcs:r.member?.pcs||[]})
     }catch(err){setMessage(String(err))}finally{setBusy(false)}
