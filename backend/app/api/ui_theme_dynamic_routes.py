@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import uuid
 from datetime import datetime
+from typing import Callable
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -8,8 +11,8 @@ from pydantic import BaseModel, Field
 from app.core.database import SessionLocal
 from app.core.machine_identity import current_pc_name
 from app.models.entities import UITheme
-from app.services.ui_theme_layout_contract_service import analyze_theme_with_layout_contract
-from app.services.ui_theme_service import build_rules, merge_theme_analyses
+from app.services.ui_theme_layout_contract_service import apply_layout_contract
+from app.services.ui_theme_service import analyze_theme_from_url, build_rules, merge_theme_analyses
 
 router = APIRouter(prefix="/ui-themes", tags=["UI Theme Dynamic Import"])
 
@@ -30,6 +33,41 @@ class DynamicThemeImportRequest(BaseModel):
     scope: str = "GLOBAL"
 
 
+# Theme import is intentionally an in-memory foreground job. The work itself is
+# short lived and should not survive an AgentStudio restart. The UI polls these
+# records so users can distinguish active analysis from a frozen request.
+_DYNAMIC_IMPORT_JOBS: dict[str, dict] = {}
+_JOB_LIMIT = 50
+
+
+def _job_snapshot(job: dict) -> dict:
+    return {
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "progress": int(job.get("progress") or 0),
+        "stage": job.get("stage") or "",
+        "message": job.get("message") or "",
+        "current": int(job.get("current") or 0),
+        "total": int(job.get("total") or 0),
+        "result": job.get("result"),
+        "error": job.get("error"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+    }
+
+
+def _prune_jobs() -> None:
+    if len(_DYNAMIC_IMPORT_JOBS) <= _JOB_LIMIT:
+        return
+    completed = sorted(
+        (item for item in _DYNAMIC_IMPORT_JOBS.values() if item.get("status") in {"completed", "failed"}),
+        key=lambda item: str(item.get("updated_at") or ""),
+    )
+    while len(_DYNAMIC_IMPORT_JOBS) > _JOB_LIMIT and completed:
+        old = completed.pop(0)
+        _DYNAMIC_IMPORT_JOBS.pop(str(old.get("job_id") or ""), None)
+
+
 def _image_analysis(item: DynamicThemeImageReference) -> dict:
     tokens = dict(item.tokens or {})
     components = dict(item.component_rules or {})
@@ -47,15 +85,16 @@ def _image_analysis(item: DynamicThemeImageReference) -> dict:
         "preview_colors": list(item.preview_colors or []),
         "source_type": "IMAGE",
         "source_label": item.file_name,
+        "file_name": item.file_name,
         "reference_role": item.reference_role or "default",
+        "analysis_source": "IMAGE",
     }
 
 
-@router.post("/import-dynamic")
-async def import_ui_theme_dynamic(req: DynamicThemeImportRequest):
+def _prepare_request(req: DynamicThemeImportRequest) -> tuple[str, list[str], list[DynamicThemeImageReference]]:
     name = str(req.name or "").strip()
     if not name:
-        raise HTTPException(status_code=400, detail="Theme 이름을 입력하세요.")
+        raise ValueError("Theme 이름을 입력하세요.")
 
     urls: list[str] = []
     for raw in req.urls or []:
@@ -63,35 +102,58 @@ async def import_ui_theme_dynamic(req: DynamicThemeImportRequest):
         if value and value not in urls:
             urls.append(value)
     if len(urls) > 20:
-        raise HTTPException(status_code=400, detail="웹사이트 URL은 한 번에 최대 20개까지 분석할 수 있습니다.")
+        raise ValueError("웹사이트 URL은 한 번에 최대 20개까지 분석할 수 있습니다.")
 
     images = list(req.images or [])
     if len(images) > 20:
-        raise HTTPException(status_code=400, detail="화면 캡처 이미지는 한 번에 최대 20개까지 분석할 수 있습니다.")
+        raise ValueError("화면 캡처 이미지는 한 번에 최대 20개까지 분석할 수 있습니다.")
     if not urls and not images:
-        raise HTTPException(status_code=400, detail="웹사이트 URL 또는 화면 캡처 이미지를 하나 이상 추가하세요.")
+        raise ValueError("웹사이트 URL 또는 화면 캡처 이미지를 하나 이상 추가하세요.")
+    return name, urls, images
+
+
+async def _run_dynamic_import(
+    req: DynamicThemeImportRequest,
+    progress: Callable[..., None] | None = None,
+) -> dict:
+    def report(value: int, stage: str, message: str, *, current: int = 0, total: int = 0) -> None:
+        if progress:
+            progress(value, stage, message, current=current, total=total)
+
+    name, urls, images = _prepare_request(req)
+    total_sources = len(urls) + len(images)
+    report(5, "prepare", "참고 자료를 확인하고 있습니다.", total=total_sources)
 
     analyses: list[dict] = []
     warnings: list[str] = []
+    url_count = len(urls)
     for index, url in enumerate(urls, start=1):
+        start = 8
+        span = 57
+        before = start + int(span * (index - 1) / max(1, url_count))
+        report(before, "url_analysis", f"웹사이트 분석 중 {index}/{url_count} · {url}", current=index, total=url_count)
         try:
-            # URL imports now extract design tokens AND an explicit layout/interaction
-            # contract (drawer side/width, overlay, navigation labels, desktop sidebar).
-            analyses.append(await analyze_theme_with_layout_contract(url))
+            analysis = await analyze_theme_from_url(url)
+            analysis = apply_layout_contract(analysis)
+            analyses.append(analysis)
         except Exception as exc:
             warnings.append(f"URL {index} 분석 실패: {url} · {str(exc) or type(exc).__name__}")
+        after = start + int(span * index / max(1, url_count))
+        report(after, "url_analysis", f"웹사이트 분석 완료 {index}/{url_count}", current=index, total=url_count)
 
+    report(68, "image_analysis", f"화면 캡처 분석 결과 {len(images)}개를 통합 준비 중입니다.", current=len(images), total=len(images))
     for image in images:
         if image.tokens:
             analyses.append(_image_analysis(image))
 
     if not analyses:
-        raise HTTPException(status_code=422, detail="추가한 참고 자료를 분석하지 못했습니다. " + " | ".join(warnings[:5]))
+        raise ValueError("추가한 참고 자료를 분석하지 못했습니다. " + " | ".join(warnings[:5]))
 
-    try:
-        merged = merge_theme_analyses(analyses)
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Theme 통합 분석 실패: {str(exc) or type(exc).__name__}") from exc
+    report(76, "merge", "URL/이미지 분석 결과를 하나의 Layout + Theme 규칙으로 통합하고 있습니다.")
+    merged = merge_theme_analyses(analyses)
+    merged = apply_layout_contract(merged, source_analyses=analyses)
+    report(86, "rules", "컴포넌트 상태와 레이아웃 규칙을 정리하고 있습니다.")
+
     tokens = dict(merged.get("tokens") or {})
     component_rules = dict(merged.get("component_rules") or {})
     layout_rules = dict(merged.get("layout_rules") or {})
@@ -119,11 +181,13 @@ async def import_ui_theme_dynamic(req: DynamicThemeImportRequest):
         created_at=now,
         updated_at=now,
     )
+    report(92, "save", "통합 Theme을 데이터베이스에 저장하고 있습니다.")
     async with SessionLocal() as session:
         session.add(row)
         await session.commit()
         await session.refresh(row)
 
+    report(99, "finalize", "저장 결과를 확인하고 있습니다.")
     return {
         "ok": True,
         "theme": {
@@ -142,5 +206,86 @@ async def import_ui_theme_dynamic(req: DynamicThemeImportRequest):
         "url_count": len(urls),
         "image_count": len(images),
         "warnings": warnings,
-        "message": f"URL {len(urls)}개 · 이미지 {len(images)}개 참고 자료의 Layout + Theme + Interaction을 통합 분석해 저장했습니다.",
+        "message": f"URL {len(urls)}개 · 이미지 {len(images)}개 참고 자료를 통합 분석해 Theme을 저장했습니다.",
     }
+
+
+async def _execute_job(job_id: str, req: DynamicThemeImportRequest) -> None:
+    job = _DYNAMIC_IMPORT_JOBS.get(job_id)
+    if not job:
+        return
+
+    def progress(value: int, stage: str, message: str, **extra) -> None:
+        job.update(
+            progress=max(int(job.get("progress") or 0), min(99, int(value))),
+            stage=stage,
+            message=message,
+            updated_at=datetime.utcnow().isoformat(),
+            **extra,
+        )
+
+    try:
+        job.update(status="running", stage="prepare", progress=2, message="통합 분석을 시작합니다.")
+        result = await _run_dynamic_import(req, progress)
+        job.update(
+            status="completed",
+            progress=100,
+            stage="completed",
+            message=result.get("message") or "Theme 저장이 완료되었습니다.",
+            result=result,
+            error=None,
+            updated_at=datetime.utcnow().isoformat(),
+        )
+    except Exception as exc:
+        job.update(
+            status="failed",
+            stage="failed",
+            message="통합 분석 저장에 실패했습니다.",
+            error=str(exc) or type(exc).__name__,
+            updated_at=datetime.utcnow().isoformat(),
+        )
+
+
+@router.post("/import-dynamic/jobs")
+async def start_ui_theme_dynamic_import_job(req: DynamicThemeImportRequest):
+    try:
+        _prepare_request(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _prune_jobs()
+    job_id = uuid.uuid4().hex
+    now = datetime.utcnow().isoformat()
+    _DYNAMIC_IMPORT_JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "queued",
+        "progress": 0,
+        "stage": "queued",
+        "message": "통합 분석 작업을 준비하고 있습니다.",
+        "current": 0,
+        "total": len(req.urls or []) + len(req.images or []),
+        "result": None,
+        "error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    asyncio.create_task(_execute_job(job_id, req))
+    return _job_snapshot(_DYNAMIC_IMPORT_JOBS[job_id])
+
+
+@router.get("/import-dynamic/jobs/{job_id}")
+async def get_ui_theme_dynamic_import_job(job_id: str):
+    job = _DYNAMIC_IMPORT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Theme 통합 분석 작업을 찾을 수 없습니다.")
+    return _job_snapshot(job)
+
+
+@router.post("/import-dynamic")
+async def import_ui_theme_dynamic(req: DynamicThemeImportRequest):
+    """Compatibility endpoint for older frontend builds."""
+    try:
+        return await _run_dynamic_import(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Theme 통합 분석 실패: {str(exc) or type(exc).__name__}") from exc
