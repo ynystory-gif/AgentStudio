@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 
-const MAX_SECONDS=300
+const MAX_SECONDS=180
 
 function parseElapsed(text=''){
   const match=String(text).match(/경과\s+(\d{1,3}):(\d{2})/)
@@ -46,19 +46,18 @@ export function ThemeImportWatchdogEnhancer(){
 
       const warning=box.querySelector('[data-analysis-progress-warning]')
       if(warning){
-        warning.textContent='전체 제한 5분을 초과했습니다. 서버 응답 여부와 관계없이 화면 작업을 시간 초과로 전환하고 취소를 요청합니다.'
+        warning.textContent='전체 제한 3분을 초과했습니다. 서버 응답 여부와 관계없이 화면 작업을 시간 초과로 전환하고 취소를 요청합니다.'
         warning.style.display='block'
       }
       box.classList.add('warning')
       const message=box.querySelector('[data-analysis-progress-message]')
-      if(message)message.textContent='전체 통합 분석 제한시간 5분을 초과했습니다. 작업 취소를 요청했습니다.'
+      if(message)message.textContent='전체 통합 분석 제한시간 3분을 초과했습니다. 작업 취소를 요청했습니다.'
       const stage=box.querySelector('[data-analysis-progress-stage]')
       if(stage)stage.textContent='CLIENT_TIMEOUT'
       const cancel=box.querySelector('[data-analysis-cancel]')
       if(cancel&&!cancel.disabled){
         try{cancel.click()}catch{}
       }
-      // Do not leave the user staring at a frozen running state even if the cancel API is also stalled.
       window.setTimeout(()=>{
         if(!box.isConnected||box.classList.contains('done'))return
         box.classList.add('done')
