@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { api } from '../../api'
 
 const mark = 'data-learning-trace'
+const DATASET_REFRESH_MS = 15000
 
 function codeCell(value, title = '') {
   const td = document.createElement('td')
@@ -48,16 +49,33 @@ export function LearningDatasetTraceEnhancer() {
 
   useEffect(() => {
     let disposed = false
+    let lastRefreshAt = 0
+    let refreshBusy = false
 
-    const refreshDatasets = async () => {
+    const learningDatasetViewOpen = () => {
+      const page = document.querySelector('.llm-learning-page')
+      const table = page?.querySelector('.llm-dataset-table')
+      return page instanceof HTMLElement && table instanceof HTMLTableElement
+    }
+
+    const refreshDatasets = async (force = false) => {
+      if (disposed || refreshBusy || !learningDatasetViewOpen()) return
+      const now = Date.now()
+      if (!force && now - lastRefreshAt < DATASET_REFRESH_MS) return
+      refreshBusy = true
+      lastRefreshAt = now
       try {
         const result = await api('/learning/datasets')
         if (!disposed) datasetsRef.current = Array.isArray(result?.items) ? result.items : []
-      } catch (_) {}
+      } catch (_) {
+        // The core Learning Center owns errors. This optional trace enhancer stays quiet.
+      } finally {
+        refreshBusy = false
+      }
     }
 
     const enhanceDatasetTable = () => {
-      const table = document.querySelector('.llm-dataset-table')
+      const table = document.querySelector('.llm-learning-page .llm-dataset-table')
       if (!(table instanceof HTMLTableElement)) return
       const headRow = table.querySelector('thead tr')
       if (!(headRow instanceof HTMLTableRowElement)) return
@@ -84,12 +102,12 @@ export function LearningDatasetTraceEnhancer() {
     }
 
     const enhanceProblemViewer = () => {
-      const viewer = document.querySelector('.llm-problem-viewer')
+      const viewer = document.querySelector('.llm-learning-page .llm-problem-viewer')
       const table = viewer?.querySelector('.llm-problem-list table')
       if (!(viewer instanceof HTMLElement) || !(table instanceof HTMLTableElement)) return
 
-      const selectedRow = document.querySelector('.llm-dataset-table tbody tr.selected')
-      const allRows = Array.from(document.querySelectorAll('.llm-dataset-table tbody tr'))
+      const selectedRow = document.querySelector('.llm-learning-page .llm-dataset-table tbody tr.selected')
+      const allRows = Array.from(document.querySelectorAll('.llm-learning-page .llm-dataset-table tbody tr'))
       const selectedIndex = selectedRow ? allRows.indexOf(selectedRow) : -1
       const dataset = selectedIndex >= 0 ? (datasetsRef.current[selectedIndex] || {}) : {}
 
@@ -128,18 +146,15 @@ export function LearningDatasetTraceEnhancer() {
       })
     }
 
-    const run = async () => {
-      await refreshDatasets()
+    const tick = () => {
+      if (!learningDatasetViewOpen()) return
+      void refreshDatasets(datasetsRef.current.length === 0)
       enhanceDatasetTable()
       enhanceProblemViewer()
     }
 
-    run()
-    const timer = window.setInterval(() => {
-      enhanceDatasetTable()
-      enhanceProblemViewer()
-      refreshDatasets()
-    }, 1000)
+    tick()
+    const timer = window.setInterval(tick, 1000)
 
     return () => {
       disposed = true
