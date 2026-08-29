@@ -14,6 +14,7 @@ import { LearningDatasetTraceEnhancer } from './components/learning/LearningData
 import { LayoutThemeDynamicSourceEnhancer } from './components/layout/LayoutThemeDynamicSourceEnhancer'
 import { ImportedThemePreviewEnhancer } from './components/layout/ImportedThemePreviewEnhancer'
 import { LargeLayoutPreviewEnhancer } from './components/layout/LargeLayoutPreviewEnhancer'
+import { ThemeImportWatchdogEnhancer } from './components/layout/ThemeImportWatchdogEnhancer'
 import './styles.css'
 import './components/learning/llm-learning.css'
 import './components/learning/learning-case-list-cleanup.css'
@@ -23,6 +24,6 @@ import './components/layout/large-layout-preview.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <AuthGate><App /><LlmLearningCenter /><LearningProblemProgressEnhancer /><LearningPageStateRestoreEnhancer /><LearningFullApplyEnhancer /><LearningWeightFinetuneEnhancer /><LearningModelStackEnhancer /><LearningUnlearnedListEnhancer /><LearningCollectionLimitEnhancer /><LearningDatasetTraceEnhancer /><LayoutThemeDynamicSourceEnhancer /><ImportedThemePreviewEnhancer /><LargeLayoutPreviewEnhancer /></AuthGate>
+    <AuthGate><App /><LlmLearningCenter /><LearningProblemProgressEnhancer /><LearningPageStateRestoreEnhancer /><LearningFullApplyEnhancer /><LearningWeightFinetuneEnhancer /><LearningModelStackEnhancer /><LearningUnlearnedListEnhancer /><LearningCollectionLimitEnhancer /><LearningDatasetTraceEnhancer /><LayoutThemeDynamicSourceEnhancer /><ImportedThemePreviewEnhancer /><LargeLayoutPreviewEnhancer /><ThemeImportWatchdogEnhancer /></AuthGate>
   </React.StrictMode>
 )
