@@ -3,6 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from app.services.learning_apply_job_service import start_full_learning_apply_job
+# Must load before importing the fine-tune functions below. It binds QLoRA work/cache
+# directories to System Admin's saved DEFAULT_TEMP_ROOT / DEFAULT_CACHE_ROOT values.
+import app.services.learning_finetune_paths_bridge  # noqa: F401
 from app.services.learning_finetune_job_service import (
     get_weight_finetune_capability,
     get_weight_finetune_job,
