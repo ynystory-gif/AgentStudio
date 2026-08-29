@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html as html_lib
 import re
 from urllib.parse import urljoin
@@ -168,7 +169,12 @@ def build_layout_contract(html: str, css_text: str) -> dict:
 
 
 async def analyze_theme_with_layout_contract(url: str) -> dict:
-    """Analyze design tokens plus actual navigation/layout behavior from the same public URL."""
+    """Analyze design tokens plus actual navigation/layout behavior from the same public URL.
+
+    Network work remains async. CPU-heavy HTML/CSS regex analysis is moved to a worker
+    thread so the FastAPI event loop stays responsive and asyncio timeouts/cancellation
+    can still fire while large stylesheets are being inspected.
+    """
     analysis = await analyze_theme_from_url(url)
     target = await validate_public_theme_url(url)
     headers = {
@@ -199,11 +205,11 @@ async def analyze_theme_with_layout_contract(url: str) -> dict:
                 except Exception:
                     continue
     except Exception:
-        # Token import has already succeeded. Keep it usable if the second structural pass is blocked.
         html = ""
         css_parts = []
 
-    contract = build_layout_contract(html, "\n".join(css_parts))
+    css_text = "\n".join(css_parts)
+    contract = await asyncio.to_thread(build_layout_contract, html, css_text)
     layout = dict(analysis.get("layout_rules") or {})
     layout["layoutContract"] = contract
     layout["mobileDrawerSide"] = ((contract.get("mobile") or {}).get("drawer") or {}).get("side", "left")
