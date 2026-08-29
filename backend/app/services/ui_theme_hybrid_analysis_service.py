@@ -4,10 +4,12 @@ import asyncio
 from copy import deepcopy
 
 from app.services.ui_theme_browser_analysis_service import analyze_rendered_theme_layout
-from app.services.ui_theme_layout_contract_service import analyze_theme_with_layout_contract as analyze_static_theme
+from app.services.ui_theme_fetch_context_service import analyze_theme_source_context, fetch_theme_source_context
+from app.services.ui_theme_killable_process_service import run_theme_worker
 
 _STATIC_TIMEOUT_SECONDS = 38
 _BROWSER_TIMEOUT_SECONDS = 58
+_LAYOUT_WORKER_TIMEOUT_SECONDS = 20
 
 
 def _merge_contract(static_contract: dict, browser_contract: dict) -> dict:
@@ -23,8 +25,6 @@ def _merge_contract(static_contract: dict, browser_contract: dict) -> dict:
     if b_header.get('detected'):
         merged['header']={**dict(merged.get('header') or {}),**b_header}
 
-    # Rendered desktop layout is authoritative because CSS selectors alone cannot tell
-    # whether an aside/sidebar is actually visible at the target viewport.
     if isinstance(browser.get('desktop'),dict):
         merged['desktop']={**dict(merged.get('desktop') or {}),**dict(browser.get('desktop') or {})}
 
@@ -58,17 +58,43 @@ def _apply_layout_convenience(analysis: dict, contract: dict) -> None:
     analysis['layout_rules']=layout
 
 
-async def analyze_theme_hybrid(url: str) -> dict:
-    """Analyze a public theme URL with a fast static pass and bounded rendered-CDP pass.
+async def _analyze_static_theme(url: str) -> dict:
+    """One network pass + two killable worker processes for static Theme analysis."""
+    context = await fetch_theme_source_context(url)
+    analysis = await analyze_theme_source_context(context)
+    contract = await run_theme_worker(
+        'layout_contract',
+        {
+            'html': str(context.get('html') or ''),
+            'css_text': str(context.get('css_text') or ''),
+        },
+        timeout=_LAYOUT_WORKER_TIMEOUT_SECONDS,
+    )
+    _apply_layout_convenience(analysis, contract)
+    source_meta=dict(analysis.get('source_meta') or {})
+    source_meta.update({
+        'layout_contract':contract,
+        'layout_css_files':int(context.get('css_files') or 0),
+        'network_passes':1,
+        'stylesheet_only':True,
+        'parallel_stylesheet_fetch':True,
+        'stylesheet_candidates':len(context.get('stylesheet_urls') or []),
+        'fetch_warnings':list(context.get('warnings') or []),
+        'layout_worker_mode':'KILLABLE_PROCESS',
+    })
+    analysis['source_meta']=source_meta
+    return analysis
 
-    Static HTML/CSS remains the source for reusable design tokens and interaction CSS.
-    Chrome CDP only supplements facts that require a rendered page: actual visible header,
-    sidebar, responsive drawer direction/width, overlay and rendered navigation items.
-    A browser failure never discards successful static results.
+
+async def analyze_theme_hybrid(url: str) -> dict:
+    """Fast static pass plus bounded rendered-CDP pass.
+
+    Every CPU-heavy regex and synchronous Playwright step executes in a disposable
+    process, so cancellation/timeout can actually terminate the work instead of leaving
+    a non-daemon worker thread alive inside FastAPI.
     """
-    static_error=''
     try:
-        analysis=await asyncio.wait_for(analyze_static_theme(url),timeout=_STATIC_TIMEOUT_SECONDS)
+        analysis=await asyncio.wait_for(_analyze_static_theme(url),timeout=_STATIC_TIMEOUT_SECONDS)
     except Exception as exc:
         static_error=str(exc) or type(exc).__name__
         raise RuntimeError(f'정적 Theme 분석에 실패했습니다: {static_error}') from exc
@@ -92,7 +118,7 @@ async def analyze_theme_hybrid(url: str) -> dict:
         warnings.append(str(browser_result.get('warning')))
     browser_ok=bool(browser_result.get('ok'))
     source_meta.update({
-        'analysis_pipeline':'STATIC_THEN_CHROME_CDP',
+        'analysis_pipeline':'STATIC_KILLABLE_PROCESS_THEN_CHROME_CDP_PROCESS',
         'static_analysis_status':'success',
         'browser_analysis_status':str(browser_result.get('status') or ('success' if browser_ok else 'failed')),
         'browser_analysis_ok':browser_ok,
@@ -100,10 +126,10 @@ async def analyze_theme_hybrid(url: str) -> dict:
         'analysis_completeness':'full' if browser_ok else 'static_only',
         'analysis_warnings':warnings,
         'rendered_layout_contract':browser_contract,
+        'worker_isolation':'PROCESS_TREE_KILLABLE',
     })
     analysis['source_meta']=source_meta
     return analysis
 
 
-# Keep the public name familiar to the dynamic-import route.
 analyze_theme_with_layout_contract=analyze_theme_hybrid
