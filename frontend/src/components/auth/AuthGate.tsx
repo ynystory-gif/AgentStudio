@@ -8,11 +8,14 @@ type PcRow={pc_name:string;host_name:string;os_name:string;last_seen_at:string}
 type CurrentPcStatus={current_pc_name:string;registered:boolean;member_pcs:string[];machine?:PcRow}
 
 const AUTH_BOOT_TIMEOUT_MS=8000
+const AUTH_BOOT_RETRY_DELAYS_MS=[0,1200,2500]
 async function withTimeout<T>(promise:Promise<T>,ms=AUTH_BOOT_TIMEOUT_MS):Promise<T>{
   let timer=0
   try{return await Promise.race([promise,new Promise<T>((_,reject)=>{timer=window.setTimeout(()=>reject(new Error(`로그인 상태 확인이 ${Math.round(ms/1000)}초 안에 완료되지 않았습니다.`)),ms)})])}
   finally{if(timer)window.clearTimeout(timer)}
 }
+const delay=(ms:number)=>new Promise(resolve=>window.setTimeout(resolve,ms))
+const httpStatus=(error:unknown)=>Number((error as {status?:number})?.status||0)
 
 export function AuthGate({children}:{children:ReactNode}){
   const [ready,setReady]=useState(false)
@@ -26,6 +29,8 @@ export function AuthGate({children}:{children:ReactNode}){
   const [pcStatus,setPcStatus]=useState<CurrentPcStatus|null>(null)
   const [profileHost,setProfileHost]=useState<HTMLElement|null>(null)
   const [contentHost,setContentHost]=useState<HTMLElement|null>(null)
+  const [authRetryNonce,setAuthRetryNonce]=useState(0)
+  const [authDelayed,setAuthDelayed]=useState(false)
   const menuRef=useRef<HTMLDivElement|null>(null)
 
   const loadPcStatus=async()=>{
@@ -38,21 +43,49 @@ export function AuthGate({children}:{children:ReactNode}){
     let disposed=false
     const boot=async()=>{
       const token=getAuthToken()
-      if(!token){if(!disposed)setReady(true);return}
-      try{
-        const r=await withTimeout(api<any>('/auth/me'))
+      if(!token){if(!disposed){setAuthDelayed(false);setReady(true)};return}
+      setReady(false);setAuthDelayed(false);setMessage('')
+      let lastError:unknown=null
+      for(let attempt=0;attempt<AUTH_BOOT_RETRY_DELAYS_MS.length;attempt++){
+        if(attempt>0)await delay(AUTH_BOOT_RETRY_DELAYS_MS[attempt])
         if(disposed)return
-        setMember(r.member)
-        void loadPcStatus().catch(()=>{})
-      }catch(err){
-        clearAuthToken()
-        if(!disposed)setMessage(String((err as Error)?.message||err))
-      }finally{
-        if(!disposed)setReady(true)
+        try{
+          const r=await withTimeout(api<any>('/auth/me'))
+          if(disposed)return
+          setMember(r.member)
+          setAuthDelayed(false)
+          setReady(true)
+          void loadPcStatus().catch(()=>{})
+          return
+        }catch(err){
+          lastError=err
+          // Only an explicit 401 proves that the stored token is invalid/expired.
+          // Network errors and timeouts are transient and must never delete the
+          // localStorage token shared by the user's other AgentStudio tabs.
+          if(httpStatus(err)===401){
+            clearAuthToken()
+            if(!disposed){setMember(null);setAuthDelayed(false);setMessage('로그인 세션이 만료되었습니다. 다시 로그인해 주세요.');setReady(true)}
+            return
+          }
+        }
+      }
+      if(!disposed){
+        setMember(null)
+        setAuthDelayed(true)
+        setMessage(`Backend 응답이 지연되어 자동 로그인 상태를 확인하지 못했습니다. 저장된 로그인 정보는 유지했습니다. ${String((lastError as Error)?.message||lastError||'')}`)
+        setReady(true)
       }
     }
     void boot()
     return()=>{disposed=true}
+  },[authRetryNonce])
+
+  useEffect(()=>{
+    const sync=(event:StorageEvent)=>{
+      if(event.key==='theanova.agentstudio.auth.token')setAuthRetryNonce(value=>value+1)
+    }
+    window.addEventListener('storage',sync)
+    return()=>window.removeEventListener('storage',sync)
   },[])
 
   useEffect(()=>{
@@ -78,83 +111,38 @@ export function AuthGate({children}:{children:ReactNode}){
       const target=event.target as HTMLElement
       if(target.closest('.auth-user-dropdown'))return
       event.preventDefault();event.stopPropagation()
-      setMenuOpen(prev=>{
-        const next=!prev
-        if(next)void loadPcStatus().catch(err=>setMessage(String(err)))
-        return next
-      })
+      setMenuOpen(prev=>{const next=!prev;if(next)void loadPcStatus().catch(err=>setMessage(String(err)));return next})
     }
     const onKey=(event:KeyboardEvent)=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();openMenu(event)}}
-    profileHost.addEventListener('click',openMenu,true)
-    profileHost.addEventListener('keydown',onKey,true)
-    return()=>{
-      profileHost.removeEventListener('click',openMenu,true)
-      profileHost.removeEventListener('keydown',onKey,true)
-      profileHost.classList.remove('agentstudio-auth-profile-anchor')
-      profileHost.removeAttribute('role');profileHost.removeAttribute('tabindex')
-    }
+    profileHost.addEventListener('click',openMenu,true);profileHost.addEventListener('keydown',onKey,true)
+    return()=>{profileHost.removeEventListener('click',openMenu,true);profileHost.removeEventListener('keydown',onKey,true);profileHost.classList.remove('agentstudio-auth-profile-anchor');profileHost.removeAttribute('role');profileHost.removeAttribute('tabindex')}
   },[profileHost,member])
 
-  useEffect(()=>{
-    if(!menuOpen)return
-    const close=(event:MouseEvent)=>{
-      const target=event.target as Node
-      if(profileHost?.contains(target)||menuRef.current?.contains(target))return
-      setMenuOpen(false)
-    }
-    window.addEventListener('mousedown',close)
-    return()=>window.removeEventListener('mousedown',close)
-  },[menuOpen,profileHost])
-
-  useEffect(()=>{
-    if(!contentHost)return
-    contentHost.classList.toggle('member-admin-active',manageOpen)
-    return()=>contentHost.classList.remove('member-admin-active')
-  },[contentHost,manageOpen])
-
-  useEffect(()=>{
-    if(!manageOpen)return
-    const nav=document.querySelector<HTMLElement>('.ux-global-nav')
-    if(!nav)return
-    const close=()=>setManageOpen(false)
-    nav.addEventListener('click',close,true)
-    return()=>nav.removeEventListener('click',close,true)
-  },[manageOpen])
+  useEffect(()=>{if(!menuOpen)return;const close=(event:MouseEvent)=>{const target=event.target as Node;if(profileHost?.contains(target)||menuRef.current?.contains(target))return;setMenuOpen(false)};window.addEventListener('mousedown',close);return()=>window.removeEventListener('mousedown',close)},[menuOpen,profileHost])
+  useEffect(()=>{if(!contentHost)return;contentHost.classList.toggle('member-admin-active',manageOpen);return()=>contentHost.classList.remove('member-admin-active')},[contentHost,manageOpen])
+  useEffect(()=>{if(!manageOpen)return;const nav=document.querySelector<HTMLElement>('.ux-global-nav');if(!nav)return;const close=()=>setManageOpen(false);nav.addEventListener('click',close,true);return()=>nav.removeEventListener('click',close,true)},[manageOpen])
 
   const login=async(e:FormEvent<HTMLFormElement>)=>{
     e.preventDefault();setBusy(true);setMessage('')
     const fd=new FormData(e.currentTarget)
     try{
-      const r=await withTimeout(api<any>('/auth/login',{method:'POST',body:JSON.stringify({login_id:fd.get('login_id'),password:fd.get('password'),remember_me:remember})}))
-      setAuthToken(r.token,remember);setMember(r.member)
+      const r=await withTimeout(api<any>('/auth/login',{method:'POST',body:JSON.stringify({login_id:fd.get('login_id'),password:fd.get('password'),remember_me:remember})}),15000)
+      setAuthToken(r.token,remember);setMember(r.member);setAuthDelayed(false)
       setPcStatus({current_pc_name:String(r.current_pc_name||''),registered:Boolean(r.current_pc_registered),member_pcs:r.member?.pcs||[]})
-    }catch(err){setMessage(String(err))}finally{setBusy(false)}
+    }catch(err){setMessage(httpStatus(err)===401?'아이디 또는 비밀번호를 확인해 주세요.':`로그인 요청을 처리하지 못했습니다. Backend가 작업 중이면 잠시 후 다시 시도하세요. ${String(err)}`)}finally{setBusy(false)}
   }
 
   const signup=async(e:FormEvent<HTMLFormElement>)=>{
-    e.preventDefault();setBusy(true);setMessage('')
-    const fd=new FormData(e.currentTarget)
-    const password=String(fd.get('password')||'');const confirm=String(fd.get('password_confirm')||'')
+    e.preventDefault();setBusy(true);setMessage('');const fd=new FormData(e.currentTarget);const password=String(fd.get('password')||'');const confirm=String(fd.get('password_confirm')||'')
     if(password!==confirm){setMessage('비밀번호 확인이 일치하지 않습니다.');setBusy(false);return}
-    try{
-      const result=await withTimeout(api<any>('/auth/register',{method:'POST',body:JSON.stringify({login_id:fd.get('login_id'),password,name:fd.get('name'),email:fd.get('email')})}))
-      setMessage(`회원가입이 완료되었습니다. 현재 PC '${result?.current_pc_name||''}'도 자동 등록되었습니다. 로그인해 주세요.`);setMode('login')
-    }catch(err){setMessage(String(err))}finally{setBusy(false)}
+    try{const result=await withTimeout(api<any>('/auth/register',{method:'POST',body:JSON.stringify({login_id:fd.get('login_id'),password,name:fd.get('name'),email:fd.get('email')})}),15000);setMessage(`회원가입이 완료되었습니다. 현재 PC '${result?.current_pc_name||''}'도 자동 등록되었습니다. 로그인해 주세요.`);setMode('login')}catch(err){setMessage(String(err))}finally{setBusy(false)}
   }
 
-  const logout=async()=>{try{await api('/auth/logout',{method:'POST'})}catch{}clearAuthToken();setMember(null);setPcStatus(null);setMenuOpen(false);setManageOpen(false)}
-  const registerCurrentPc=async()=>{
-    setBusy(true);setMessage('')
-    try{
-      const result=await withTimeout(api<any>('/auth/current-pc/register',{method:'POST'}))
-      if(result?.member)setMember(result.member)
-      setPcStatus({current_pc_name:String(result?.current_pc_name||''),registered:true,member_pcs:result?.member_pcs||result?.member?.pcs||[]})
-      setMessage(`현재 PC '${result?.current_pc_name||''}'가 등록되었습니다.`);setMenuOpen(false)
-      window.setTimeout(()=>window.location.reload(),180)
-    }catch(err){setMessage(String(err))}finally{setBusy(false)}
-  }
+  const logout=async()=>{try{await api('/auth/logout',{method:'POST'})}catch{}clearAuthToken();setMember(null);setPcStatus(null);setMenuOpen(false);setManageOpen(false);setAuthDelayed(false)}
+  const registerCurrentPc=async()=>{setBusy(true);setMessage('');try{const result=await withTimeout(api<any>('/auth/current-pc/register',{method:'POST'}),15000);if(result?.member)setMember(result.member);setPcStatus({current_pc_name:String(result?.current_pc_name||''),registered:true,member_pcs:result?.member_pcs||result?.member?.pcs||[]});setMessage(`현재 PC '${result?.current_pc_name||''}'가 등록되었습니다.`);setMenuOpen(false);window.setTimeout(()=>window.location.reload(),180)}catch(err){setMessage(String(err))}finally{setBusy(false)}}
 
-  if(!ready)return <div className="auth-splash"><strong>THEANOVA AgentStudio</strong><span>로그인 상태 확인 중...</span><small>최대 8초 동안 확인합니다. 응답이 없으면 로그인 화면으로 전환합니다.</small></div>
+  if(!ready)return <div className="auth-splash"><strong>THEANOVA AgentStudio</strong><span>로그인 상태 확인 중...</span><small>Backend가 바쁘면 자동으로 재시도합니다. 일시적인 지연으로 저장된 로그인 정보가 삭제되지는 않습니다.</small></div>
+  if(!member&&authDelayed)return <div className="auth-page"><section className="auth-card"><div className="auth-brand"><b>THEANOVA</b><strong>AgentStudio</strong><span>AI Agent & MCP Development Studio</span></div><div className="auth-message">{message}</div><button className="primary" disabled={busy} onClick={()=>{setMessage('');setAuthRetryNonce(value=>value+1)}}>로그인 상태 다시 확인</button><button style={{marginTop:8}} onClick={()=>{clearAuthToken();setAuthDelayed(false);setMessage('')}}>저장된 로그인 해제 후 직접 로그인</button><small className="auth-note">새 탭/새 창에서도 같은 브라우저 프로필의 자동 로그인 토큰을 공유합니다. Backend 작업 지연만으로 세션을 삭제하지 않습니다.</small></section></div>
   if(!member)return <div className="auth-page"><section className="auth-card"><div className="auth-brand"><b>THEANOVA</b><strong>AgentStudio</strong><span>AI Agent & MCP Development Studio</span></div><div className="auth-tabs"><button className={mode==='login'?'active':''} onClick={()=>{setMode('login');setMessage('')}}>로그인</button><button className={mode==='signup'?'active':''} onClick={()=>{setMode('signup');setMessage('')}}>회원가입</button></div>{mode==='login'?<form onSubmit={login}><label>아이디<input name="login_id" required autoFocus autoComplete="username"/></label><label>비밀번호<input name="password" type="password" required autoComplete="current-password"/></label><label className="auth-remember"><input type="checkbox" checked={remember} onChange={e=>setRemember(e.target.checked)}/><span>다음부터 자동 로그인</span></label><button className="primary" disabled={busy}>{busy?'로그인 중...':'로그인'}</button></form>:<form onSubmit={signup}><label>아이디<input name="login_id" required minLength={3}/></label><label>이름<input name="name" required/></label><label>이메일<input name="email" type="email" required/></label><label>비밀번호<input name="password" type="password" required minLength={8}/></label><label>비밀번호 확인<input name="password_confirm" type="password" required minLength={8}/></label><button className="primary" disabled={busy}>{busy?'가입 처리 중...':'회원가입'}</button></form>}{message&&<div className="auth-message">{message}</div>}<small className="auth-note">회원가입한 PC는 해당 사용자 계정의 첫 관리 PC로 자동 등록됩니다. 첫 번째 가입 회원은 초기 관리자 권한으로 생성됩니다.</small></section></div>
 
   const managedPcs=pcStatus?.member_pcs?.length?pcStatus.member_pcs:(member.pcs||[])
