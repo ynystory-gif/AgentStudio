@@ -33,17 +33,37 @@ class DynamicThemeImportRequest(BaseModel):
     scope: str = "GLOBAL"
 
 
-# Theme import is intentionally an in-memory foreground job. The work itself is
-# short lived and should not survive an AgentStudio restart. The UI polls these
-# records so users can distinguish active analysis from a frozen request.
+# Theme import jobs are intentionally in-memory. They exist to provide live UX
+# feedback and are not expected to survive an AgentStudio restart.
 _DYNAMIC_IMPORT_JOBS: dict[str, dict] = {}
+_DYNAMIC_IMPORT_TASKS: dict[str, asyncio.Task] = {}
 _JOB_LIMIT = 50
+_URL_ANALYSIS_TIMEOUT_SECONDS = 45
+_JOB_TIMEOUT_SECONDS = 300
+_STALL_WARNING_SECONDS = 60
+
+
+def _utcnow_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def _seconds_since(value: str | None) -> int:
+    if not value:
+        return 0
+    try:
+        stamp = datetime.fromisoformat(value)
+        return max(0, int((datetime.utcnow() - stamp).total_seconds()))
+    except Exception:
+        return 0
 
 
 def _job_snapshot(job: dict) -> dict:
+    stalled_seconds = _seconds_since(str(job.get("updated_at") or ""))
+    status = str(job.get("status") or "")
+    active = status in {"queued", "running", "cancelling"}
     return {
         "job_id": job.get("job_id"),
-        "status": job.get("status"),
+        "status": status,
         "progress": int(job.get("progress") or 0),
         "stage": job.get("stage") or "",
         "message": job.get("message") or "",
@@ -53,6 +73,13 @@ def _job_snapshot(job: dict) -> dict:
         "error": job.get("error"),
         "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
+        "stalled_seconds": stalled_seconds,
+        "stalled": bool(active and stalled_seconds >= _STALL_WARNING_SECONDS),
+        "stall_warning_seconds": _STALL_WARNING_SECONDS,
+        "url_timeout_seconds": _URL_ANALYSIS_TIMEOUT_SECONDS,
+        "job_timeout_seconds": _JOB_TIMEOUT_SECONDS,
+        "cancel_requested": bool(job.get("cancel_requested")),
+        "can_cancel": active and not bool(job.get("cancel_requested")),
     }
 
 
@@ -60,12 +87,18 @@ def _prune_jobs() -> None:
     if len(_DYNAMIC_IMPORT_JOBS) <= _JOB_LIMIT:
         return
     completed = sorted(
-        (item for item in _DYNAMIC_IMPORT_JOBS.values() if item.get("status") in {"completed", "failed"}),
+        (
+            item
+            for item in _DYNAMIC_IMPORT_JOBS.values()
+            if item.get("status") in {"completed", "failed", "cancelled"}
+        ),
         key=lambda item: str(item.get("updated_at") or ""),
     )
     while len(_DYNAMIC_IMPORT_JOBS) > _JOB_LIMIT and completed:
         old = completed.pop(0)
-        _DYNAMIC_IMPORT_JOBS.pop(str(old.get("job_id") or ""), None)
+        job_id = str(old.get("job_id") or "")
+        _DYNAMIC_IMPORT_JOBS.pop(job_id, None)
+        _DYNAMIC_IMPORT_TASKS.pop(job_id, None)
 
 
 def _image_analysis(item: DynamicThemeImageReference) -> dict:
@@ -131,15 +164,48 @@ async def _run_dynamic_import(
         start = 8
         span = 57
         before = start + int(span * (index - 1) / max(1, url_count))
-        report(before, "url_analysis", f"웹사이트 분석 중 {index}/{url_count} · {url}", current=index, total=url_count)
+        report(
+            before,
+            "url_analysis",
+            f"웹사이트 분석 중 {index}/{url_count} · {url}",
+            current=index,
+            total=url_count,
+        )
         try:
-            analyses.append(await analyze_theme_with_layout_contract(url))
+            analysis = await asyncio.wait_for(
+                analyze_theme_with_layout_contract(url),
+                timeout=_URL_ANALYSIS_TIMEOUT_SECONDS,
+            )
+            analyses.append(analysis)
+        except asyncio.TimeoutError:
+            warnings.append(
+                f"URL {index} 분석 제한시간 {_URL_ANALYSIS_TIMEOUT_SECONDS}초 초과로 건너뜀: {url}"
+            )
+            report(
+                before,
+                "url_timeout",
+                f"URL {index}/{url_count} 응답 지연으로 건너뛰고 다음 자료를 분석합니다.",
+                current=index,
+                total=url_count,
+            )
         except Exception as exc:
             warnings.append(f"URL {index} 분석 실패: {url} · {str(exc) or type(exc).__name__}")
         after = start + int(span * index / max(1, url_count))
-        report(after, "url_analysis", f"웹사이트 분석 완료 {index}/{url_count}", current=index, total=url_count)
+        report(
+            after,
+            "url_analysis",
+            f"웹사이트 처리 완료 {index}/{url_count}",
+            current=index,
+            total=url_count,
+        )
 
-    report(68, "image_analysis", f"화면 캡처 분석 결과 {len(images)}개를 통합 준비 중입니다.", current=len(images), total=len(images))
+    report(
+        68,
+        "image_analysis",
+        f"화면 캡처 분석 결과 {len(images)}개를 통합 준비 중입니다.",
+        current=len(images),
+        total=len(images),
+    )
     for image in images:
         if image.tokens:
             analyses.append(_image_analysis(image))
@@ -161,7 +227,10 @@ async def _run_dynamic_import(
         layout_rules = layout_rules or inferred_layout
 
     source_type = "COMBINED" if urls and images else ("URL" if urls else "IMAGE")
-    source_parts = [*urls, *[str(item.file_name or "").strip() for item in images if str(item.file_name or "").strip()]]
+    source_parts = [
+        *urls,
+        *[str(item.file_name or "").strip() for item in images if str(item.file_name or "").strip()],
+    ]
     now = datetime.utcnow()
     row = UITheme(
         pc_name=current_pc_name(),
@@ -213,17 +282,30 @@ async def _execute_job(job_id: str, req: DynamicThemeImportRequest) -> None:
         return
 
     def progress(value: int, stage: str, message: str, **extra) -> None:
+        if job.get("cancel_requested"):
+            raise asyncio.CancelledError()
         job.update(
             progress=max(int(job.get("progress") or 0), min(99, int(value))),
             stage=stage,
             message=message,
-            updated_at=datetime.utcnow().isoformat(),
+            updated_at=_utcnow_iso(),
             **extra,
         )
 
     try:
-        job.update(status="running", stage="prepare", progress=2, message="통합 분석을 시작합니다.")
-        result = await _run_dynamic_import(req, progress)
+        job.update(
+            status="running",
+            stage="prepare",
+            progress=2,
+            message="통합 분석을 시작합니다.",
+            updated_at=_utcnow_iso(),
+        )
+        result = await asyncio.wait_for(
+            _run_dynamic_import(req, progress),
+            timeout=_JOB_TIMEOUT_SECONDS,
+        )
+        if job.get("cancel_requested"):
+            raise asyncio.CancelledError()
         job.update(
             status="completed",
             progress=100,
@@ -231,7 +313,23 @@ async def _execute_job(job_id: str, req: DynamicThemeImportRequest) -> None:
             message=result.get("message") or "Theme 저장이 완료되었습니다.",
             result=result,
             error=None,
-            updated_at=datetime.utcnow().isoformat(),
+            updated_at=_utcnow_iso(),
+        )
+    except asyncio.CancelledError:
+        job.update(
+            status="cancelled",
+            stage="cancelled",
+            message="사용자가 통합 분석 작업을 취소했습니다.",
+            error=None,
+            updated_at=_utcnow_iso(),
+        )
+    except asyncio.TimeoutError:
+        job.update(
+            status="failed",
+            stage="timeout",
+            message=f"전체 통합 분석 제한시간 {_JOB_TIMEOUT_SECONDS // 60}분을 초과하여 중단했습니다.",
+            error="Theme 통합 분석 시간 초과",
+            updated_at=_utcnow_iso(),
         )
     except Exception as exc:
         job.update(
@@ -239,8 +337,10 @@ async def _execute_job(job_id: str, req: DynamicThemeImportRequest) -> None:
             stage="failed",
             message="통합 분석 저장에 실패했습니다.",
             error=str(exc) or type(exc).__name__,
-            updated_at=datetime.utcnow().isoformat(),
+            updated_at=_utcnow_iso(),
         )
+    finally:
+        _DYNAMIC_IMPORT_TASKS.pop(job_id, None)
 
 
 @router.post("/import-dynamic/jobs")
@@ -251,7 +351,7 @@ async def start_ui_theme_dynamic_import_job(req: DynamicThemeImportRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _prune_jobs()
     job_id = uuid.uuid4().hex
-    now = datetime.utcnow().isoformat()
+    now = _utcnow_iso()
     _DYNAMIC_IMPORT_JOBS[job_id] = {
         "job_id": job_id,
         "status": "queued",
@@ -262,10 +362,12 @@ async def start_ui_theme_dynamic_import_job(req: DynamicThemeImportRequest):
         "total": len(req.urls or []) + len(req.images or []),
         "result": None,
         "error": None,
+        "cancel_requested": False,
         "created_at": now,
         "updated_at": now,
     }
-    asyncio.create_task(_execute_job(job_id, req))
+    task = asyncio.create_task(_execute_job(job_id, req))
+    _DYNAMIC_IMPORT_TASKS[job_id] = task
     return _job_snapshot(_DYNAMIC_IMPORT_JOBS[job_id])
 
 
@@ -277,11 +379,37 @@ async def get_ui_theme_dynamic_import_job(job_id: str):
     return _job_snapshot(job)
 
 
+@router.post("/import-dynamic/jobs/{job_id}/cancel")
+async def cancel_ui_theme_dynamic_import_job(job_id: str):
+    job = _DYNAMIC_IMPORT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Theme 통합 분석 작업을 찾을 수 없습니다.")
+    status = str(job.get("status") or "")
+    if status in {"completed", "failed", "cancelled"}:
+        return _job_snapshot(job)
+    job.update(
+        cancel_requested=True,
+        status="cancelling",
+        stage="cancelling",
+        message="작업 취소 요청을 처리하고 있습니다.",
+        updated_at=_utcnow_iso(),
+    )
+    task = _DYNAMIC_IMPORT_TASKS.get(job_id)
+    if task and not task.done():
+        task.cancel()
+    return _job_snapshot(job)
+
+
 @router.post("/import-dynamic")
 async def import_ui_theme_dynamic(req: DynamicThemeImportRequest):
     """Compatibility endpoint for older frontend builds."""
     try:
-        return await _run_dynamic_import(req)
+        return await asyncio.wait_for(_run_dynamic_import(req), timeout=_JOB_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=408,
+            detail=f"Theme 통합 분석 제한시간 {_JOB_TIMEOUT_SECONDS // 60}분을 초과했습니다.",
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
