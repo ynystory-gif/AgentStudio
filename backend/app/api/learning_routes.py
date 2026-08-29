@@ -34,6 +34,7 @@ from app.services.ollama_model_manager_service import (
     get_recommended_model_status,
     start_recommended_model_job,
 )
+from app.services.learning_weight_model_status_service import get_active_weight_model_status
 
 router = APIRouter(prefix="/learning", tags=["LLM Learning"])
 
@@ -223,6 +224,13 @@ async def datasets():
 @router.post("/datasets/{dataset_id}/learning-apply-job")
 async def learning_apply_job(dataset_id: str):
     try:
+        weight_state = await get_active_weight_model_status()
+        if weight_state.get("weight_model_active"):
+            raise ValueError(
+                "현재 PC는 실제 QLoRA 가중치가 Merge된 theanova-learn:latest를 사용 중입니다. "
+                "기존 Dataset 학습 적용은 독립 모델을 덮어쓸 수 있으므로 차단했습니다. "
+                "새 Dataset은 '독립 모델 재학습'으로 반영하세요."
+            )
         return await start_learning_apply_job(dataset_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
