@@ -8,6 +8,7 @@ from app.services.learning_finetune_job_service import (
     get_weight_finetune_job,
     start_weight_finetune_job,
 )
+from app.services.learning_weight_model_status_service import get_active_weight_model_status
 
 router = APIRouter(prefix="/learning", tags=["LLM Learning"])
 
@@ -25,9 +26,11 @@ async def full_learning_apply_job():
 
 @router.get("/weight-finetune/capability")
 async def weight_finetune_capability():
-    """GPU/Dataset/disk/Ollama readiness for a true QLoRA weight training run."""
+    """GPU/Dataset/disk/Ollama readiness plus current independent-model state."""
     try:
-        return await get_weight_finetune_capability()
+        capability = await get_weight_finetune_capability()
+        weight_state = await get_active_weight_model_status()
+        return {**capability, **weight_state}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc) or type(exc).__name__) from exc
 
