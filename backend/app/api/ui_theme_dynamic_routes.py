@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field
 from app.core.database import SessionLocal
 from app.core.machine_identity import current_pc_name
 from app.models.entities import UITheme
-from app.services.ui_theme_layout_contract_service import apply_layout_contract
-from app.services.ui_theme_service import analyze_theme_from_url, build_rules, merge_theme_analyses
+from app.services.ui_theme_layout_contract_service import analyze_theme_with_layout_contract
+from app.services.ui_theme_service import build_rules, merge_theme_analyses
 
 router = APIRouter(prefix="/ui-themes", tags=["UI Theme Dynamic Import"])
 
@@ -133,9 +133,7 @@ async def _run_dynamic_import(
         before = start + int(span * (index - 1) / max(1, url_count))
         report(before, "url_analysis", f"웹사이트 분석 중 {index}/{url_count} · {url}", current=index, total=url_count)
         try:
-            analysis = await analyze_theme_from_url(url)
-            analysis = apply_layout_contract(analysis)
-            analyses.append(analysis)
+            analyses.append(await analyze_theme_with_layout_contract(url))
         except Exception as exc:
             warnings.append(f"URL {index} 분석 실패: {url} · {str(exc) or type(exc).__name__}")
         after = start + int(span * index / max(1, url_count))
@@ -151,7 +149,6 @@ async def _run_dynamic_import(
 
     report(76, "merge", "URL/이미지 분석 결과를 하나의 Layout + Theme 규칙으로 통합하고 있습니다.")
     merged = merge_theme_analyses(analyses)
-    merged = apply_layout_contract(merged, source_analyses=analyses)
     report(86, "rules", "컴포넌트 상태와 레이아웃 규칙을 정리하고 있습니다.")
 
     tokens = dict(merged.get("tokens") or {})
