@@ -21,8 +21,6 @@ def _same_host(left: str, right: str) -> bool:
 
 
 def _snapshot_script(max_elements: int = _MAX_ELEMENTS) -> str:
-    # Keep the browser-side payload compact. We intentionally inspect high-value visible
-    # controls/layout nodes instead of serialising the entire DOM of modern SPA sites.
     return f"""
 () => {{
   const limit={int(max_elements)};
@@ -91,27 +89,27 @@ def _pick_page(browser, target_url: str):
 def _browser_snapshot_sync(cdp_endpoint: str, target_url: str) -> dict:
     from playwright.sync_api import sync_playwright
 
-    with sync_playwright() as playwright:
+    # sync_playwright().stop() disconnects this client. Do not call browser.close() on a
+    # connect_over_cdp Browser because AgentStudio owns and reuses that Chrome process.
+    playwright=sync_playwright().start()
+    browser=None
+    try:
         browser=playwright.chromium.connect_over_cdp(cdp_endpoint, timeout=10_000)
+        page=_pick_page(browser,target_url)
+        if page is None:
+            raise RuntimeError('CDP Theme 분석 페이지를 찾을 수 없습니다.')
+        page.set_default_timeout(5_000)
+        desktop=page.evaluate(_snapshot_script())
         try:
-            page=_pick_page(browser,target_url)
-            if page is None:
-                raise RuntimeError('CDP Theme 분석 페이지를 찾을 수 없습니다.')
-            page.set_default_timeout(5_000)
-            desktop=page.evaluate(_snapshot_script())
+            page.set_viewport_size({'width':390,'height':844})
+            page.wait_for_timeout(350)
+        except Exception:
+            pass
+        mobile_before=page.evaluate(_snapshot_script())
 
-            # Mobile pass uses the same dedicated Theme session. No reload/network-idle wait:
-            # responsive CSS/JS reacts to viewport changes immediately on modern sites.
-            try:
-                page.set_viewport_size({'width':390,'height':844})
-                page.wait_for_timeout(350)
-            except Exception:
-                pass
-            mobile_before=page.evaluate(_snapshot_script())
-
-            menu_opened=False
-            try:
-                menu_opened=bool(page.evaluate("""
+        menu_opened=False
+        try:
+            menu_opened=bool(page.evaluate("""
 () => {
   const candidates=Array.from(document.querySelectorAll('button,[role="button"]'));
   const el=candidates.find(node=>{
@@ -123,15 +121,17 @@ def _browser_snapshot_sync(cdp_endpoint: str, target_url: str) -> dict:
   el.click();return true;
 }
 """))
-                if menu_opened:
-                    page.wait_for_timeout(450)
-            except Exception:
-                menu_opened=False
-            mobile_after=page.evaluate(_snapshot_script()) if menu_opened else mobile_before
-            return {'desktop':desktop,'mobile':mobile_after,'mobile_before':mobile_before,'menu_opened':menu_opened}
-        finally:
-            # Disconnect only. The manager owns the Chrome process/session lifecycle.
-            browser.close()
+            if menu_opened:
+                page.wait_for_timeout(450)
+        except Exception:
+            menu_opened=False
+        mobile_after=page.evaluate(_snapshot_script()) if menu_opened else mobile_before
+        return {'desktop':desktop,'mobile':mobile_after,'mobile_before':mobile_before,'menu_opened':menu_opened}
+    finally:
+        try:
+            playwright.stop()
+        except Exception:
+            pass
 
 
 def _rect(row: dict) -> dict:
@@ -219,12 +219,6 @@ def _derive_browser_contract(raw: dict) -> dict:
 
 
 async def analyze_rendered_theme_layout(url: str) -> dict:
-    """Best-effort rendered DOM/layout analysis using AgentStudio's existing Chrome CDP runtime.
-
-    This function is deliberately bounded and disposable: a dedicated browser session is
-    created for Theme analysis and always closed. Failure is returned as metadata so callers
-    can preserve successful static analysis instead of failing the whole Theme import.
-    """
     session_id=f'theme-analysis-{uuid.uuid4().hex[:12]}'
     try:
         nav=await asyncio.wait_for(
