@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field
 from app.core.database import SessionLocal
 from app.core.machine_identity import current_pc_name
 from app.models.entities import UITheme
-from app.services.ui_theme_service import analyze_theme_from_url, build_rules, merge_theme_analyses
+from app.services.ui_theme_layout_contract_service import analyze_theme_with_layout_contract
+from app.services.ui_theme_service import build_rules, merge_theme_analyses
 
 router = APIRouter(prefix="/ui-themes", tags=["UI Theme Dynamic Import"])
 
@@ -74,7 +75,9 @@ async def import_ui_theme_dynamic(req: DynamicThemeImportRequest):
     warnings: list[str] = []
     for index, url in enumerate(urls, start=1):
         try:
-            analyses.append(await analyze_theme_from_url(url))
+            # URL imports now extract design tokens AND an explicit layout/interaction
+            # contract (drawer side/width, overlay, navigation labels, desktop sidebar).
+            analyses.append(await analyze_theme_with_layout_contract(url))
         except Exception as exc:
             warnings.append(f"URL {index} 분석 실패: {url} · {str(exc) or type(exc).__name__}")
 
@@ -139,5 +142,5 @@ async def import_ui_theme_dynamic(req: DynamicThemeImportRequest):
         "url_count": len(urls),
         "image_count": len(images),
         "warnings": warnings,
-        "message": f"URL {len(urls)}개 · 이미지 {len(images)}개 참고 자료를 통합 분석해 Theme을 저장했습니다.",
+        "message": f"URL {len(urls)}개 · 이미지 {len(images)}개 참고 자료의 Layout + Theme + Interaction을 통합 분석해 저장했습니다.",
     }
