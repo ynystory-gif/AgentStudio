@@ -25,6 +25,9 @@ import app.services.learning_base_model_auto_bridge  # noqa: F401
 import app.services.learning_visibility_bridge  # noqa: F401
 # Bind the static + Chrome CDP Theme analyzer before dynamic Theme routes import its function.
 import app.services.ui_theme_hybrid_bridge  # noqa: F401
+# The frontend watchdog is not authoritative. Enforce the same 3-minute deadline in the
+# backend so a closed/stalled browser tab cannot leave a Theme job in running state.
+import app.services.ui_theme_job_hard_timeout_bridge  # noqa: F401
 from app.api.routes import router
 from app.api.learning_diagnostics_routes import router as learning_diagnostics_router
 from app.api.learning_routes import router as learning_router
