@@ -48,11 +48,6 @@ export function LearningWeightFinetuneEnhancer(){
     return()=>{cancelled=true}
   },[toolbar])
 
-  /*
-   * Once a real merged weight model is active, the old curriculum/apply buttons must
-   * not overwrite the same theanova-learn:latest alias. New validated data is folded
-   * into the weights by running this QLoRA button again.
-   */
   useEffect(()=>{
     const active=Boolean(capability?.weight_model_active)
     const guard=()=>{
@@ -107,6 +102,8 @@ export function LearningWeightFinetuneEnhancer(){
     const ok=window.confirm(
       `${rerun?'현재 독립 모델을 새 검증 데이터까지 포함해 다시 학습합니다.':'독립 가중치 모델을 생성합니다.'}\n\n`+
       `검증 완료 Dataset ${datasets}개 / 문제 ${problems}개로 Qwen3.5-4B의 실제 가중치를 QLoRA 학습합니다.\n`+
+      `Temp: ${capability?.temp_setting||capability?.temp_work_root||'-'}\n`+
+      `Cache: ${capability?.cache_setting||capability?.cache_work_root||'-'}\n`+
       `학습 후 Adapter를 Base에 Merge하고 Q4_K_M으로 양자화하여 theanova-learn:latest를 독립 모델로 교체합니다.\n\n`+
       `GPU를 장시간 사용할 수 있으며 최초 실행은 Hugging Face 모델/학습 패키지 다운로드가 필요합니다. 계속할까요?`
     )
@@ -144,8 +141,14 @@ export function LearningWeightFinetuneEnhancer(){
         <span>GPU <b>{capability?.gpu_name||'-'} {capability?.gpu_memory_gb?`${capability.gpu_memory_gb}GB`:''}</b></span>
         <span>검증 Dataset <b>{capability?.validated_dataset_count??'-'}개</b></span>
         <span>검증 문제 <b>{capability?.validated_problem_count??'-'}개</b></span>
-        <span>디스크 여유 <b>{capability?.disk_free_gb??'-'}GB</b></span>
+        <span>Temp 여유 <b>{capability?.temp_disk_free_gb??capability?.disk_free_gb??'-'}GB</b></span>
+        <span>Cache 여유 <b>{capability?.cache_disk_free_gb??capability?.disk_free_gb??'-'}GB</b></span>
       </div>
+      {(capability?.temp_setting||capability?.cache_setting)&&<div className="weight-finetune-paths">
+        <span><b>Temp</b> <code>{capability?.temp_setting||capability?.temp_work_root}</code></span>
+        <span><b>Cache</b> <code>{capability?.cache_setting||capability?.cache_work_root}</code></span>
+        {capability?.common_models_root&&<span><b>Model</b> <code>{capability.common_models_root}</code></span>}
+      </div>}
       {weightActive&&<div className="weight-finetune-success">현재 <b>theanova-learn:latest</b>는 실제 QLoRA 가중치를 Merge한 독립 모델입니다. 새 Dataset을 반영할 때는 이 버튼으로 다시 파인튜닝합니다.</div>}
       {!ready&&reasons.length>0&&<div className="weight-finetune-warning">{reasons.join(' · ')}</div>}
       {(job||error)&&<>
