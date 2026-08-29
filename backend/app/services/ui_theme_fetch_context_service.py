@@ -6,12 +6,8 @@ from urllib.parse import urljoin
 
 import httpx
 
-from app.services.ui_theme_service import (
-    _safe_get,
-    analyze_css_text,
-    analyze_html_interactions,
-    validate_public_theme_url,
-)
+from app.services.ui_theme_killable_process_service import run_theme_worker
+from app.services.ui_theme_service import _safe_get, validate_public_theme_url
 
 _STYLESHEET_PATTERNS = (
     re.compile(r"<link[^>]+rel=[\"'][^\"']*stylesheet[^\"']*[\"'][^>]+href=[\"']([^\"']+)[\"']", re.IGNORECASE),
@@ -22,6 +18,7 @@ _MAX_HTML_BYTES = 1_000_000
 _MAX_CSS_BYTES = 500_000
 _MAX_STYLESHEETS = 6
 _CSS_FETCH_CONCURRENCY = 3
+_STATIC_WORKER_TIMEOUT_SECONDS = 28
 
 
 def _stylesheet_urls(html: str, final_url: str) -> list[str]:
@@ -39,13 +36,7 @@ def _stylesheet_urls(html: str, final_url: str) -> list[str]:
 
 
 async def fetch_theme_source_context(url: str) -> dict:
-    """Fetch one HTML document and only its stylesheet links.
-
-    The returned context is intentionally reusable by token, interaction and layout
-    analysis so a URL is never downloaded twice during one integrated import job.
-    Stylesheets are fetched concurrently with a small semaphore to avoid serial
-    latency on modern sites while still being polite to the origin/CDN.
-    """
+    """Fetch one HTML document and only its stylesheet links."""
     target = await validate_public_theme_url(url)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36 THEANOVA-AgentStudio-ThemeImporter/5.430",
@@ -102,22 +93,28 @@ async def fetch_theme_source_context(url: str) -> dict:
 
 
 async def analyze_theme_source_context(context: dict) -> dict:
-    """Run CPU-heavy regex analysis away from the FastAPI event loop."""
+    """Run regex/token extraction in a disposable, killable Python process."""
     html = str(context.get("html") or "")
     css_text = str(context.get("css_text") or "")
-    analysis = await asyncio.to_thread(analyze_css_text, css_text)
-    interaction_structure = await asyncio.to_thread(analyze_html_interactions, html)
+    worker = await run_theme_worker(
+        "static_analysis",
+        {"html": html, "css_text": css_text},
+        timeout=_STATIC_WORKER_TIMEOUT_SECONDS,
+    )
+    analysis = dict(worker.get("analysis") or {})
+    interaction_structure = dict(worker.get("interaction_structure") or {})
     analysis["analysis_source"] = "URL"
     analysis["source_url"] = str(context.get("final_url") or context.get("requested_url") or "")
     analysis["source_meta"] = {
         "css_files": int(context.get("css_files") or 0),
         "stylesheet_candidates": len(context.get("stylesheet_urls") or []),
-        "analysis": "single-fetch HTML/CSS interaction-state design-token extraction",
+        "analysis": "single-fetch HTML/CSS killable-process interaction-state design-token extraction",
         "content_copied": False,
         "interaction_structure": interaction_structure,
         "evidence_count": len(((analysis.get("component_rules") or {}).get("_evidence") or {})),
         "fetch_mode": context.get("fetch_mode") or "",
         "css_concurrency": int(context.get("css_concurrency") or 0),
         "fetch_warnings": list(context.get("warnings") or []),
+        "worker_mode": "KILLABLE_PROCESS",
     }
     return analysis
