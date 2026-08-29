@@ -9,6 +9,9 @@ import app.services.learning_finetune_paths_bridge  # noqa: F401
 # Reconcile legacy Dataset validation into normalized learning-problem rows and select
 # the CUDA-capable AgentStudio Python/venv before API functions are bound.
 import app.services.learning_finetune_readiness_bridge  # noqa: F401
+# If NVIDIA hardware is present but no CUDA Torch is available, allow the job to bootstrap
+# a private cu128 Torch runtime under the configured Cache path instead of blocking UI.
+import app.services.learning_finetune_cuda_bootstrap_bridge  # noqa: F401
 from app.services.learning_finetune_job_service import (
     get_weight_finetune_capability,
     get_weight_finetune_job,
