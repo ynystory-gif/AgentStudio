@@ -14,7 +14,7 @@ async function withTimeout<T>(promise:Promise<T>,ms=AUTH_BOOT_TIMEOUT_MS):Promis
   try{return await Promise.race([promise,new Promise<T>((_,reject)=>{timer=window.setTimeout(()=>reject(new Error(`로그인 상태 확인이 ${Math.round(ms/1000)}초 안에 완료되지 않았습니다.`)),ms)})])}
   finally{if(timer)window.clearTimeout(timer)}
 }
-const delay=(ms:number)=>new Promise(resolve=>window.setTimeout(resolve,ms))
+const delay=(ms:number)=>new Promise<void>(resolve=>window.setTimeout(resolve,ms))
 const httpStatus=(error:unknown)=>Number((error as {status?:number})?.status||0)
 
 export function AuthGate({children}:{children:ReactNode}){
@@ -47,7 +47,7 @@ export function AuthGate({children}:{children:ReactNode}){
       setReady(false);setAuthDelayed(false);setMessage('')
       let lastError:unknown=null
       for(let attempt=0;attempt<AUTH_BOOT_RETRY_DELAYS_MS.length;attempt++){
-        if(attempt>0)await delay(AUTH_BOOT_RETRY_DELAYS_MS[attempt])
+        if(attempt>0)await delay(AUTH_BOOT_RETRY_DELAYS_MS[attempt]??0)
         if(disposed)return
         try{
           const r=await withTimeout(api<any>('/auth/me'))
@@ -59,9 +59,6 @@ export function AuthGate({children}:{children:ReactNode}){
           return
         }catch(err){
           lastError=err
-          // Only an explicit 401 proves that the stored token is invalid/expired.
-          // Network errors and timeouts are transient and must never delete the
-          // localStorage token shared by the user's other AgentStudio tabs.
           if(httpStatus(err)===401){
             clearAuthToken()
             if(!disposed){setMember(null);setAuthDelayed(false);setMessage('로그인 세션이 만료되었습니다. 다시 로그인해 주세요.');setReady(true)}
