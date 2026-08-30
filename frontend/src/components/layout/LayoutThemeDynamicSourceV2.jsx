@@ -4,7 +4,11 @@ import { api } from '../../api'
 const installed = new WeakSet()
 const POLL_INTERVAL_MS = 1000
 const STATUS_REQUEST_TIMEOUT_MS = 3000
+<<<<<<< HEAD
 const FRONTEND_HARD_TIMEOUT_MS = 300000
+=======
+const FRONTEND_HARD_TIMEOUT_MS = 180000
+>>>>>>> d0e40bd86a999808d857b8acca8a9a6f14259c81
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const elapsedText = (startedAt) => {
@@ -36,7 +40,11 @@ function ensureStyle() {
     .ui-layout-dynamic-source-v2 .status{font-size:10px;color:#91a8bc;min-height:16px}.ui-layout-dynamic-source-v2 .status.error{color:#ff9b9b}.ui-layout-dynamic-source-v2 .status.ok{color:#7ee2a8}
     .ui-layout-dynamic-source-v2 .progress{display:none;border:1px solid #294258;border-radius:8px;background:#09131c;padding:9px;gap:7px}.ui-layout-dynamic-source-v2 .progress.active{display:grid}.ui-layout-dynamic-source-v2 .progress.done{border-color:#31556f}
     .ui-layout-dynamic-source-v2 .progress-head{display:flex;justify-content:space-between;gap:10px;font-size:10px}.ui-layout-dynamic-source-v2 .track{height:9px;background:#172838;border-radius:999px;overflow:hidden}.ui-layout-dynamic-source-v2 .bar{height:100%;width:0%;background:#4aa3df;transition:width .2s ease}
+<<<<<<< HEAD
     .ui-layout-dynamic-source-v2 .message{font-size:10px;color:#a8c0d4;line-height:1.45}.ui-layout-dynamic-source-v2 .meta{font-size:9px;color:#7894aa;display:flex;gap:12px;flex-wrap:wrap}.ui-layout-dynamic-source-v2 .backend-state{font-size:10px;border:1px solid #294258;background:#0a151f;border-radius:6px;padding:6px 8px;color:#8fa9bd}.ui-layout-dynamic-source-v2 .backend-state.running{border-color:#72582b;color:#f0c873}.ui-layout-dynamic-source-v2 .backend-state.ended{border-color:#285b46;color:#7ee2a8}.ui-layout-dynamic-source-v2 .actions{display:flex;justify-content:flex-end}
+=======
+    .ui-layout-dynamic-source-v2 .message{font-size:10px;color:#a8c0d4;line-height:1.45}.ui-layout-dynamic-source-v2 .meta{font-size:9px;color:#7894aa;display:flex;gap:12px;flex-wrap:wrap}.ui-layout-dynamic-source-v2 .actions{display:flex;justify-content:flex-end}
+>>>>>>> d0e40bd86a999808d857b8acca8a9a6f14259c81
   `
   document.head.appendChild(style)
 }
@@ -101,11 +109,15 @@ function renderProgress(host, current, startedAt, { done = false, failed = false
   const message = box.querySelector('[data-v2-message]')
   const stage = box.querySelector('[data-v2-stage]')
   const meta = box.querySelector('[data-v2-meta]')
+<<<<<<< HEAD
   const backend = box.querySelector('[data-v2-backend]')
+=======
+>>>>>>> d0e40bd86a999808d857b8acca8a9a6f14259c81
   if (bar) bar.style.width = `${pct}%`
   if (percent) percent.textContent = `${Math.round(pct)}% · 경과 ${elapsedText(startedAt)}`
   if (message) message.textContent = current?.message || current?.error || '분석 중입니다.'
   if (stage) stage.textContent = `단계: ${current?.stage || 'analysis'}`
+<<<<<<< HEAD
   if (meta) meta.textContent = `Backend Job: ${current?.job_id || '-'} · 상태: ${current?.status || '-'} · Job 경과: ${current?.job_age_seconds ?? '-'}초 · 최대 ${Math.round(Number(current?.backend_hard_timeout_seconds || 300) / 60)}분`
   if (backend) {
     const cleanupState = String(current?.backend_cleanup_state || '')
@@ -119,6 +131,9 @@ function renderProgress(host, current, startedAt, { done = false, failed = false
         ? `Backend 실패 처리 완료 · 실행 Task/Worker 종료 확인 중 · cleanup=${cleanupState || 'running'}`
         : `Backend 작업 실행 중 · Worker Process ${workerCount}개`
   }
+=======
+  if (meta) meta.textContent = `Backend Job: ${current?.job_id || '-'} · 상태: ${current?.status || '-'} · Job 경과: ${current?.job_age_seconds ?? '-'}초`
+>>>>>>> d0e40bd86a999808d857b8acca8a9a6f14259c81
 }
 
 async function waitForJob(host, job, startedAt, state) {
@@ -126,6 +141,7 @@ async function waitForJob(host, job, startedAt, state) {
   let consecutiveStatusTimeouts = 0
   while (true) {
     const status = String(current?.status || '')
+<<<<<<< HEAD
     const backendAgeSeconds = Number(current?.job_age_seconds)
     const backendLimitSeconds = Number(current?.backend_hard_timeout_seconds || 300)
     const deadlineReached = Number.isFinite(backendAgeSeconds)
@@ -152,6 +168,19 @@ async function waitForJob(host, job, startedAt, state) {
         ? '5분 제한으로 실패 처리되었습니다. Backend 실행 Task와 Worker Process가 실제로 종료되었는지 확인하고 있습니다.'
         : '최대 분석시간 5분에 도달했습니다. Backend 실패 종료 상태를 확인하고 있습니다.'
     }
+=======
+    if (['completed', 'failed', 'cancelled'].includes(status)) break
+    if (state.cancelRequested) throw new Error('통합 분석 작업 취소를 요청했습니다.')
+    if (Date.now() - startedAt >= FRONTEND_HARD_TIMEOUT_MS) {
+      if (state.jobId && !state.cancelRequested) {
+        state.cancelRequested = true
+        try { await api(`/ui-themes/import-dynamic/jobs/${encodeURIComponent(state.jobId)}/cancel`, { method: 'POST' }) } catch {}
+      }
+      throw new Error('Frontend 전체 제한 3분을 초과하여 작업을 종료했습니다.')
+    }
+
+    renderProgress(host, current, startedAt)
+>>>>>>> d0e40bd86a999808d857b8acca8a9a6f14259c81
     await sleep(POLL_INTERVAL_MS)
 
     try {
@@ -171,10 +200,13 @@ async function waitForJob(host, job, startedAt, state) {
   renderProgress(host, current, startedAt, { done: true, failed: terminal === 'failed' })
   if (terminal === 'completed') return current?.result || current
   if (terminal === 'cancelled') throw new Error(current?.message || '통합 분석 작업이 취소되었습니다.')
+<<<<<<< HEAD
   if (current?.hard_timeout_triggered) {
     const workerCount = Number(current?.backend_worker_process_count ?? 0)
     throw new Error(`${current?.error || current?.message || 'Theme 통합 분석이 5분 제한으로 실패했습니다.'} · Backend 작업 종료 확인됨 · Worker Process ${workerCount}개`)
   }
+=======
+>>>>>>> d0e40bd86a999808d857b8acca8a9a6f14259c81
   throw new Error(current?.error || current?.message || '통합 분석 작업이 실패했습니다.')
 }
 
@@ -198,7 +230,11 @@ function install(panel) {
     <div class="head"><b>동적 스타일 참고 자료</b><span>단일 Job Controller V2</span></div>
     <div class="section"><div class="title"><strong>웹사이트 URL</strong><button type="button" data-add-url>＋ URL 추가</button></div><div data-url-rows></div></div>
     <div class="section"><div class="title"><strong>화면 캡처 이미지</strong><button type="button" data-add-image>＋ 이미지 추가</button></div><div data-image-rows></div></div>
+<<<<<<< HEAD
     <div class="progress" data-v2-progress><div class="progress-head"><strong>통합 분석 · 저장 진행률</strong><span data-v2-percent>0% · 경과 00:00</span></div><div class="track"><div class="bar" data-v2-bar></div></div><div class="message" data-v2-message>대기 중</div><div class="meta"><span data-v2-stage>단계: READY</span><span data-v2-meta>Backend Job: - · 최대 분석 5분</span></div><div class="backend-state" data-v2-backend>Backend 작업 상태 확인 대기</div><div class="actions"><button type="button" data-v2-cancel>작업 취소</button></div></div>
+=======
+    <div class="progress" data-v2-progress><div class="progress-head"><strong>통합 분석 · 저장 진행률</strong><span data-v2-percent>0% · 경과 00:00</span></div><div class="track"><div class="bar" data-v2-bar></div></div><div class="message" data-v2-message>대기 중</div><div class="meta"><span data-v2-stage>단계: READY</span><span data-v2-meta>Backend Job: -</span></div><div class="actions"><button type="button" data-v2-cancel>작업 취소</button></div></div>
+>>>>>>> d0e40bd86a999808d857b8acca8a9a6f14259c81
     <div class="status"></div>`
 
   const themeNameLabel = labels.find((label) => label.querySelector('span')?.textContent?.includes('Theme 이름'))
