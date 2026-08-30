@@ -4,7 +4,7 @@ import asyncio
 import uuid
 
 from app.services.chromium_browser_service import chromium_browser_manager
-from app.services.ui_theme_browser_analysis_service import _derive_browser_contract
+from app.services.ui_theme_browser_analysis_service import _derive_browser_contract, _derive_rendered_theme_analysis
 from app.services.ui_theme_killable_process_service import run_theme_worker
 
 _BROWSER_START_TIMEOUT = 22
@@ -31,10 +31,12 @@ async def analyze_rendered_theme_layout(url: str) -> dict:
             timeout=_BROWSER_ANALYSIS_TIMEOUT,
         )
         contract=_derive_browser_contract(raw)
+        analysis=_derive_rendered_theme_analysis(raw,url)
         return {
             'ok':True,
             'status':'success',
             'contract':contract,
+            'analysis':analysis,
             'warning':'',
             'worker_mode':'KILLABLE_PROCESS',
         }

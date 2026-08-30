@@ -187,7 +187,10 @@ async def analyze_theme_with_layout_contract(url: str) -> dict:
     layout["mobileDrawerSide"] = ((contract.get("mobile") or {}).get("drawer") or {}).get("side", "left")
     layout["mobileDrawerWidth"] = ((contract.get("mobile") or {}).get("drawer") or {}).get("width", "82%")
     layout["desktopSidebarPresent"] = bool((contract.get("desktop") or {}).get("sidebar_present"))
-    layout["sourceNavigationItems"] = list((contract.get("navigation") or {}).get("items") or [])
+    navigation = dict(contract.get("navigation") or {})
+    layout["sourceNavigationItems"] = list(navigation.get("items") or [])
+    layout["sourceNavigationItemDetails"] = list(navigation.get("item_details") or [])
+    layout["sourceNavigationPresentation"] = dict(navigation.get("presentation") or {})
     analysis["layout_rules"] = layout
 
     source_meta = dict(analysis.get("source_meta") or {})

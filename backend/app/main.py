@@ -25,14 +25,15 @@ import app.services.learning_base_model_auto_bridge  # noqa: F401
 import app.services.learning_visibility_bridge  # noqa: F401
 # Bind the static + Chrome CDP Theme analyzer before dynamic Theme routes import its function.
 import app.services.ui_theme_hybrid_bridge  # noqa: F401
-# The frontend watchdog is not authoritative. Enforce the same 3-minute deadline in the
-# backend so a closed/stalled browser tab cannot leave a Theme job in running state.
+# v5.429: the frontend clock is UX only. Backend owns one 5-minute hard deadline and
+# marks overdue Theme analysis FAILED while terminating AgentStudio-owned workers.
 import app.services.ui_theme_job_hard_timeout_bridge  # noqa: F401
 from app.api.routes import router
 from app.api.learning_diagnostics_routes import router as learning_diagnostics_router
 from app.api.learning_routes import router as learning_router
 from app.api.learning_full_apply_routes import router as learning_full_apply_router
 from app.api.ui_theme_dynamic_routes import router as ui_theme_dynamic_router
+from app.api.scheduler_routes import router as scheduler_router
 from app.api.auth_routes import router as auth_router
 from app.services.langgraph_runtime import agent_graph_runtime
 from app.services.mcp_registry import mcp_registry_monitor
@@ -127,19 +128,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.428", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:5173", "http://localhost:5173",
-        "http://127.0.0.1:5174", "http://localhost:5174",
-    ],
-    allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost):\d+$",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.435", lifespan=lifespan)
 
 _PUBLIC_API_PATHS = {
     "/api/health",
@@ -158,17 +147,11 @@ _AUTH_BOOTSTRAP_PATHS = {
 @app.middleware("http")
 async def _agentstudio_auth_guard(request: Request, call_next):
     path = request.url.path
-    if path == "/api/health":
-        return JSONResponse(
-            status_code=200,
-            content={
-                "ok": True,
-                "status": "ok",
-                "service": "THEANOVA AgentStudio Backend",
-                "version": app.version,
-            },
-        )
 
+    # v5.430: Public health requests must continue through the inner CORS middleware.
+    # Returning JSONResponse directly from this outer auth middleware bypassed CORS,
+    # so Frontend (5173) -> Backend (800x) /api/health fetches appeared as
+    # BackendFetchError even while the Backend itself was alive and reachable in a tab.
     if request.method == "OPTIONS" or not path.startswith("/api/") or path in _PUBLIC_API_PATHS or path in _AUTH_BOOTSTRAP_PATHS:
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
@@ -181,6 +164,22 @@ async def _agentstudio_auth_guard(request: Request, call_next):
         return JSONResponse(status_code=403, content={"detail": f"현재 PC '{pc_name}'가 이 사용자 계정에 등록되어 있지 않습니다. 우측 사용자 메뉴에서 '현재 PC 등록'을 먼저 실행하세요."})
     request.state.member = member
     return await call_next(request)
+
+# v5.434: CORS must be the outermost HTTP middleware so even authentication
+# rejections (401/403) are visible to the browser as normal HTTP responses instead
+# of opaque "Failed to fetch" network errors. add_middleware inserts at the front
+# of Starlette's middleware list, so register CORS after the auth guard.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:5173", "http://localhost:5173",
+        "http://127.0.0.1:5174", "http://localhost:5174",
+    ],
+    allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost):\d+$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.on_event("startup")
 async def _agentstudio_startup_probe():
@@ -199,6 +198,7 @@ app.include_router(learning_diagnostics_router, prefix="/api")
 app.include_router(learning_router, prefix="/api")
 app.include_router(learning_full_apply_router, prefix="/api")
 app.include_router(ui_theme_dynamic_router, prefix="/api")
+app.include_router(scheduler_router, prefix="/api")
 
 from app.api.terminal_ws import router as terminal_ws_router
 app.include_router(terminal_ws_router)

@@ -56,6 +56,8 @@ function layoutContract(layout={}){
     drawerDetected:drawer.detected!==false,
     desktopSidebarPresent:contract.desktop?.sidebar_present??layout.desktopSidebarPresent,
     navigationItems:Array.isArray(navigation.items)?navigation.items:(Array.isArray(layout.sourceNavigationItems)?layout.sourceNavigationItems:[]),
+    navigationItemDetails:Array.isArray(navigation.item_details)?navigation.item_details:(Array.isArray(layout.sourceNavigationItemDetails)?layout.sourceNavigationItemDetails:[]),
+    navigationPresentation:navigation.presentation||layout.sourceNavigationPresentation||{},
     useSourceItems:navigation.use_source_items_in_preview!==false,
   }
 }
@@ -68,13 +70,39 @@ function clearMobileStructure(root,sidebarRoot){
   ;['position','top','bottom','left','right','zIndex','maxWidth','height','boxShadow','display'].forEach(key=>{sidebarRoot.style[key]=''})
 }
 
-function sourceNavigation(sidebarRoot,items,menuNormal,menuActive){
+const navGlyph=(label='',index=0)=>{
+  const value=String(label||'').toLowerCase()
+  if(/home|홈/.test(value))return '⌂'
+  if(/issue|문제/.test(value))return '◉'
+  if(/pull|request|요청/.test(value))return '⇄'
+  if(/repo|저장소/.test(value))return '▣'
+  if(/project|프로젝트/.test(value))return '▦'
+  if(/discussion|대화|토론/.test(value))return '◌'
+  if(/market|상품|catalog/.test(value))return '◇'
+  return ['◆','○','□','◇','△','◎'][index%6]
+}
+
+function sourceNavigation(sidebarRoot,items,itemDetails,presentation,menuNormal,menuActive){
   if(!(sidebarRoot instanceof HTMLElement)||!items.length)return
   const slots=[...sidebarRoot.querySelectorAll('i')]
+  const iconText=String(presentation?.mode||'').toLowerCase()==='icon_text'
   slots.forEach((item,index)=>{
     const label=items[index]
     if(label){
-      item.textContent=label
+      item.textContent=''
+      const detail=itemDetails?.[index]||{}
+      const showIcon=iconText||Boolean(detail?.has_icon||detail?.icon?.detected)
+      if(showIcon){
+        const icon=document.createElement('span')
+        icon.className='agentstudio-imported-nav-icon'
+        icon.textContent=navGlyph(label,index)
+        icon.setAttribute('aria-hidden','true')
+        item.appendChild(icon)
+      }
+      const text=document.createElement('span')
+      text.className='agentstudio-imported-nav-text'
+      text.textContent=label
+      item.appendChild(text)
       item.dataset.importedSourceNav='true'
       item.title=label
       item.style.fontStyle='normal'
@@ -84,6 +112,9 @@ function sourceNavigation(sidebarRoot,items,menuNormal,menuActive){
       item.style.overflow='hidden'
       item.style.textOverflow='ellipsis'
       item.style.padding='0 7px'
+      item.style.display='flex'
+      item.style.alignItems='center'
+      item.style.gap=String(detail?.gap||presentation?.gap||'6px')
       item.style.color=String((index===0?menuActive:menuNormal).color||'')
     }else if(item.dataset.importedSourceNav==='true'){
       item.textContent=''
@@ -172,7 +203,7 @@ function styleWireframe(root,theme){
   })
 
   if(contract.useSourceItems&&contract.navigationItems.length){
-    sourceNavigation(sidebarRoot,contract.navigationItems,menuNormal,menuActive)
+    sourceNavigation(sidebarRoot,contract.navigationItems,contract.navigationItemDetails,contract.navigationPresentation,menuNormal,menuActive)
   }
 
   if(mode==='mobile'&&contract.drawerDetected){

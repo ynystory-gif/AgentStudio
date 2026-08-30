@@ -52,6 +52,8 @@ export function AgentDesignProjectToolbar({
   savedAt='',
   status='INTERVIEWING',
   progress=0,
+  saving=false,
+  autoSaveEnabled=true,
   onNew,
   onSave,
   onLoad,
@@ -86,13 +88,13 @@ export function AgentDesignProjectToolbar({
       <div className="agent-design-project-identity">
         <span>설계 프로젝트</span>
         <strong>{projectName||'이름 미정'}</strong>
-        <small>{designProjectId?`#${designProjectId} · ${statusLabel(status)} · ${Math.max(0,Math.min(100,Number(progress)||0))}%`:'아직 DB에 저장되지 않음'}</small>
+        <small>{designProjectId?`#${designProjectId} · ${statusLabel(status)} · ${Math.max(0,Math.min(100,Number(progress)||0))}%`:(autoSaveEnabled?'자동 저장 준비 · 입력 후 DB 프로젝트 생성':'아직 DB에 저장되지 않음')}</small>
       </div>
       <div className="agent-design-project-actions">
         {showNew&&<button type="button" className="agent-design-new-button" onClick={onNew}>＋ 새 프로젝트</button>}
-        <button type="button" className="primary agent-design-save-button" onClick={onSave}>💾 프로젝트 저장</button>
+        <button type="button" className="primary agent-design-save-button" onClick={onSave} title="자동 저장과 별도로 현재 상태를 버전 Snapshot으로 보존합니다.">💾 지금 저장</button>
         <button type="button" className="agent-design-load-button" onClick={()=>setListOpen(true)}>📂 프로젝트 로드</button>
-        <span className="agent-design-save-state">{savedAt?`✓ 저장됨 ${formatDate(savedAt)}`:'저장 대기'}</span>
+        <span className={`agent-design-save-state ${saving?'saving':''}`}>{saving?'● 자동 저장 중...':savedAt?`✓ 자동 저장됨 ${formatDate(savedAt)}`:autoSaveEnabled?'● 자동 저장 ON':'저장 대기'}</span>
       </div>
     </div>
 

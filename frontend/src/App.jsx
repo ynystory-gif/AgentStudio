@@ -3,7 +3,7 @@ import Editor, { DiffEditor } from '@monaco-editor/react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { api, connectJobs, runtimeInfo } from './api'
+import { api, apiFetch, connectJobs, runtimeInfo } from './api'
 import { NotebookEditor } from './components/notebook/NotebookEditor'
 import { PdfViewer, PresentationViewer } from './components/viewers/DocumentViewers'
 import { MiniBadge, SectionTitle, StatusDot, StudioIcon } from './components/common/CommonUi'
@@ -16,6 +16,7 @@ import { DatabaseErdPanel } from './components/database/DatabaseErdPanel'
 import { SqlResultsPane } from './components/database/SqlResultsPane'
 import { TerminalPanel } from './components/terminal/TerminalPanel'
 import { GpuSettingsPanel, OllamaSettingsPanel, RuntimeDatabasePanel, ServicePortSettingsPanel, SystemStatusSummary } from './components/system/SystemRuntimePanels'
+import { SchedulerPanel } from './components/system/SchedulerPanel'
 import { WebBrowserWorkspace } from './components/browser/WebBrowserWorkspace'
 import { CodexPanel } from './components/codex/CodexPanel'
 import { CodexSettingsPanel } from './components/codex/CodexSettingsPanel'
@@ -28,7 +29,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.412'
+const AGENTSTUDIO_FRONTEND_VERSION='5.435'
 
 const DebouncedProjectSearchInput=memo(function DebouncedProjectSearchInput({value,onCommit,placeholder='프로젝트 검색...'}){
   const [localValue,setLocalValue]=useState(value||'')
@@ -739,9 +740,9 @@ const uiThemePreviewStyleVars=(config={})=>{
     '--tp-primary':p.colors.primary,'--tp-secondary':p.colors.secondary,'--tp-bg':p.colors.background,
     '--tp-surface':p.colors.surface,'--tp-text':p.colors.text,'--tp-muted':p.colors.muted,'--tp-border':p.colors.border,
     '--tp-card-radius':`${p.radius.card}px`,'--tp-button-radius':`${p.radius.button}px`,'--tp-input-radius':`${p.radius.input}px`,'--tp-card-shadow':p.shadow,
-    '--tp-menu-normal-bg':p.menu.normal.background,'--tp-menu-normal-color':p.menu.normal.color,'--tp-menu-normal-border':p.menu.normal.border,'--tp-menu-normal-radius':`${p.menu.normal.radius??p.radius.button}px`,
-    '--tp-menu-hover-bg':p.menu.hover.background,'--tp-menu-hover-color':p.menu.hover.color,'--tp-menu-hover-border':p.menu.hover.border,'--tp-menu-hover-radius':`${p.menu.hover.radius??p.radius.button}px`,'--tp-menu-hover-shadow':cssValue(p.menu.hover.boxShadow,'none'),'--tp-menu-hover-transform':cssValue(p.menu.hover.transform,'none'),'--tp-menu-transition':cssValue(p.menu.hover.transition||p.menu.normal.transition,'all .18s ease'),
-    '--tp-menu-active-bg':p.menu.active.background,'--tp-menu-active-color':p.menu.active.color,'--tp-menu-active-border':p.menu.active.border,'--tp-menu-active-radius':`${p.menu.active.radius??p.radius.button}px`,'--tp-menu-active-shadow':cssValue(p.menu.active.boxShadow,'none'),'--tp-menu-active-transform':cssValue(p.menu.active.transform,'none'),
+    '--tp-menu-normal-bg':p.menu.normal.background,'--tp-menu-normal-color':p.menu.normal.color,'--tp-menu-normal-border':p.menu.normal.border,'--tp-menu-normal-radius':`${p.menu.normal.radius??p.radius.button}px`,'--tp-menu-normal-padding':cssValue(p.menu.normal.padding,'7px 9px'),'--tp-menu-normal-border-bottom':cssValue(p.menu.normal.borderBottom,`1px solid ${p.menu.normal.border||p.colors.border}`),
+    '--tp-menu-hover-bg':p.menu.hover.background,'--tp-menu-hover-color':p.menu.hover.color,'--tp-menu-hover-border':p.menu.hover.border,'--tp-menu-hover-radius':`${p.menu.hover.radius??p.radius.button}px`,'--tp-menu-hover-padding':cssValue(p.menu.hover.padding,p.menu.normal.padding||'7px 9px'),'--tp-menu-hover-border-bottom':cssValue(p.menu.hover.borderBottom,p.menu.normal.borderBottom||`1px solid ${p.menu.hover.border||p.colors.primary}`),'--tp-menu-hover-shadow':cssValue(p.menu.hover.boxShadow,'none'),'--tp-menu-hover-transform':cssValue(p.menu.hover.transform,'none'),'--tp-menu-hover-opacity':cssValue(p.menu.hover.opacity,'1'),'--tp-menu-hover-font-weight':cssValue(p.menu.hover.fontWeight,p.menu.normal.fontWeight||'700'),'--tp-menu-hover-decoration':cssValue(p.menu.hover.textDecoration,'none'),'--tp-menu-hover-filter':cssValue(p.menu.hover.filter,'none'),'--tp-menu-transition':cssValue(p.menu.hover.transition||p.menu.normal.transition||p.menu.hover.motionTransition,'all .18s ease'),
+    '--tp-menu-active-bg':p.menu.active.background,'--tp-menu-active-color':p.menu.active.color,'--tp-menu-active-border':p.menu.active.border,'--tp-menu-active-radius':`${p.menu.active.radius??p.radius.button}px`,'--tp-menu-active-padding':cssValue(p.menu.active.padding,p.menu.normal.padding||'7px 9px'),'--tp-menu-active-border-bottom':cssValue(p.menu.active.borderBottom,p.menu.normal.borderBottom||`1px solid ${p.menu.active.border||p.colors.primary}`),'--tp-menu-active-shadow':cssValue(p.menu.active.boxShadow,'none'),'--tp-menu-active-transform':cssValue(p.menu.active.transform,'none'),'--tp-menu-active-opacity':cssValue(p.menu.active.opacity,'1'),'--tp-menu-active-font-weight':cssValue(p.menu.active.fontWeight,p.menu.normal.fontWeight||'700'),'--tp-menu-active-decoration':cssValue(p.menu.active.textDecoration,'none'),'--tp-menu-active-filter':cssValue(p.menu.active.filter,'none'),
     '--tp-submenu-bg':p.submenu.normal.background,'--tp-submenu-color':p.submenu.normal.color,'--tp-submenu-border':p.submenu.normal.border,'--tp-submenu-radius':`${p.submenu.normal.radius??p.radius.card}px`,'--tp-submenu-shadow':cssValue(p.submenu.normal.boxShadow,p.shadow),'--tp-submenu-hover-bg':p.submenu.hover.background,'--tp-submenu-hover-color':p.submenu.hover.color,
     '--tp-user-menu-bg':p.userMenu.normal.background,'--tp-user-menu-color':p.userMenu.normal.color,'--tp-user-menu-border':p.userMenu.normal.border,'--tp-user-menu-radius':`${p.userMenu.normal.radius??p.radius.card}px`,'--tp-user-menu-shadow':cssValue(p.userMenu.normal.boxShadow,p.shadow),'--tp-user-menu-hover-bg':p.userMenu.hover.background,'--tp-user-menu-hover-color':p.userMenu.hover.color,
     '--tp-button-bg':p.button.normal.background,'--tp-button-color':p.button.normal.color,'--tp-button-border':p.button.normal.border,'--tp-button-hover-bg':p.button.hover.background,'--tp-button-hover-color':p.button.hover.color,'--tp-button-hover-transform':cssValue(p.button.hover.transform,'none'),'--tp-button-pressed-transform':cssValue(p.button.pressed.transform,'scale(.98)'),'--tp-button-transition':cssValue(p.button.hover.transition||p.button.normal.transition,'all .18s ease'),
@@ -764,8 +765,42 @@ const uiThemeEvidenceRows=(config={})=>{
     return {key,label,status,source,confidence,selector:item.selector||'',fileName:item.file_name||'',referenceRole:item.reference_role||''}
   })
 }
+const uiThemeSourceNavigation=(config={})=>{
+  const layout=config?.theme_layout_rules||{}
+  const contract=layout?.layoutContract||layout?.layout_contract||{}
+  const navigation=contract?.navigation||{}
+  const labels=Array.isArray(navigation?.items)?navigation.items:(Array.isArray(layout?.sourceNavigationItems)?layout.sourceNavigationItems:[])
+  const details=Array.isArray(navigation?.item_details)?navigation.item_details:(Array.isArray(layout?.sourceNavigationItemDetails)?layout.sourceNavigationItemDetails:[])
+  const presentation=navigation?.presentation||layout?.sourceNavigationPresentation||{}
+  const items=labels.map((label,index)=>({label:String(label||'').trim(),...(details[index]||{})})).filter(item=>item.label).slice(0,10)
+  return {items,presentation,useSourceItems:navigation?.use_source_items_in_preview!==false}
+}
+const uiThemeMenuGlyph=(label='',index=0)=>{
+  const value=String(label||'').toLowerCase()
+  if(/home|홈/.test(value)) return '⌂'
+  if(/issue|문제/.test(value)) return '◉'
+  if(/pull|request|요청/.test(value)) return '⇄'
+  if(/repo|저장소/.test(value)) return '▣'
+  if(/project|프로젝트/.test(value)) return '▦'
+  if(/discussion|대화|토론/.test(value)) return '◌'
+  if(/code|코드/.test(value)) return '⌘'
+  if(/market|상품|catalog/.test(value)) return '◇'
+  if(/order|주문/.test(value)) return '▤'
+  if(/report|리포트/.test(value)) return '▥'
+  return ['◆','○','□','◇','△','◎'][index%6]
+}
+const uiThemePreviewPageModel=(label='',index=0)=>{
+  const title=String(label||'Dashboard').trim()||'Dashboard'
+  const key=title.toLowerCase()
+  if(/dashboard|home|홈/.test(key)) return {kind:'dashboard',title,description:'선택한 메뉴의 Dashboard/Home 화면입니다.',kpis:[['Users','1,248'],['Orders','326'],['Status','Active']],placeholder:'검색어를 입력하세요'}
+  if(/activity|issue|pull|discussion|활동|문제|요청|토론/.test(key)) return {kind:'activity',title,description:'최근 활동과 상태 변화가 표시되는 화면입니다.',kpis:[['Events','48'],['Open','12'],['Today','9']],rows:['새 작업이 등록되었습니다.','검토 상태가 업데이트되었습니다.','사용자 활동 기록이 추가되었습니다.']}
+  if(/setting|설정/.test(key)) return {kind:'settings',title,description:'환경과 사용자 옵션을 변경하는 설정 화면입니다.',kpis:[['Profile','Ready'],['Alerts','On'],['Theme','Auto']],rows:['프로필 및 계정','알림 및 자동화','화면 및 테마']}
+  if(/repo|project|catalog|product|order|market|저장소|프로젝트|상품|주문/.test(key)) return {kind:'collection',title,description:'목록·검색·상태를 확인하는 컬렉션 화면입니다.',kpis:[['Items',String(24+index*7)],['Updated','Today'],['Status','Ready']],placeholder:`${title} 검색`}
+  return {kind:'generic',title,description:'선택한 메뉴에 맞춰 페이지가 전환됩니다.',kpis:[['Overview','12'],['Updates','5'],['Status','Ready']],placeholder:`${title} 검색`}
+}
 function UILayoutThemePreview({config={},compact=false,viewport='desktop'}){
   const [activeMenu,setActiveMenu]=useState('dashboard')
+  const [activePage,setActivePage]=useState(0)
   const [submenuOpen,setSubmenuOpen]=useState(false)
   const [userMenuOpen,setUserMenuOpen]=useState(false)
   const [mobileMenuOpen,setMobileMenuOpen]=useState(false)
@@ -779,6 +814,20 @@ function UILayoutThemePreview({config={},compact=false,viewport='desktop'}){
   const showHeader=hasHeader||(isMobile&&hasSidebar)
   const vars=uiThemePreviewStyleVars(config)
   const label=config?.theme==='custom'?(config?.theme_name||'Custom Theme'):(config?.theme==='dark'?'Dark':config?.theme==='auto'?'Auto':'Light')
+  const sourceNavigation=uiThemeSourceNavigation(config)
+  const sourceMenuItems=(config?.theme==='custom'&&sourceNavigation.useSourceItems&&sourceNavigation.items.length>=2)?sourceNavigation.items:[]
+  const iconTextMenu=String(sourceNavigation?.presentation?.mode||'').toLowerCase()==='icon_text'
+    ||sourceMenuItems.filter(item=>item?.has_icon||item?.icon?.detected).length>=Math.max(2,Math.ceil(sourceMenuItems.length*.35))
+  const previewPageItems=sourceMenuItems.length?sourceMenuItems.slice(0,5):[{label:'Dashboard'},{label:'Activity'},{label:'Settings'}]
+  const previewPageSignature=previewPageItems.map(item=>String(item?.label||item||'')).join('|')
+  const selectedPageIndex=Math.min(activePage,Math.max(0,previewPageItems.length-1))
+  const selectedPageItem=previewPageItems[selectedPageIndex]||{label:'Dashboard'}
+  const pageModel=uiThemePreviewPageModel(selectedPageItem?.label||selectedPageItem,selectedPageIndex)
+  const renderMenuLabel=(item,index)=>{
+    const labelText=String(item?.label||item||'')
+    const hasIcon=iconTextMenu||Boolean(item?.has_icon||item?.icon?.detected)
+    return <span className={`ui-theme-preview-menu-label ${hasIcon?'with-icon':''}`}>{hasIcon&&<span className="ui-theme-preview-menu-icon" aria-hidden="true">{uiThemeMenuGlyph(labelText,index)}</span>}<em>{labelText}</em></span>
+  }
   const menuClick=(id,hasSubmenu=false)=>{setActiveMenu(id);if(hasSubmenu)setSubmenuOpen(value=>!value);else setSubmenuOpen(false)}
   const evidenceRows=uiThemeEvidenceRows(config)
   const reproduction=Math.round(evidenceRows.reduce((sum,row)=>sum+row.confidence,0)/Math.max(1,evidenceRows.length)*100)
@@ -787,42 +836,51 @@ function UILayoutThemePreview({config={},compact=false,viewport='desktop'}){
     setUserMenuOpen(false)
     setMobileMenuOpen(false)
   },[viewport])
-  const mobileItem=(id,labelText,hasSubmenu=false,children=[])=><div className="ui-theme-preview-mobile-menu-item" key={id}>
-    <button className={activeMenu===id?'active':''} onClick={()=>menuClick(id,hasSubmenu)}>{labelText}{hasSubmenu?<span>{submenuOpen&&activeMenu===id?'⌃':'⌄'}</span>:null}</button>
-    {hasSubmenu&&submenuOpen&&activeMenu===id&&<div className="ui-theme-preview-mobile-submenu">{children.map(item=><button key={item}>{item}</button>)}</div>}
+  useEffect(()=>{
+    setActivePage(0)
+  },[previewPageSignature])
+  const mobileItem=(id,item,index=0,hasSubmenu=false,children=[])=><div className="ui-theme-preview-mobile-menu-item" key={id}>
+    <button className={activeMenu===id?'active':''} onClick={()=>menuClick(id,hasSubmenu)}>{renderMenuLabel(item,index)}{hasSubmenu?<span>{submenuOpen&&activeMenu===id?'⌃':'⌄'}</span>:null}</button>
+    {hasSubmenu&&submenuOpen&&activeMenu===id&&<div className="ui-theme-preview-mobile-submenu">{children.map(child=><button key={child}>{child}</button>)}</div>}
   </div>
   return <div className={`ui-theme-preview ${compact?'compact':''} ${viewport}`} style={vars}>
     <div className="ui-theme-preview-browser">
       {showHeader&&<header><b>{label}</b>{isMobile?<button type="button" className={`ui-theme-preview-mobile-menu-trigger ${mobileMenuOpen?'open':''}`} aria-label="모바일 메뉴 열기" aria-expanded={mobileMenuOpen} onClick={()=>{setMobileMenuOpen(value=>!value);setSubmenuOpen(false)}}><span>☰</span><em>{mobileMenuOpen?'닫기':'메뉴'}</em></button>:<nav>
-        <button className={activeMenu==='home'?'active':''} onClick={()=>menuClick('home')}>Home</button>
-        <div className="ui-theme-preview-nav-dropdown"><button className={activeMenu==='products'?'active':''} onClick={()=>menuClick('products',true)}>Products <span>⌄</span></button>{submenuOpen&&activeMenu==='products'&&<div className="ui-theme-preview-submenu"><button>상품 조회</button><button>카테고리</button><button>재고 관리</button></div>}</div>
-        <button className={activeMenu==='reports'?'active':''} onClick={()=>menuClick('reports')}>Reports</button>
+        {(sourceMenuItems.length?sourceMenuItems.slice(0,3):[{label:'Home'},{label:'Products'},{label:'Reports'}]).map((item,index)=>{const id=`source-top-${index}`;return <button key={id} className={activeMenu===id?'active':''} onClick={()=>menuClick(id)}>{renderMenuLabel(item,index)}</button>})}
       </nav>}<div className="ui-theme-preview-user-wrap"><button className="ui-theme-preview-user-trigger" aria-label="사용자 메뉴" onClick={()=>{setUserMenuOpen(value=>!value);if(isMobile)setMobileMenuOpen(false)}}><i></i><span>Admin</span></button>{userMenuOpen&&<div className="ui-theme-preview-user-menu"><strong>사용자 메뉴</strong><button>프로필</button><button>설정</button><hr/><button>로그아웃</button></div>}</div></header>}
       {isMobile&&mobileMenuOpen&&<div className="ui-theme-preview-mobile-menu-layer">
         <button type="button" className="ui-theme-preview-mobile-menu-backdrop" aria-label="모바일 메뉴 닫기" onClick={()=>setMobileMenuOpen(false)}></button>
         <div className="ui-theme-preview-mobile-menu-panel">
           <div className="ui-theme-preview-mobile-menu-head"><strong>MENU</strong><button type="button" onClick={()=>setMobileMenuOpen(false)}>×</button></div>
           <div className="ui-theme-preview-mobile-menu-list">
-            {hasHeader&&mobileItem('home','Home')}
-            {hasHeader&&mobileItem('products','Products',true,['상품 조회','카테고리','재고 관리'])}
-            {hasHeader&&mobileItem('reports','Reports')}
-            {hasSidebar&&mobileItem('dashboard','Dashboard')}
-            {hasSidebar&&mobileItem('catalog','Catalog',true,['상품','카테고리'])}
-            {hasSidebar&&mobileItem('orders','Orders')}
+            {sourceMenuItems.length
+              ? sourceMenuItems.slice(0,8).map((item,index)=>mobileItem(`source-mobile-${index}`,item,index))
+              : <>
+                {hasHeader&&mobileItem('home',{label:'Home'},0)}
+                {hasHeader&&mobileItem('products',{label:'Products'},1,true,['상품 조회','카테고리','재고 관리'])}
+                {hasHeader&&mobileItem('reports',{label:'Reports'},2)}
+                {hasSidebar&&mobileItem('dashboard',{label:'Dashboard'},3)}
+                {hasSidebar&&mobileItem('catalog',{label:'Catalog'},4,true,['상품','카테고리'])}
+                {hasSidebar&&mobileItem('orders',{label:'Orders'},5)}
+              </>}
           </div>
         </div>
       </div>}
       <div className="ui-theme-preview-body">
         {hasSidebar&&<aside><strong>MENU</strong>
-          <button className={activeMenu==='dashboard'?'active':''} onClick={()=>menuClick('dashboard')}>Dashboard</button>
-          <div className="ui-theme-preview-side-dropdown"><button className={activeMenu==='catalog'?'active':''} onClick={()=>menuClick('catalog',true)}>Catalog <span>⌄</span></button>{submenuOpen&&activeMenu==='catalog'&&<div className="ui-theme-preview-side-submenu"><button>상품</button><button>카테고리</button></div>}</div>
-          <button className={activeMenu==='orders'?'active':''} onClick={()=>menuClick('orders')}>Orders</button>
+          {(sourceMenuItems.length?sourceMenuItems.slice(0,6):[{label:'Dashboard'},{label:'Catalog'},{label:'Orders'}]).map((item,index)=>{const id=`source-side-${index}`;return <button key={id} className={activeMenu===id?'active':''} onClick={()=>menuClick(id)}>{renderMenuLabel(item,index)}</button>})}
         </aside>}
         <main>
-          <div className="ui-theme-preview-tabs"><button className="active">Dashboard</button><button>Activity</button><button>Settings</button></div>
-          <div className="ui-theme-preview-title"><div><b>Dashboard</b><small>직접 Hover/Click하여 외부 Theme의 상태 스타일을 확인하세요.</small></div><button className="ui-theme-preview-primary">Primary</button></div>
-          <div className="ui-theme-preview-kpis"><article><small>Users</small><b>1,248</b></article><article><small>Orders</small><b>326</b></article><article><small>Status</small><b>Active</b></article></div>
-          <section className="ui-theme-preview-card"><div className="ui-theme-preview-form"><input placeholder="클릭하여 Focus 스타일 확인"/><button>검색</button></div><div className="ui-theme-preview-table"><i></i><i></i><i></i></div></section>
+          <div className={`ui-theme-preview-tabs ${config?.theme==='custom'?'imported-navigation':''}`}>
+            {previewPageItems.map((item,index)=><button key={`${String(item?.label||item)}-${index}`} className={selectedPageIndex===index?'active':''} onClick={()=>setActivePage(index)}>{sourceMenuItems.length?renderMenuLabel(item,index):String(item?.label||item)}</button>)}
+          </div>
+          <div key={`${pageModel.kind}-${pageModel.title}`} className={`ui-theme-preview-page ui-theme-preview-page-${pageModel.kind}`}>
+            <div className="ui-theme-preview-title"><div><b>{pageModel.title}</b><small>{pageModel.description} · 메뉴 클릭과 Hover로 가져온 상태/동작 스타일을 확인하세요.</small></div><button className="ui-theme-preview-primary">Primary</button></div>
+            <div className="ui-theme-preview-kpis">{pageModel.kpis.map(([name,value])=><article key={name}><small>{name}</small><b>{value}</b></article>)}</div>
+            {pageModel.kind==='activity'?<section className="ui-theme-preview-card ui-theme-preview-activity">{pageModel.rows.map((row,index)=><div key={row}><span>{index+1}</span><p>{row}</p><small>{index===0?'방금 전':`${index*7+3}분 전`}</small></div>)}</section>
+              :pageModel.kind==='settings'?<section className="ui-theme-preview-card ui-theme-preview-settings">{pageModel.rows.map((row,index)=><label key={row}><span><b>{row}</b><small>{index===0?'계정 기본값을 관리합니다.':index===1?'알림과 자동 실행을 설정합니다.':'가져온 Theme 동작을 확인합니다.'}</small></span><input type="checkbox" defaultChecked={index!==1}/></label>)}</section>
+              :<section className="ui-theme-preview-card"><div className="ui-theme-preview-form"><input placeholder={pageModel.placeholder||'클릭하여 Focus 스타일 확인'}/><button>검색</button></div><div className="ui-theme-preview-table"><i></i><i></i><i></i></div></section>}
+          </div>
         </main>
       </div>
       {hasFooter&&<footer><span></span><span></span><span></span></footer>}
@@ -3505,6 +3563,7 @@ function IDE() {
   const [requirementDraftCandidate,setRequirementDraftCandidate]=useState(null)
   const [requirementDraftDecisionPending,setRequirementDraftDecisionPending]=useState(false)
   const requirementDraftDecisionPendingRef=useRef(false)
+  const projectAutoRestoreRootRef=useRef('')
   const [restoredBuildResume,setRestoredBuildResume]=useState(null)
   const [redevelopmentInfo,setRedevelopmentInfo]=useState(null)
   const requirementCheckpointSignatureRef=useRef('')
@@ -3561,6 +3620,12 @@ function IDE() {
   const [dbErdReport,setDbErdReport]=useState(null)
   const [dbErdBusy,setDbErdBusy]=useState(false)
   const [dbErdError,setDbErdError]=useState('')
+  const [schedulerReport,setSchedulerReport]=useState(null)
+  const [schedulerBusy,setSchedulerBusy]=useState(false)
+  const [schedulerError,setSchedulerError]=useState('')
+  const [schedulerIncludeTerminal,setSchedulerIncludeTerminal]=useState(false)
+  const [schedulerCancelBusy,setSchedulerCancelBusy]=useState('')
+  const schedulerRefreshInFlightRef=useRef(false)
   const [analysis,setAnalysis]=useState(null)
   const [mcpName,setMcpName]=useState('Local MCP')
   const [mcpEndpoint,setMcpEndpoint]=useState('http://127.0.0.1:8001/mcp')
@@ -4121,6 +4186,7 @@ function IDE() {
     return()=>clearTimeout(timer)
   },[
     chat,
+    input,
     workflowReq,
     confirmedInterviewRequirements,
     targetWorkflowPreview,
@@ -4141,6 +4207,12 @@ function IDE() {
     // project folder. A failed build must be recoverable after a browser restart,
     // another PC session, or localStorage cleanup.
     const projectPath=String(newAgentProjectRoot||'').trim()
+    if(projectPath&&String(projectAutoRestoreRootRef.current||'').trim()===projectPath){
+      // loadProject() performs an authoritative server/local checkpoint restore itself.
+      // Suppress the generic "restore previous draft?" prompt so a normal project open
+      // immediately shows the persisted Workflow/DB state instead of asking twice.
+      return undefined
+    }
     if(!projectPath){
       setRequirementDraftCandidate(null)
       setRequirementDraftDecisionPending(false)
@@ -8106,8 +8178,92 @@ function IDE() {
     return null
   }
 
+  const restoreExistingProjectDesignState=async(projectRoot,projectName='',expectedContextEpoch=null)=>{
+    const targetRoot=String(projectRoot||'').trim()
+    if(!targetRoot) return {restored:false,source:'',hasDatabaseSql:false}
+    const key=requirementDraftKeyFor(targetRoot,projectName||newAgentName)
+    let localSnapshot=null
+    try{
+      const raw=localStorage.getItem(key)
+      localSnapshot=raw?JSON.parse(raw):null
+    }catch{}
+
+    let serverResult=null
+    try{
+      serverResult=await api(`/workflow/design-checkpoint?project_root=${encodeURIComponent(targetRoot)}`)
+    }catch(error){
+      console.warn('프로젝트 설계 Checkpoint 자동 복원 조회 실패',error)
+    }
+
+    if(Number.isInteger(expectedContextEpoch)&&projectContextEpochRef.current!==expectedContextEpoch){
+      return {restored:false,source:'STALE_PROJECT_LOAD',hasDatabaseSql:false}
+    }
+    const serverSnapshot=(serverResult?.checkpoint&&typeof serverResult.checkpoint==='object')
+      ? serverResult.checkpoint
+      : null
+    // Existing project load is authoritative from the project-local server checkpoint.
+    // The backend also hydrates persisted DB SQL from the generated migration file, so
+    // prefer it over a browser-local draft even when localStorage has a newer timestamp.
+    const snapshot=serverSnapshot||localSnapshot
+    const runtime=(serverResult?.runtime&&typeof serverResult.runtime==='object')?serverResult.runtime:{}
+    if(!snapshot){
+      requirementDraftDecisionPendingRef.current=false
+      setRequirementDraftCandidate(null)
+      setRequirementDraftDecisionPending(false)
+      return {restored:false,source:'',hasDatabaseSql:false}
+    }
+
+    const buildResume={
+      ...(snapshot?.build_resume&&typeof snapshot.build_resume==='object'?snapshot.build_resume:{}),
+      source:String(serverResult?.checkpoint_source||snapshot?.build_resume?.source||(serverSnapshot?'PROJECT_CHECKPOINT':'LOCAL_DRAFT')),
+      run_id:String(
+        runtime?.current_run?.run_id
+        ||runtime?.workflow_state?.diagnostic_run_id
+        ||runtime?.workflow_state?.thread_id
+        ||snapshot?.build_resume?.run_id
+        ||''
+      ),
+      status:String(
+        runtime?.current_run?.status
+        ||runtime?.workflow_state?.diagnostic_status
+        ||runtime?.workflow_state?.status
+        ||snapshot?.build_resume?.status
+        ||''
+      ),
+      failure_stage:String(runtime?.workflow_state?.diagnostic_failure_stage||snapshot?.build_resume?.failure_stage||''),
+      failure_reason:String(runtime?.workflow_state?.diagnostic_failure_reason||runtime?.workflow_state?.error||snapshot?.build_resume?.failure_reason||''),
+      project_root:targetRoot,
+      workflow_state:runtime?.workflow_state||snapshot?.build_resume?.workflow_state||{},
+      requirements_snapshot:runtime?.requirements_snapshot||{}
+    }
+
+    const redevelopment=(serverResult?.redevelopment&&typeof serverResult.redevelopment==='object')
+      ? serverResult.redevelopment
+      : null
+    setRedevelopmentInfo(redevelopment?.available?redevelopment:null)
+    const restored=await restoreRequirementDraft(key,snapshot,buildResume)
+    requirementDraftDecisionPendingRef.current=false
+    setRequirementDraftDecisionPending(false)
+    setRequirementDraftCandidate(null)
+
+    const plan=snapshot?.workflow_preview?.database_plan
+      ||buildResume?.workflow_state?.database_plan
+      ||{}
+    const hasDatabaseSql=Boolean(String(plan?.ddl||plan?.ddl_preview||'').trim())
+    return {
+      restored:Boolean(restored),
+      source:String(serverResult?.checkpoint_source||(serverSnapshot?'PROJECT_CHECKPOINT':'LOCAL_DRAFT')),
+      hasDatabaseSql
+    }
+  }
+
   const loadProject=async(projectId)=>{
     const loadContextEpoch=++projectContextEpochRef.current
+    // Block autosave immediately while the target project's persisted design state is
+    // being restored. Otherwise a transient empty/new-project render can overwrite the
+    // existing checkpoint before the restore query finishes.
+    requirementDraftDecisionPendingRef.current=true
+    setRequirementDraftDecisionPending(true)
     // Do not let the previous project's tree root leak into file operations
     // while the new project metadata is loading.
     fileTreeRootRef.current=''
@@ -8124,6 +8280,9 @@ function IDE() {
       if(projectContextEpochRef.current!==loadContextEpoch) return
 
       if(!p.ok){
+        requirementDraftDecisionPendingRef.current=false
+        setRequirementDraftDecisionPending(false)
+        projectAutoRestoreRootRef.current=''
         const msg=p.message||'프로젝트를 불러오지 못했습니다.'
         setProjectLoadMessage(msg)
         setProjectLoadProgress({
@@ -8143,6 +8302,7 @@ function IDE() {
       })
 
       const projectRoot=p.project_root||root||''
+      projectAutoRestoreRootRef.current=projectRoot
 
       // v5.356: 다른 프로젝트의 Agent Factory/Workflow Snapshot이 새 프로젝트에
       // 우선 적용되지 않도록 프로젝트 전환 시 실행/설계 상태를 먼저 비웁니다.
@@ -8170,8 +8330,20 @@ function IDE() {
 
       setProjectLoadProgress({
         active:true,
+        percent:32,
+        message:'이전 설계 검토 · Workflow · DB SQL 상태를 복원하는 중...',
+        failed:false
+      })
+      const restoredDesign=await restoreExistingProjectDesignState(projectRoot,p.name||'',loadContextEpoch)
+      projectAutoRestoreRootRef.current=''
+      if(projectContextEpochRef.current!==loadContextEpoch) return
+
+      setProjectLoadProgress({
+        active:true,
         percent:40,
-        message:'프로젝트 파일과 폴더를 불러오는 중...',
+        message:restoredDesign.restored
+          ? `이전 설계 상태 복원 완료${restoredDesign.hasDatabaseSql?' · DB SQL 포함':''} · 프로젝트 파일을 불러오는 중...`
+          : '프로젝트 파일과 폴더를 불러오는 중...',
         failed:false
       })
 
@@ -8217,9 +8389,13 @@ function IDE() {
         failed:false
       })
 
-      setProjectLoadMessage(`프로젝트 #${p.id} ${p.name} 불러오기 완료`)
+      setProjectLoadMessage(
+        restoredDesign.restored
+          ? `프로젝트 #${p.id} ${p.name} 불러오기 완료 · 이전 설계/Workflow${restoredDesign.hasDatabaseSql?' · DB SQL':''} 복원됨`
+          : `프로젝트 #${p.id} ${p.name} 불러오기 완료`
+      )
       setProjectListOpen(false)
-      setWorkspaceTab('CODE')
+      setWorkspaceTab(restoredDesign.restored?'WORKFLOW':'CODE')
       setWorkflowView('TARGET')
       setScreen('WORKSPACE')
 
@@ -8239,6 +8415,9 @@ function IDE() {
         })
       },800)
     }catch(e){
+      requirementDraftDecisionPendingRef.current=false
+      setRequirementDraftDecisionPending(false)
+      projectAutoRestoreRootRef.current=''
       const msg='프로젝트 불러오기 실패: '+String(e)
       setProjectLoadMessage(msg)
       setProjectLoadProgress({
@@ -8258,6 +8437,7 @@ function IDE() {
     // v5.363: this is a hard project-context boundary, not just a navigation action.
     // Invalidate every pending load/adaptive-analysis request before clearing state.
     projectContextEpochRef.current+=1
+    projectAutoRestoreRootRef.current=''
     setAgentBuildMessage('')
     setWorkspaceTab('DESIGN')
     setWorkflowView('TARGET')
@@ -10124,6 +10304,7 @@ function IDE() {
       design_project_version:designProjectVersion||1,
       project_root:newAgentProjectRoot||root||'',
       workflow_request:workflowReq||'',
+      interview_input_draft:input||'',
       chat:Array.isArray(chat)?chat:[],
       confirmed_requirements:confirmedInterviewRequirements||{},
       workflow_preview:targetWorkflowPreview||null,
@@ -10171,6 +10352,7 @@ function IDE() {
       const snapshot=buildRequirementDraftSnapshot(resumeOverride)
       const hasUsefulData=
         snapshot.chat.some(item=>item?.role==='user')
+        || Boolean(String(snapshot.interview_input_draft||'').trim())
         || Boolean(snapshot.workflow_request)
         || Object.keys(snapshot.confirmed_requirements||{}).length>0
         || Boolean(snapshot.workflow_preview)
@@ -10195,17 +10377,21 @@ function IDE() {
     }
   }
 
-  const restoreRequirementDraft=async(keyOverride='')=>{
+  const restoreRequirementDraft=async(keyOverride='',snapshotOverride=null,resumeOverride=null)=>{
     try{
       const key=keyOverride||requirementDraftKey()
-      let snapshot=(requirementDraftCandidate?.snapshot&&typeof requirementDraftCandidate.snapshot==='object')
-        ? requirementDraftCandidate.snapshot
-        : null
+      let snapshot=(snapshotOverride&&typeof snapshotOverride==='object')
+        ? snapshotOverride
+        : (requirementDraftCandidate?.snapshot&&typeof requirementDraftCandidate.snapshot==='object')
+          ? requirementDraftCandidate.snapshot
+          : null
       if(!snapshot){
         const raw=localStorage.getItem(key)
         snapshot=raw?JSON.parse(raw):null
       }
       if(!snapshot) return false
+
+      setInput(String(snapshot?.interview_input_draft||''))
 
       if(Array.isArray(snapshot?.chat) && snapshot.chat.length){
         const restoredChat=snapshot.chat.map(item=>({
@@ -10241,22 +10427,46 @@ function IDE() {
       if(snapshot?.design_project_version) setDesignProjectVersion(snapshot.design_project_version)
       setUiLayoutConfig(snapshot?.ui_layout&&typeof snapshot.ui_layout==='object'?snapshot.ui_layout:null)
 
-      if(snapshot?.workflow_request) setWorkflowReq(snapshot.workflow_request)
-      if(snapshot?.confirmed_requirements) setConfirmedInterviewRequirements(snapshot.confirmed_requirements)
-      if(snapshot?.workflow_preview){
-        setTargetWorkflowPreview(snapshot.workflow_preview)
-        setPreviousTargetWorkflowPreview(snapshot.workflow_preview)
-        setTargetWorkflowQuality(snapshot.workflow_quality||null)
-      }
+      const resumeCandidate=(resumeOverride&&typeof resumeOverride==='object')
+        ? resumeOverride
+        : (requirementDraftCandidate?.build_resume&&typeof requirementDraftCandidate.build_resume==='object')
+          ? requirementDraftCandidate.build_resume
+          : (snapshot?.build_resume&&typeof snapshot.build_resume==='object'?snapshot.build_resume:null)
+      const restoredRuntimeState=resumeCandidate?.workflow_state&&typeof resumeCandidate.workflow_state==='object'
+        ? resumeCandidate.workflow_state
+        : {}
+      const restoredPreview=(snapshot?.workflow_preview&&typeof snapshot.workflow_preview==='object')
+        ? snapshot.workflow_preview
+        : (Object.keys(restoredRuntimeState).length
+          ? {
+              target_agent_workflow:restoredRuntimeState.target_agent_workflow||{},
+              agent_architecture:restoredRuntimeState.agent_architecture||{},
+              database_plan:restoredRuntimeState.database_plan||{},
+              file_plan:restoredRuntimeState.file_plan||{}
+            }
+          : null)
 
-      const resumeCandidate=(requirementDraftCandidate?.build_resume&&typeof requirementDraftCandidate.build_resume==='object')
-        ? requirementDraftCandidate.build_resume
-        : (snapshot?.build_resume&&typeof snapshot.build_resume==='object'?snapshot.build_resume:null)
+      const restoredRequest=String(snapshot?.workflow_request||restoredRuntimeState?.request||'').trim()
+      if(restoredRequest) setWorkflowReq(restoredRequest)
+      if(snapshot?.confirmed_requirements) setConfirmedInterviewRequirements(snapshot.confirmed_requirements)
+      if(restoredPreview&&Object.keys(restoredPreview).some(key=>Boolean(restoredPreview?.[key])&&Object.keys(restoredPreview?.[key]||{}).length)){
+        setTargetWorkflowPreview(restoredPreview)
+        setPreviousTargetWorkflowPreview(restoredPreview)
+        setTargetWorkflowQuality(snapshot.workflow_quality||null)
+        const restoredDatabasePlan=restoredPreview?.database_plan&&typeof restoredPreview.database_plan==='object'
+          ? restoredPreview.database_plan
+          : null
+        if(restoredDatabasePlan&&Object.keys(restoredDatabasePlan).length){
+          setLiveDatabasePreview({
+            ...restoredDatabasePlan,
+            ddl_preview:String(restoredDatabasePlan.ddl_preview||restoredDatabasePlan.ddl||'')
+          })
+          setLiveDatabasePreviewError('')
+        }
+      }
       if(resumeCandidate){
         setRestoredBuildResume(resumeCandidate)
-        const restoredState=resumeCandidate?.workflow_state&&typeof resumeCandidate.workflow_state==='object'
-          ? resumeCandidate.workflow_state
-          : null
+        const restoredState=Object.keys(restoredRuntimeState).length?restoredRuntimeState:null
         if(restoredState&&Object.keys(restoredState).length){
           setWorkflow({state:restoredState,failure_diagnostics:{
             project_root:resumeCandidate.project_root||snapshot.project_root||'',
@@ -10271,10 +10481,10 @@ function IDE() {
         if(failed){
           setAgentBuildStage('PROJECT_CREATED')
           setAgentBuildMessage(`이전 개발 실패 기록 복원됨${status?` · ${status}`:''}. 기존 생성 파일과 진단 기록을 사용해 다시 개발할 수 있습니다.`)
-        }else if(snapshot?.workflow_preview){
+        }else if(restoredPreview){
           setAgentBuildStage(snapshot?.agent_build_stage==='PROJECT_CREATED'?'PROJECT_CREATED':'WORKFLOW_READY')
         }
-      }else if(snapshot?.workflow_preview){
+      }else if(restoredPreview){
         setAgentBuildStage(snapshot?.agent_build_stage==='PROJECT_CREATED'?'PROJECT_CREATED':'WORKFLOW_READY')
       }else if(snapshot?.agent_build_stage){
         setAgentBuildStage(snapshot.agent_build_stage==='BUILDING'?'PROJECT_CREATED':snapshot.agent_build_stage)
@@ -10290,6 +10500,7 @@ function IDE() {
       setRequirementDraftSavedAt(snapshot?.saved_at||'')
       setRequirementDraftRestored(true)
       setRequirementDraftCandidate(null)
+      requirementDraftDecisionPendingRef.current=false
       setRequirementDraftDecisionPending(false)
       return true
     }catch(e){
@@ -10310,6 +10521,7 @@ function IDE() {
       const snapshot=buildRequirementDraftSnapshot()
       const hasUsefulData=
         snapshot.chat.some(item=>item?.role==='user')
+        ||Boolean(String(snapshot.interview_input_draft||'').trim())
         ||Boolean(snapshot.workflow_request)
         ||Object.keys(snapshot.confirmed_requirements||{}).length>0
         ||Boolean(snapshot.workflow_preview)
@@ -10492,10 +10704,11 @@ function IDE() {
     return {status,progress:Math.max(0,Math.min(100,progress))}
   }
 
-  const saveAgentDesignProject=async({createVersion=false,versionLabel=''}={})=>{
+  const saveAgentDesignProject=async({createVersion=false,versionLabel='',silent=false}={})=>{
     if(designProjectSaving) return null
     const snapshot=buildRequirementDraftSnapshot()
     const hasUserContent=(snapshot.chat||[]).some(item=>item?.role==='user')
+      ||Boolean(String(snapshot.interview_input_draft||'').trim())
       ||Boolean(snapshot.workflow_request)
       ||Boolean(snapshot.agent_name)
       ||(Array.isArray(snapshot.feature_registry)&&snapshot.feature_registry.length>0)
@@ -10530,13 +10743,16 @@ function IDE() {
         setDesignProjectSavedAt(project.updated_at||new Date().toISOString())
         setDesignProjectVersion(project.version_no||1)
         setRequirementDraftSavedAt(project.updated_at||snapshot.saved_at)
-        setAgentBuildMessage(createVersion
-          ? `설계 프로젝트 v${project.version_no||1} 저장 완료 · 변경 전 Snapshot을 보존했습니다.`
-          : 'Agent 설계 프로젝트를 저장했습니다. 다른 작업 후 프로젝트 목록에서 다시 열어 이어서 진행할 수 있습니다.')
+        if(!silent){
+          setAgentBuildMessage(createVersion
+            ? `설계 프로젝트 v${project.version_no||1} 저장 완료 · 변경 전 Snapshot을 보존했습니다.`
+            : 'Agent 설계 프로젝트를 저장했습니다. 다른 작업 후 프로젝트 목록에서 다시 열어 이어서 진행할 수 있습니다.')
+        }
       }
       return project||null
     }catch(e){
-      setAgentBuildMessage('설계 프로젝트 저장 실패: '+String(e?.message||e))
+      if(!silent) setAgentBuildMessage('설계 프로젝트 저장 실패: '+String(e?.message||e))
+      else console.warn('Agent 설계 프로젝트 자동 저장 실패',e)
       return null
     }finally{
       setDesignProjectSaving(false)
@@ -10553,6 +10769,7 @@ function IDE() {
     setNewAgentName(String(snapshot?.agent_name||project?.name||''))
     setNewAgentProjectRoot(String(snapshot?.project_root||project?.project_root||''))
     setWorkflowReq(String(snapshot?.workflow_request||''))
+    setInput(String(snapshot?.interview_input_draft||''))
     const restoredChat=Array.isArray(snapshot?.chat)&&snapshot.chat.length?snapshot.chat:[{
       role:'assistant',
       content:'저장된 Agent 설계 프로젝트를 불러왔습니다. 마지막 설계 상태부터 이어서 진행해 주세요.'
@@ -10636,15 +10853,28 @@ function IDE() {
     invalidateRequirementWorkflowAfterEdit(`${nextName} ${actionLabel}이 반영되었습니다. 변경된 기능의 영향도를 기준으로 Workflow를 증분 재설계할 수 있습니다.`)
   }
 
+  // v5.434: project persistence is automatic from the first meaningful draft.
+  // This is the DB-backed project save (not only browser localStorage/checkpoint), so
+  // interview typing, design review, project generation and DB/DDL changes survive reloads.
   useEffect(()=>{
-    if(!designProjectId||designProjectSaving||requirementDraftDecisionPending) return undefined
+    if(designProjectSaving||requirementDraftDecisionPending) return undefined
+    const snapshot=buildRequirementDraftSnapshot()
+    const hasMeaningfulDraft=(snapshot.chat||[]).some(item=>item?.role==='user')
+      ||Boolean(String(snapshot.interview_input_draft||'').trim())
+      ||Boolean(snapshot.workflow_request)
+      ||Boolean(snapshot.agent_name)
+      ||Boolean(snapshot.workflow_preview)
+      ||Object.keys(snapshot.confirmed_requirements||{}).length>0
+      ||(Array.isArray(snapshot.feature_registry)&&snapshot.feature_registry.length>0)
+    if(!hasMeaningfulDraft) return undefined
     const timer=setTimeout(()=>{
-      void saveAgentDesignProject()
-    },1200)
+      void saveAgentDesignProject({silent:true})
+    },900)
     return()=>clearTimeout(timer)
   },[
     designProjectId,
     chat,
+    input,
     designFeatureRegistry,
     confirmedInterviewRequirements,
     targetWorkflowPreview,
@@ -10653,7 +10883,10 @@ function IDE() {
     newAgentName,
     newAgentProjectRoot,
     uiLayoutConfig,
-    requirementManualOverrides
+    requirementManualOverrides,
+    interviewAttachmentSummary,
+    interviewAttachmentMemory,
+    restoredBuildResume
   ])
 
   const buildRequirementRequestFromCollectedInfo=()=>{
@@ -12757,9 +12990,11 @@ function IDE() {
         savedAt={designProjectSavedAt||requirementDraftSavedAt}
         status={designProjectProgressInfo().status}
         progress={designProjectProgressInfo().progress}
+        saving={designProjectSaving}
+        autoSaveEnabled={true}
         onNew={()=>{
           const hasWork=(chat||[]).some(item=>item?.role==='user')||Boolean(designProjectId)
-          if(hasWork&&!window.confirm('현재 Agent 설계를 종료하고 새 설계 프로젝트를 시작할까요?\n\n저장하지 않은 변경이 있다면 먼저 프로젝트 저장을 눌러주세요.')) return
+          if(hasWork&&!window.confirm("현재 Agent 설계를 종료하고 새 설계 프로젝트를 시작할까요?\n\n현재 변경 내용은 자동 저장되지만, 필요하면 '지금 저장'으로 별도 버전 Snapshot을 남길 수 있습니다.")) return
           startNewProject()
         }}
         onSave={()=>saveAgentDesignProject({createVersion:true,versionLabel:'사용자 수동 저장 Snapshot'})}
@@ -13529,7 +13764,7 @@ function IDE() {
       }
 
       let result=null
-      const streamResponse=await fetch(`${runtimeInfo().apiBase}/python/execute/stream`,{
+      const streamResponse=await apiFetch('/python/execute/stream',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({
@@ -16183,6 +16418,49 @@ function IDE() {
     }
   },[screen,workspaceTab,root])
 
+  const refreshScheduler=async({silent=false}={})=>{
+    if(schedulerRefreshInFlightRef.current) return
+    schedulerRefreshInFlightRef.current=true
+    if(!silent) setSchedulerBusy(true)
+    setSchedulerError('')
+    try{
+      const result=await api(`/scheduler/jobs?include_terminal=${schedulerIncludeTerminal?'true':'false'}&limit=100`)
+      setSchedulerReport(result||null)
+      return result
+    }catch(error){
+      setSchedulerError(error instanceof Error?error.message:String(error||'Scheduler 조회 실패'))
+      return null
+    }finally{
+      schedulerRefreshInFlightRef.current=false
+      if(!silent) setSchedulerBusy(false)
+    }
+  }
+
+  const cancelSchedulerJob=async(job)=>{
+    const source=String(job?.source||'').trim()
+    const jobId=String(job?.id||'').trim()
+    if(!source||!jobId||!job?.can_cancel) return
+    const busyKey=`${source}:${jobId}`
+    setSchedulerCancelBusy(busyKey)
+    setSchedulerError('')
+    try{
+      await api(`/scheduler/jobs/${encodeURIComponent(source)}/${encodeURIComponent(jobId)}/cancel`,{method:'POST'})
+      await new Promise(resolve=>window.setTimeout(resolve,120))
+      await refreshScheduler({silent:true})
+    }catch(error){
+      setSchedulerError(error instanceof Error?error.message:String(error||'Scheduler 실행취소 실패'))
+    }finally{
+      setSchedulerCancelBusy('')
+    }
+  }
+
+  useEffect(()=>{
+    if(screen!=='WORKSPACE'||workspaceTab!=='SCHEDULER') return undefined
+    refreshScheduler()
+    const timer=window.setInterval(()=>refreshScheduler({silent:true}),2000)
+    return()=>window.clearInterval(timer)
+  },[screen,workspaceTab,schedulerIncludeTerminal])
+
   const exportWorkspacePowerPoint=async(scope='ALL',deckType='AGENT')=>{
     const exportScope=String(scope||'ALL').toUpperCase()
     const exportDeckType=String(deckType||'AGENT').toUpperCase()
@@ -16217,7 +16495,7 @@ function IDE() {
         testReturncode:r.testReturncode
       }
 
-      const response=await fetch(`${runtimeInfo().apiBase}/presentation/export`,{
+      const response=await apiFetch('/presentation/export',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({
@@ -16631,7 +16909,7 @@ function IDE() {
     />}
 
     <main className={`workspace-main workspace-tab-${workspaceTab.toLowerCase()} ${
-      ['RUN','REPORT','ARCHITECTURE','DB_ERD','LLM','BROWSER'].includes(workspaceTab)
+      ['RUN','REPORT','ARCHITECTURE','DB_ERD','SCHEDULER','LLM','BROWSER'].includes(workspaceTab)
         ? 'compact-workspace result-only-workspace'
         : workspaceTab==='CODE'&&!isBinaryPreviewFile(selected)
           ? 'workspace-with-bottom-tools code-tools-workspace'
@@ -16657,6 +16935,7 @@ function IDE() {
             ['REPORT','분석 리포트'],
             ['ARCHITECTURE','아키텍처'],
             ['DB_ERD','DB ERD'],
+            ['SCHEDULER','스케줄러'],
             ['LLM','LLM 리스트'],
             ['BROWSER','웹브라우저']
           ].map(([k,t])=><button key={k}
@@ -16696,7 +16975,7 @@ function IDE() {
       </div>
 
       <div className={
-        ['RUN','REPORT','ARCHITECTURE','DB_ERD','LLM','BROWSER'].includes(workspaceTab)
+        ['RUN','REPORT','ARCHITECTURE','DB_ERD','SCHEDULER','LLM','BROWSER'].includes(workspaceTab)
           ? 'workspace-top-pane compact-result-pane'
           : 'workspace-top-pane'
       }>
@@ -18377,6 +18656,17 @@ function IDE() {
           </div>
         })()}
 
+        {workspaceTab==='SCHEDULER'&&<SchedulerPanel
+          report={schedulerReport}
+          loading={schedulerBusy}
+          error={schedulerError}
+          includeTerminal={schedulerIncludeTerminal}
+          cancelBusy={schedulerCancelBusy}
+          onRefresh={()=>refreshScheduler()}
+          onIncludeTerminalChange={setSchedulerIncludeTerminal}
+          onCancel={cancelSchedulerJob}
+        />}
+
         {workspaceTab==='LLM'&&<LlmCatalogPanel
           catalog={llmCatalog}
           history={llmHistory}
@@ -18832,6 +19122,8 @@ function IDE() {
               savedAt={designProjectSavedAt||requirementDraftSavedAt}
               status={designProjectProgressInfo().status}
               progress={designProjectProgressInfo().progress}
+              saving={designProjectSaving}
+              autoSaveEnabled={true}
               showNew={false}
               panelMode
               onSave={()=>saveAgentDesignProject({createVersion:true,versionLabel:'사용자 수동 저장 Snapshot'})}
@@ -20155,6 +20447,7 @@ function IDE() {
     {id:'report',icon:'▤',category:'워크스페이스',title:'분석 리포트 열기',description:'현재 Agent/프로젝트 분석 리포트를 확인합니다.',run:()=>openWorkspaceCommand('REPORT')},
     {id:'architecture',icon:'▱',category:'워크스페이스',title:'아키텍처 열기',description:'프로젝트 적응형 Architecture를 확인합니다.',run:()=>openWorkspaceCommand('ARCHITECTURE')},
     {id:'erd',icon:'DB',category:'데이터베이스',title:'DB ERD 열기',description:'현재 Agent/프로젝트 DB ERD를 확인합니다.',keywords:['erd','database'],run:()=>openWorkspaceCommand('DB_ERD')},
+    {id:'scheduler',icon:'◷',category:'워크스페이스',title:'스케줄러 열기',description:'현재 Backend Scheduler 실행 목록과 취소 상태를 확인합니다.',keywords:['scheduler','job','background','스케줄러'],run:()=>openWorkspaceCommand('SCHEDULER')},
     {id:'llm',icon:'LLM',category:'워크스페이스',title:'LLM 리스트 열기',description:'LLM 사용/호출 목록 화면으로 이동합니다.',run:()=>openWorkspaceCommand('LLM')},
     {id:'browser',icon:'◎',category:'워크스페이스',title:'웹브라우저 열기',description:'AgentStudio 웹브라우저 Workspace를 엽니다.',run:()=>openWorkspaceCommand('BROWSER')},
     {id:'find-current',icon:'⌕',category:'찾기',title:'현재 파일에서 텍스트 찾기',description:'현재 편집 파일에서 문자열을 검색합니다.',keywords:['찾기','검색'],run:()=>{openWorkspaceCommand('CODE');openEditorTextSearch('CURRENT')}},

@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 
-const MAX_SECONDS=180
+const MAX_SECONDS=300
 const MISSING_BOX_GRACE_MS=5000
 
 // Module-level runtime deliberately survives React StrictMode mount/unmount cycles and
@@ -72,26 +72,18 @@ export function ThemeImportWatchdogEnhancer(){
 
       const warning=box.querySelector('[data-analysis-progress-warning]')
       if(warning){
-        warning.textContent='전체 제한 3분을 초과했습니다. Backend Hard Timeout과 별개로 화면도 시간 초과 상태로 전환하고 취소를 요청합니다.'
+        warning.textContent='최대 분석시간 5분에 도달했습니다. Backend가 실패 처리하고 분석 Process를 종료하는 상태를 확인 중입니다.'
         warning.style.display='block'
       }
       box.classList.add('warning')
       const message=box.querySelector('[data-analysis-progress-message]')
-      if(message)message.textContent='전체 통합 분석 제한시간 3분을 초과했습니다. Backend 종료 상태를 확인하고 작업 취소를 요청합니다.'
+      if(message)message.textContent='최대 분석시간 5분에 도달했습니다. Backend 실패 종료 상태를 확인하고 있습니다.'
       const stage=box.querySelector('[data-analysis-progress-stage]')
-      if(stage)stage.textContent='CLIENT_TIMEOUT'
+      if(stage)stage.textContent='BACKEND_TIMEOUT_PENDING'
       const cancel=box.querySelector('[data-analysis-cancel]')
-      if(cancel&&!cancel.disabled){
-        try{cancel.click()}catch{}
-      }
-
-      window.setTimeout(()=>{
-        if(!box.isConnected||box.classList.contains('done'))return
-        box.classList.add('done')
-        const bar=box.querySelector('[data-analysis-progress-bar]')
-        if(bar)bar.style.animation='none'
-        if(cancel){cancel.disabled=true;cancel.textContent='시간 초과'}
-      },1500)
+      // Automatic timeout is not a user cancellation. Backend is authoritative and
+      // returns FAILED at 300 seconds; keep the UI active until that state is observed.
+      if(cancel){cancel.disabled=true;cancel.textContent='Backend 종료 확인 중'}
     }
 
     // 250ms makes the visible seconds stable even when backend polling is delayed.

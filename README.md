@@ -1,11 +1,53 @@
-# THEANOVA AgentStudio v5.412
+# THEANOVA AgentStudio v5.435
 
 ## High-Speed Analysis Pipeline
 
 Agent 설계/개발 진행 전에 프로젝트 전체를 LLM이 반복 분석하지 않도록 `Incremental Cache + BM25 + AST/Import Parser + Dependency Graph + Optional PyTorch Tensor Fusion`을 통합했습니다. 관련 후보를 먼저 로컬에서 압축한 뒤 기존 Validator/LLM Workflow로 넘깁니다.
 
-> Latest patch: **v5.412 NotebookSmoothLiveOutputRendering**
+> Latest patch: **v5.435 InteractiveThemePageAndMotionImport**
 
+
+
+### v5.435 주요 변경
+- Theme 미리보기의 `Dashboard / Activity / Settings` 메뉴를 실제 클릭 가능한 페이지 전환으로 변경했습니다. 각 메뉴는 Dashboard KPI, Activity 목록, Settings 옵션처럼 서로 다른 Preview 화면을 표시합니다.
+- URL Theme에서 원본 Navigation 항목이 확인되면 Template/전체 미리보기의 메뉴도 `⌂ Home`, `◉ All issues`, `⇄ All pull requests`, `▣ All repositories`, `▦ Projects`처럼 **아이콘 + 텍스트** 항목으로 즉시 표시하고 각 항목 클릭 시 해당 Preview 페이지로 전환합니다.
+- Chrome CDP 렌더링 분석이 메뉴 항목을 실제 Hover하여 Normal/Hover 차이를 수집합니다. background/color뿐 아니라 `transition`, `transform`, `opacity`, `filter`, `box-shadow`, font weight, text decoration, padding, border 상태를 분석합니다.
+- CSS가 `transition-property`, `transition-duration`, `transition-timing-function`처럼 분리 선언되어 있어도 canonical `transition` 규칙으로 복원합니다. SPA 런타임 애니메이션도 duration/timing/transform을 추출합니다. 원본 사이트의 고유 keyframe 이름/코드는 복제하지 않고 동일한 동작 감각을 안전한 transition으로 재현합니다.
+- Static CSS와 Chrome Hover Probe가 모두 존재하면 상태별 Evidence confidence를 비교해 더 강한 근거를 사용하므로, 정적 색상만 남고 실제 Hover motion이 사라지는 문제를 방지합니다.
+- 생성 Agent에도 가져온 Menu transition/transform/opacity/filter/boxShadow/textDecoration/fontWeight/padding/borderBottom/motion timing을 적용하도록 Agent Factory 지침을 확장했습니다.
+
+### v5.434 주요 변경
+- Agent 설계 프로젝트는 첫 유효 입력부터 DB 기반 자동 저장됩니다. 인터뷰 입력 중 Draft, 설계 검토, 프로젝트 생성 단계, DB/DDL 확정, 개발 성공/실패 Resume 상태를 자동 저장 대상으로 포함합니다.
+- `프로젝트 저장`은 `지금 저장` 수동 Snapshot 기능으로 유지하고, UI에 `자동 저장 ON / 자동 저장 중 / 자동 저장됨` 상태를 표시합니다.
+- URL Theme의 Chrome CDP 렌더링 분석에서 Navigation 항목의 SVG/아이콘 존재, icon side/size/gap을 감지합니다. GitHub처럼 아이콘+텍스트 메뉴가 확인되면 Preview와 생성 Agent 지침에 `icon_text` 구조를 반영합니다. 원본 독점 SVG path는 복제하지 않고 의미상 동등한 일반 아이콘을 사용합니다.
+
+
+- 웹사이트 Theme 분석을 **정적 HTML/CSS + 실제 Chrome 렌더링/Computed Style 병렬 분석**으로 변경했습니다. Notion/Linear 같은 SPA가 정적 요청을 차단하거나 정적 Worker가 지연되어도 Chrome 렌더링 결과만으로 Theme 저장을 계속할 수 있습니다.
+- Chrome 분석에서 실제 렌더링 DOM의 색상, 글꼴, Radius, CSS Custom Property, 메뉴/버튼/입력/카드 스타일을 추출해 정적 CSS 없이도 Theme 토큰을 구성합니다.
+- 정적/Chrome 한쪽 실패는 부분 성공으로 처리하고, **두 분석이 모두 실패할 때만** URL 분석 실패로 처리합니다. 전체 Backend hard timeout 5분(300초) 정책은 그대로 유지합니다.
+- Agent/Studio PPT 다운로드를 인증 토큰이 포함된 공통 `apiFetch()` 경로로 변경하여 로그인 상태에서도 `/presentation/export`가 정상 호출되도록 수정했습니다.
+- CORS Middleware를 인증 Middleware 바깥쪽에 배치하여 401/403도 브라우저가 정상 HTTP 오류로 받을 수 있게 했고, `Failed to fetch`로 가려지던 문제를 제거했습니다.
+- Notebook 스트리밍 실행도 동일한 인증 fetch 경로를 사용하도록 보완했습니다.
+
+### v5.432 주요 변경
+- UI / Layout Theme 분석은 기존과 동일하게 **Backend 최대 5분(300초)**을 유지합니다.
+- 5분 초과 시 단순 `FAILED` 표시로 끝내지 않고 Backend 실행 Task와 Theme Worker Process가 실제 종료될 때까지 상태를 확인합니다.
+- Theme 분석 화면에 `Backend 작업 종료 확인됨 · Worker Process 0개` 상태를 표시하고, 스케줄러에서도 종료 처리 중/종료 확인 상태를 구분합니다.
+- 이전 프로젝트를 열 때 `reports/agentstudio_design_checkpoint.json`의 설계 검토 결과·Workflow·DB 설계를 자동 복원합니다.
+- DB 설계 확정 후 Checkpoint 저장 타이밍이 늦었더라도 `backend/migrations/001_initial_schema.sql`이 있으면 SQL을 복원하여 Workflow의 DB 설계/DDL에 다시 연결합니다.
+- 프로젝트 로딩 중 빈 화면 상태가 기존 Checkpoint를 덮어쓰지 않도록 자동 저장을 잠시 차단하고, 복원 성공 시 Workflow 탭을 바로 표시합니다.
+
+
+### v5.431 주요 변경
+- `DB ERD` 오른쪽에 `스케줄러` 탭을 추가했습니다.
+- AgentStudio Background Job과 UI / Layout Theme 분석 Job을 통합 목록으로 표시합니다.
+- 실행 중/대기 중 작업의 진행률·단계·메시지·시작/갱신 시간을 표시합니다.
+- 각 활성 작업 우측 `실행취소` 버튼으로 해당 Backend Task만 취소합니다.
+- 기본은 활성 작업만 표시하고 `종료된 작업 포함`으로 최근 완료/실패/취소 이력을 확인할 수 있습니다.
+
+### v5.430 주요 변경
+- `/api/health`가 CORS Middleware를 정상 통과하도록 Backend 인증 Guard 흐름을 수정했습니다.
+- Theme 통합 분석은 Backend 기준 최대 5분 Hard Timeout 정책을 유지합니다.
 
 
 

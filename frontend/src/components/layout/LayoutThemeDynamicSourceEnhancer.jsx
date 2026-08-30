@@ -83,7 +83,7 @@ const elapsedText=start=>{
   return `${mm}:${ss}`
 }
 
-function setProgress(host,pct,message,stage,start,{done=false,error=false,warning=false,stalledSeconds=0,urlTimeout=45,jobTimeout=300,canCancel=true}={}){
+function setProgress(host,pct,message,stage,start,{done=false,error=false,warning=false,stalledSeconds=0,urlTimeout=300,jobTimeout=300,canCancel=true}={}){
   const box=host.querySelector('[data-analysis-progress]')
   const bar=host.querySelector('[data-analysis-progress-bar]')
   const percent=host.querySelector('[data-analysis-progress-percent]')
@@ -104,8 +104,8 @@ function setProgress(host,pct,message,stage,start,{done=false,error=false,warnin
   msg.textContent=message||'분석 중입니다.'
   stageEl.textContent=stage||'ANALYSIS'
   if(heartbeat)heartbeat.textContent=`마지막 진행 갱신 ${Math.max(0,Number(stalledSeconds)||0)}초 전`
-  if(limits)limits.textContent=`URL 제한 ${urlTimeout}초 · 전체 제한 ${Math.round(jobTimeout/60)}분`
-  if(warn)warn.textContent=`${Math.max(0,Number(stalledSeconds)||0)}초 동안 진행 단계가 갱신되지 않았습니다. 외부 사이트 응답 지연일 수 있습니다. 45초 URL 제한 또는 5분 전체 제한 후 자동으로 다음 처리/중단됩니다.`
+  if(limits)limits.textContent=`전체 분석 제한 ${Math.round(jobTimeout/60)}분 · Backend 기준`
+  if(warn)warn.textContent=`${Math.max(0,Number(stalledSeconds)||0)}초 동안 진행 단계가 갱신되지 않았습니다. 외부 사이트 응답 지연일 수 있습니다. 전체 5분을 초과하면 Backend가 실패 처리하고 분석을 종료합니다.`
   if(cancel){cancel.disabled=!canCancel||done;cancel.textContent=canCancel?'작업 취소':'취소 처리 중...'}
 }
 
@@ -120,7 +120,7 @@ async function waitForJob(host,job,start,state){
     setProgress(host,displayed,current.message||'통합 분석이 진행 중입니다.',current.stage||'analysis',start,{
       warning:Boolean(current.stalled),
       stalledSeconds:stalled,
-      urlTimeout:Number(current.url_timeout_seconds||45),
+      urlTimeout:Number(current.url_timeout_seconds||300),
       jobTimeout:Number(current.job_timeout_seconds||300),
       canCancel:Boolean(current.can_cancel),
     })
@@ -165,7 +165,7 @@ function install(panel){
 
   const state={urls:[''],files:[null],roles:['default'],busy:false,jobId:'',cancelRequested:false}
   const host=document.createElement('div');host.className='ui-layout-dynamic-source'
-  host.innerHTML=`<div class="ui-layout-dynamic-head"><b>동적 스타일 참고 자료</b><span>URL/이미지는 필요한 만큼 추가하여 통합 분석합니다.</span></div><div class="ui-layout-dynamic-section"><div class="ui-layout-dynamic-title"><strong>웹사이트 URL</strong><button type="button" data-add-url>＋ URL 추가</button></div><div data-dynamic-urls></div></div><div class="ui-layout-dynamic-section"><div class="ui-layout-dynamic-title"><strong>화면 캡처 이미지</strong><button type="button" data-add-image>＋ 이미지 추가</button></div><div data-dynamic-images></div></div><div class="ui-layout-dynamic-progress" data-analysis-progress><div class="ui-layout-dynamic-progress-head"><strong>통합 분석 · 저장 진행률</strong><span data-analysis-progress-percent>0% · 경과 00:00</span></div><div class="ui-layout-dynamic-progress-track"><div class="ui-layout-dynamic-progress-bar" data-analysis-progress-bar></div></div><div class="ui-layout-dynamic-progress-message" data-analysis-progress-message>대기 중</div><div class="ui-layout-dynamic-progress-stage" data-analysis-progress-stage>READY</div><div class="ui-layout-dynamic-progress-meta"><span data-analysis-heartbeat>마지막 진행 갱신 0초 전</span><span data-analysis-limits>URL 제한 45초 · 전체 제한 5분</span></div><div class="ui-layout-dynamic-progress-warning" data-analysis-progress-warning></div><div class="ui-layout-dynamic-progress-actions"><button type="button" class="ui-layout-dynamic-cancel" data-analysis-cancel>작업 취소</button></div></div><div class="ui-layout-dynamic-status"></div>`
+  host.innerHTML=`<div class="ui-layout-dynamic-head"><b>동적 스타일 참고 자료</b><span>URL/이미지는 필요한 만큼 추가하여 통합 분석합니다.</span></div><div class="ui-layout-dynamic-section"><div class="ui-layout-dynamic-title"><strong>웹사이트 URL</strong><button type="button" data-add-url>＋ URL 추가</button></div><div data-dynamic-urls></div></div><div class="ui-layout-dynamic-section"><div class="ui-layout-dynamic-title"><strong>화면 캡처 이미지</strong><button type="button" data-add-image>＋ 이미지 추가</button></div><div data-dynamic-images></div></div><div class="ui-layout-dynamic-progress" data-analysis-progress><div class="ui-layout-dynamic-progress-head"><strong>통합 분석 · 저장 진행률</strong><span data-analysis-progress-percent>0% · 경과 00:00</span></div><div class="ui-layout-dynamic-progress-track"><div class="ui-layout-dynamic-progress-bar" data-analysis-progress-bar></div></div><div class="ui-layout-dynamic-progress-message" data-analysis-progress-message>대기 중</div><div class="ui-layout-dynamic-progress-stage" data-analysis-progress-stage>READY</div><div class="ui-layout-dynamic-progress-meta"><span data-analysis-heartbeat>마지막 진행 갱신 0초 전</span><span data-analysis-limits>전체 분석 제한 5분</span></div><div class="ui-layout-dynamic-progress-warning" data-analysis-progress-warning></div><div class="ui-layout-dynamic-progress-actions"><button type="button" class="ui-layout-dynamic-cancel" data-analysis-cancel>작업 취소</button></div></div><div class="ui-layout-dynamic-status"></div>`
   const themeNameLabel=labels.find(label=>label.querySelector('span')?.textContent?.includes('Theme 이름'))
   if(themeNameLabel?.parentElement===panel)themeNameLabel.insertAdjacentElement('afterend',host);else panel.insertBefore(host,panel.children[1]||null)
   const status=host.querySelector('.ui-layout-dynamic-status')

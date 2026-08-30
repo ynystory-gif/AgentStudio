@@ -53,6 +53,10 @@ def _write_job_failure_log(
     return str(log_path)
 
 
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
 @dataclass
 class Job:
     id: str
@@ -64,6 +68,10 @@ class Job:
     # v5.345: lightweight build trace. Node-boundary events only; never token logs.
     events: list[dict] = field(default_factory=list)
     last_node: str = ""
+    # v5.431: Scheduler workspace needs stable lifecycle timestamps even before
+    # the first RUNNING event is broadcast.
+    created_at: str = field(default_factory=_now_iso)
+    updated_at: str = field(default_factory=_now_iso)
 
 class JobManager:
     """
@@ -104,6 +112,7 @@ class JobManager:
             job.result = result
         if node is not None:
             job.last_node = str(node or "")
+        job.updated_at = _now_iso()
 
         # Keep only coarse state/node changes. This does not invoke an LLM and does
         # not write one line per token, so build performance and disk I/O stay stable.

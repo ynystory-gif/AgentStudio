@@ -3283,7 +3283,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.412", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.435", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering+SchedulerWorkspace+ParallelRenderedThemeFallback+AuthenticatedPptExportCors+InteractiveThemePagePreview+RenderedMenuMotionProbe"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -3879,7 +3879,7 @@ async def export_agentstudio_presentation(payload: PresentationExportRequest):
         content, filename = await asyncio.to_thread(
             build_agentstudio_presentation,
             data,
-            "5.392",
+            "5.435",
         )
     except Exception as exc:
         raise HTTPException(
@@ -6608,6 +6608,83 @@ def _read_json_dict(path: Path) -> dict:
         return {}
 
 
+def _hydrate_saved_database_sql(root: Path, snapshot: dict, workflow_state: dict) -> dict:
+    """Restore finalized DB DDL from the generated migration when checkpoint JSON is stale.
+
+    A DB design can be finalized moments after the design checkpoint autosave. If the
+    browser is closed during that narrow window, the migration SQL is authoritative and
+    must be reattached when the project is opened again. Only files inside project root
+    are eligible.
+    """
+    safe_snapshot = dict(snapshot or {})
+    preview = dict(safe_snapshot.get("workflow_preview") or {})
+    state = dict(workflow_state or {})
+
+    # Legacy workflow_state can contain the design even when the UI checkpoint does not.
+    for key in ("target_agent_workflow", "agent_architecture", "file_plan"):
+        if not preview.get(key) and state.get(key):
+            preview[key] = _safe_resume_value(state.get(key))
+
+    plan = dict(preview.get("database_plan") or state.get("database_plan") or {})
+
+    # Even very old projects can have a finalized migration without a serialized
+    # database_plan. Treat the generated migration as the durable DB artifact and
+    # rebuild a minimal plan so the Workflow/DB SQL panes are not blank after load.
+    ddl = str(plan.get("ddl") or plan.get("ddl_preview") or "").strip()
+    if not ddl:
+        candidates: list[str] = []
+        for item in list(plan.get("migration_files") or []):
+            if isinstance(item, dict):
+                value = str(item.get("path") or "").strip()
+            else:
+                value = str(item or "").strip()
+            if value and value not in candidates:
+                candidates.append(value)
+        for default_path in (
+            "backend/migrations/001_initial_schema.sql",
+        ):
+            if default_path not in candidates:
+                candidates.append(default_path)
+
+        root_resolved = root.resolve()
+        for relative in candidates:
+            try:
+                candidate = (root_resolved / relative).resolve()
+                if candidate != root_resolved and root_resolved not in candidate.parents:
+                    continue
+                if not candidate.is_file():
+                    continue
+                text = candidate.read_text(encoding="utf-8", errors="replace").strip()
+                if not text:
+                    continue
+                ddl = text
+                plan["ddl"] = text
+                plan["ddl_preview"] = text
+                plan["confirmed"] = True
+                plan["finalized"] = True
+                if not plan.get("migration_files"):
+                    plan["migration_files"] = [{
+                        "path": str(candidate.relative_to(root_resolved)).replace("\\", "/"),
+                        "purpose": "복원된 PostgreSQL DB Migration",
+                    }]
+                break
+            except Exception:
+                continue
+
+    if ddl:
+        plan.setdefault("enabled", True)
+        plan.setdefault("engine", "postgresql")
+        plan.setdefault("database", "PostgreSQL")
+        plan["confirmed"] = True
+        plan["finalized"] = True
+        plan.setdefault("ddl", ddl)
+        plan.setdefault("ddl_preview", ddl)
+    if plan:
+        preview["database_plan"] = _safe_resume_value(plan)
+    safe_snapshot["workflow_preview"] = preview
+    return _safe_resume_value(safe_snapshot)
+
+
 # v5.371 Failed Build Redevelopment
 _FAILURE_RESUME_PREVIOUS_NODE = {
     "requirement_analysis": "requirement_analysis",
@@ -6821,6 +6898,8 @@ async def load_workflow_design_checkpoint(project_root: str):
         legacy_snapshot = _safe_resume_value(legacy_snapshot)
 
     chosen = checkpoint or legacy_snapshot
+    if chosen:
+        chosen = _hydrate_saved_database_sql(root, chosen, workflow_state)
     redevelopment = _redevelopment_descriptor(
         root,
         workflow_state,

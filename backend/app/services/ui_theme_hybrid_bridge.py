@@ -12,8 +12,8 @@ layout_service.analyze_theme_with_layout_contract = analyze_theme_with_layout_co
 
 from app.api import ui_theme_dynamic_routes as dynamic_routes  # noqa: E402
 
-dynamic_routes._URL_ANALYSIS_TIMEOUT_SECONDS = 100
-dynamic_routes._JOB_TIMEOUT_SECONDS = 180
+dynamic_routes._JOB_TIMEOUT_SECONDS = 300
+dynamic_routes._URL_ANALYSIS_TIMEOUT_SECONDS = dynamic_routes._JOB_TIMEOUT_SECONDS
 
 # FastAPI lifespan already calls chromium_browser_manager.shutdown(). Extend that single
 # shutdown path so AgentStudio-owned Theme Python/Playwright process trees are terminated

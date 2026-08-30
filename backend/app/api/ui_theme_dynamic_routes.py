@@ -38,8 +38,8 @@ class DynamicThemeImportRequest(BaseModel):
 _DYNAMIC_IMPORT_JOBS: dict[str, dict] = {}
 _DYNAMIC_IMPORT_TASKS: dict[str, asyncio.Task] = {}
 _JOB_LIMIT = 50
-_URL_ANALYSIS_TIMEOUT_SECONDS = 45
 _JOB_TIMEOUT_SECONDS = 300
+_URL_ANALYSIS_TIMEOUT_SECONDS = _JOB_TIMEOUT_SECONDS
 _STALL_WARNING_SECONDS = 60
 
 
@@ -81,6 +81,12 @@ def _job_snapshot(job: dict) -> dict:
         "cancel_requested": bool(job.get("cancel_requested")),
         "can_cancel": active and not bool(job.get("cancel_requested")),
     }
+
+
+def list_dynamic_import_job_snapshots() -> list[dict]:
+    """Return live/recent Theme jobs for the AgentStudio Scheduler workspace."""
+    _prune_jobs()
+    return [_job_snapshot(job) for job in _DYNAMIC_IMPORT_JOBS.values()]
 
 
 def _prune_jobs() -> None:
@@ -172,22 +178,13 @@ async def _run_dynamic_import(
             total=url_count,
         )
         try:
-            analysis = await asyncio.wait_for(
-                analyze_theme_with_layout_contract(url),
-                timeout=_URL_ANALYSIS_TIMEOUT_SECONDS,
-            )
+            # v5.429: no shorter per-URL elapsed-time cutoff. The whole import job has
+            # one backend-authoritative 5-minute hard deadline. Cancellation at that
+            # deadline propagates into killable Theme workers and browser cleanup.
+            analysis = await analyze_theme_with_layout_contract(url)
             analyses.append(analysis)
-        except asyncio.TimeoutError:
-            warnings.append(
-                f"URL {index} 분석 제한시간 {_URL_ANALYSIS_TIMEOUT_SECONDS}초 초과로 건너뜀: {url}"
-            )
-            report(
-                before,
-                "url_timeout",
-                f"URL {index}/{url_count} 응답 지연으로 건너뛰고 다음 자료를 분석합니다.",
-                current=index,
-                total=url_count,
-            )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             warnings.append(f"URL {index} 분석 실패: {url} · {str(exc) or type(exc).__name__}")
         after = start + int(span * index / max(1, url_count))
