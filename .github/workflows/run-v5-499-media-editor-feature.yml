@@ -1,0 +1,146 @@
+name: Run v5.499 Media Editor Feature Validation
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  validate-build-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/v5.499-media-workflow-editor-ui
+          fetch-depth: 0
+
+      - name: Restore Media Editor source bundle
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64, io, re, tarfile
+          source=Path('.github/workflows/validate-v5-499-media-workflow-editor.yml').read_text(encoding='utf-8')
+          match=re.search(r"payload = '''([A-Za-z0-9+/=]+)'''",source)
+          if not match:
+              raise AssertionError('v5.499 source payload not found')
+          raw=base64.b64decode(match.group(1))
+          with tarfile.open(fileobj=io.BytesIO(raw),mode='r:gz') as tf:
+              tf.extractall('.')
+          print('v5.499 source bundle restored')
+          PY
+
+      - name: Integrate Media Editor with existing Target Workflow
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          app=Path('frontend/src/App.jsx')
+          text=app.read_text(encoding='utf-8')
+          replacements=[
+              ("import { useMediaSession } from './components/media/MediaSessionProvider'", "import { useMediaSession } from './components/media/MediaSessionProvider'\nimport { MediaWorkflowEditor } from './components/media/MediaWorkflowEditor'"),
+              ("const AGENTSTUDIO_FRONTEND_VERSION='5.498'", "const AGENTSTUDIO_FRONTEND_VERSION='5.499'"),
+              ("function TargetWorkflowDiagram({workflow}){\n  const [selectedGroup,setSelectedGroup]=useState(null)", "function TargetWorkflowDiagram({workflow,onWorkflowChange}){\n  const [selectedGroup,setSelectedGroup]=useState(null)\n  const [workflowMode,setWorkflowMode]=useState('GROUPS')"),
+          ]
+          for old,new in replacements:
+              if text.count(old)!=1: raise AssertionError(f'App.jsx marker mismatch: {old[:60]} -> {text.count(old)}')
+              text=text.replace(old,new,1)
+          old='''  if(!rawSteps.length){\n    return <div className="target-empty">'''
+          new='''  const mediaStepTypes=new Set(['media_input','media_analysis','media_plan','media_process','media_generate','media_validate','approval','preview'])\n  const hasMediaWorkflow=rawSteps.some(step=>mediaStepTypes.has(String(step?.type||'').toLowerCase()))\n    ||(Array.isArray(workflow?.nodes)&&workflow.nodes.some(node=>String(node?.type||'').toUpperCase().includes('IMAGE')||String(node?.type||'').toUpperCase().includes('VIDEO')))\n\n  if(!rawSteps.length){\n    return <div className="target-empty">'''
+          if text.count(old)!=1: raise AssertionError('rawSteps marker mismatch')
+          text=text.replace(old,new,1)
+          old='''  const activeGroup=groups.find(x=>x.id===selectedGroup)\n\n  if(activeGroup){'''
+          new='''  const activeGroup=groups.find(x=>x.id===selectedGroup)\n\n  if(workflowMode==='MEDIA_EDITOR'&&hasMediaWorkflow){\n    return <div className="media-workflow-editor-back-shell">\n      <MediaWorkflowEditor workflow={workflow} onChange={onWorkflowChange} onClose={()=>setWorkflowMode('GROUPS')} />\n    </div>\n  }\n\n  if(activeGroup){'''
+          if text.count(old)!=1: raise AssertionError('active group marker mismatch')
+          text=text.replace(old,new,1)
+          old='''      <span>그룹을 클릭하면 상세 단계가 표시됩니다.</span>\n    </div>'''
+          new='''      <div className="media-workflow-editor-actions">\n        <span>그룹을 클릭하면 상세 단계가 표시됩니다.</span>\n        {hasMediaWorkflow&&<button type="button" className="media-workflow-editor-open" onClick={()=>setWorkflowMode('MEDIA_EDITOR')}>▧ Media Workflow Editor</button>}\n      </div>\n    </div>'''
+          if text.count(old)!=1: raise AssertionError('group header marker mismatch')
+          text=text.replace(old,new,1)
+          old='''            <TargetWorkflowDiagram workflow={targetWorkflowPreview?.target_agent_workflow||(selectedProjectId?loadedProjectAnalysis?.adaptive_report?.workflow:null)}/>'''
+          new='''            <TargetWorkflowDiagram\n              workflow={targetWorkflowPreview?.target_agent_workflow||(selectedProjectId?loadedProjectAnalysis?.adaptive_report?.workflow:null)}\n              onWorkflowChange={(nextWorkflow)=>{\n                setTargetWorkflowPreview(prev=>prev?{...prev,target_agent_workflow:nextWorkflow}:prev)\n                setPreviousTargetWorkflowPreview(prev=>prev?{...prev,target_agent_workflow:nextWorkflow}:prev)\n                setAgentBuildMessage('Media Workflow Editor 변경사항을 설계에 반영했습니다. Draft/Checkpoint에 자동 저장됩니다.')\n              }}\n            />'''
+          if text.count(old)!=1: raise AssertionError('TargetWorkflowDiagram invocation mismatch')
+          text=text.replace(old,new,1)
+          app.write_text(text,encoding='utf-8')
+
+          for path in ('backend/app/main.py','backend/app/api/routes.py'):
+              p=Path(path); value=p.read_text(encoding='utf-8')
+              if '5.498' not in value: raise AssertionError(f'{path}: v5.498 marker missing')
+              p.write_text(value.replace('5.498','5.499'),encoding='utf-8')
+
+          readme=Path('README.md')
+          intro='''## v5.499 Media Workflow Editor UI\n\n- 기존 그룹형 Target Agent Workflow를 유지하면서 Media Agent에 Node Palette · 편집 Canvas · Node 설정 · Preview/Job 상태 UI를 추가했습니다.\n- Backend Media Node Catalog를 직접 읽고 Typed Port 연결을 `/api/media/workflow/validate-port`로 검증합니다.\n- Canvas에서 Node 추가/이동/삭제, Output→Input 연결, Provider/Model/크기/Retry 설정, Workflow JSON 가져오기/내보내기를 지원합니다.\n- `/api/media/workflow/validate`와 `/normalize`로 전체 Workflow를 검증·정규화한 뒤 Agent 설계 Draft/Checkpoint에 반영합니다.\n- Editor 실행/정지는 설계 단계임을 명시하고 실제 Provider 실행은 생성 대상 Agent Adapter Runtime의 책임으로 유지합니다.\n\n'''
+          readme.write_text(intro+readme.read_text(encoding='utf-8'),encoding='utf-8')
+          print('v5.499 UI integration PASS')
+          PY
+
+      - name: Validate backend and editor source contracts
+        shell: bash
+        run: |
+          python -m compileall -q backend/app
+          python - <<'PY'
+          from pathlib import Path
+          app=Path('frontend/src/App.jsx').read_text(encoding='utf-8')
+          component=Path('frontend/src/components/media/MediaWorkflowEditor.jsx').read_text(encoding='utf-8')
+          service=Path('frontend/src/services/mediaWorkflowApi.js').read_text(encoding='utf-8')
+          assert "AGENTSTUDIO_FRONTEND_VERSION='5.499'" in app
+          assert 'MediaWorkflowEditor' in app and 'onWorkflowChange' in app
+          assert "design = enforce_blender_3d_agent_design(design, request)" in Path('backend/app/services/agent_factory_workflow_design.py').read_text(encoding='utf-8')
+          for endpoint in ('/media/workflow/catalog','/media/workflow/validate-port','/media/workflow/normalize','/media/workflow/validate'):
+              assert endpoint in service
+          for marker in ('draggable','connectToInput','Node 설정','Preview / Job 상태','JSON 가져오기','JSON 내보내기','EDITOR MODE'):
+              assert marker in component
+          assert 'version="5.499"' in Path('backend/app/main.py').read_text(encoding='utf-8')
+          assert '"version": "5.499"' in Path('backend/app/api/routes.py').read_text(encoding='utf-8')
+          print('v5.499 source contract PASS')
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend clean production build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Commit tested feature source
+        shell: bash
+        run: |
+          git config user.name "ynystory-gif"
+          git config user.email "ynystory@gmail.com"
+          git add README.md README_V5_499_MediaWorkflowEditorUI.md frontend/src/App.jsx frontend/src/components/media/MediaWorkflowEditor.jsx frontend/src/components/media/MediaWorkflowEditor.css frontend/src/services/mediaWorkflowApi.js backend/app/main.py backend/app/api/routes.py
+          git commit -m "feat: add Media Workflow Editor UI v5.499 [skip ci]"
+          git push origin HEAD:fix/v5.499-media-workflow-editor-ui
+
+      - name: Build clean distribution tree
+        shell: bash
+        run: |
+          rm -rf package && mkdir package
+          rsync -a ./ package/ --exclude '.git' --exclude '.github' --exclude 'package' --exclude 'frontend/node_modules' --exclude 'frontend/dist' --exclude '__pycache__' --exclude '*.pyc' --exclude 'README_V5_*.md'
+          cp README_V5_499_MediaWorkflowEditorUI.md package/
+          find package -type d -name '__pycache__' -prune -exec rm -rf {} +
+          find package -type f -name '*.pyc' -delete
+          python - <<'PY'
+          from pathlib import Path
+          root=Path('package')
+          assert [p.name for p in root.glob('README_V5_*.md')] == ['README_V5_499_MediaWorkflowEditorUI.md']
+          assert (root/'frontend/src/components/media/MediaWorkflowEditor.jsx').exists()
+          assert (root/'frontend/src/components/media/MediaWorkflowEditor.css').exists()
+          assert (root/'frontend/src/services/mediaWorkflowApi.js').exists()
+          assert not (root/'.github').exists()
+          assert not any(root.rglob('__pycache__')) and not any(root.rglob('*.pyc'))
+          print('v5.499 distribution contract PASS')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: THEANOVA_AgentStudio_v5_499_MediaWorkflowEditorUI
+          path: package
+          if-no-files-found: error
