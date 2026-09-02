@@ -17,22 +17,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Rebuild and apply v5.496 source patch
+      - name: Apply deterministic v5.496 source migration
         shell: bash
         run: |
-          cat .github/scripts/v5496_patch.part* > /tmp/v5496_source.patch.gz.b64
-          python - <<'PY'
-          import base64, gzip, hashlib
-          from pathlib import Path
-          encoded = Path('/tmp/v5496_source.patch.gz.b64').read_text(encoding='utf-8').strip()
-          raw = gzip.decompress(base64.b64decode(encoded, validate=True))
-          Path('/tmp/v5496_source.patch').write_bytes(raw)
-          print('encoded sha256:', hashlib.sha256(encoded.encode('utf-8')).hexdigest())
-          print('raw patch sha256:', hashlib.sha256(raw).hexdigest())
-          print('raw patch bytes:', len(raw))
-          PY
-          git apply --check /tmp/v5496_source.patch
-          git apply /tmp/v5496_source.patch
+          python .github/scripts/apply_v5496_rag_style.py
+          git diff --check
 
       - name: Validate backend and RAG coding style contract
         shell: bash
