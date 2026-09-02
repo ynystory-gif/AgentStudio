@@ -38,6 +38,7 @@ from app.api.learning_routes import router as learning_router
 from app.api.learning_full_apply_routes import router as learning_full_apply_router
 from app.api.ui_theme_dynamic_routes import router as ui_theme_dynamic_router
 from app.api.scheduler_routes import router as scheduler_router
+from app.api.media_workflow_routes import router as media_workflow_router
 from app.api.auth_routes import router as auth_router
 from app.services.langgraph_runtime import agent_graph_runtime
 from app.services.mcp_registry import mcp_registry_monitor
@@ -147,7 +148,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.497", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.498", lifespan=lifespan)
 
 _PUBLIC_API_PATHS = {
     "/api/health",
@@ -218,6 +219,7 @@ app.include_router(learning_router, prefix="/api")
 app.include_router(learning_full_apply_router, prefix="/api")
 app.include_router(ui_theme_dynamic_router, prefix="/api")
 app.include_router(scheduler_router, prefix="/api")
+app.include_router(media_workflow_router, prefix="/api")
 
 from app.api.terminal_ws import router as terminal_ws_router
 app.include_router(terminal_ws_router)

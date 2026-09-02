@@ -1,3 +1,11 @@
+## v5.498 Media Workflow Core
+
+- Agent Creator/Editor 정체성을 유지하면서 미디어 생성·처리 Agent 설계용 고수준 Workflow Core를 추가했습니다.
+- Typed Media Port, Media Artifact, Async Media Job, Provider Adapter 계약과 additive Workflow extensions.media Schema를 추가했습니다.
+- ComfyUI는 저수준 Node Editor가 아니라 외부 실행 Provider로 취급하며 Provider Capability/Health/Workflow readiness를 기준으로 선택합니다.
+- Media Agent 전문화 설계를 추가해 생성→검증→기술 Retry/품질 Retry→Human Approval→저장 Workflow를 Agent Factory가 보존합니다.
+- 기존 Workflow와 Agent 실행 기능은 변경 없이 읽히도록 Backward Compatibility를 유지합니다.
+
 ## v5.497
 
 - 개인정보 보호 PII 마스킹 Notebook 분석을 기반으로 Agent 생성 코딩 스타일에 Privacy 전용 규칙 7개를 추가했습니다.

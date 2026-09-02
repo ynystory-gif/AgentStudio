@@ -33,7 +33,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.497'
+const AGENTSTUDIO_FRONTEND_VERSION='5.498'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_AGENT_CODING_STYLE={
@@ -101,6 +101,12 @@ const AGENT_SPECIALIZATIONS=[
     label:'3D 제작 Agent · Blender MCP',
     icon:'◈',
     description:'SceneSpec → Validator → LangGraph State → Blender MCP → Viewport QA → 수정 → Render/Export 구조를 기본 적용합니다.'
+  },
+  {
+    id:'MEDIA_CREATION',
+    label:'미디어 생성·처리 Agent',
+    icon:'▧',
+    description:'고수준 Media Node → Provider Adapter → ComfyUI/Diffusers/API → Validator → Retry → Human Approval 구조를 기본 적용합니다.'
   }
 ]
 const agentSpecializationById=(id)=>AGENT_SPECIALIZATIONS.find(item=>item.id===id)||AGENT_SPECIALIZATIONS[0]
@@ -3533,6 +3539,15 @@ function TargetWorkflowDiagram({workflow}){
       step?.type
     ].join(' ').toLowerCase()
 
+    const explicitType=String(step?.type||'').toLowerCase()
+    if(explicitType==='media_input') return 'MEDIA_INPUT'
+    if(explicitType==='media_analysis') return 'MEDIA_ANALYSIS'
+    if(explicitType==='media_plan') return 'MEDIA_PLAN'
+    if(explicitType==='media_process'||explicitType==='media_generate') return 'MEDIA_EXECUTION'
+    if(explicitType==='media_validate') return 'QA'
+    if(explicitType==='approval') return 'APPROVAL'
+    if(explicitType==='preview') return 'PREVIEW'
+
     if(
       text.includes('complete')
       || text.includes('완료')
@@ -3607,6 +3622,42 @@ function TargetWorkflowDiagram({workflow}){
       title:'입력 / 검증',
       subtitle:'파일 선택과 접근 검증',
       icon:'✓'
+    },
+    {
+      id:'MEDIA_INPUT',
+      title:'Media 입력',
+      subtitle:'Image · Video · Audio · Asset',
+      icon:'▧'
+    },
+    {
+      id:'MEDIA_ANALYSIS',
+      title:'Media 분석',
+      subtitle:'Vision · OCR · Quality · Object',
+      icon:'◎'
+    },
+    {
+      id:'MEDIA_PLAN',
+      title:'Media 계획',
+      subtitle:'Prompt · Style · Layout · Scene',
+      icon:'✦'
+    },
+    {
+      id:'MEDIA_EXECUTION',
+      title:'Media 생성/처리',
+      subtitle:'Provider · Job · Generate · Process',
+      icon:'▶'
+    },
+    {
+      id:'APPROVAL',
+      title:'Human Approval',
+      subtitle:'승인 · 수정 요청 · 재생성',
+      icon:'✓'
+    },
+    {
+      id:'PREVIEW',
+      title:'Media Preview',
+      subtitle:'Image · Video · Before/After',
+      icon:'◫'
     },
     {
       id:'MCP',

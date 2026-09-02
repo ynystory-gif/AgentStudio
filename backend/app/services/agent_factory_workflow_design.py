@@ -14,6 +14,12 @@ from app.services.model_router import LLMTask, model_for_task
 from app.services.database_schema_design import build_database_plan
 from app.services.frontend_theme_registry import detect_frontend_theme_target, frontend_test_environment_files
 from app.services.blender_3d_agent_design import enforce_blender_3d_agent_design, is_blender_3d_agent_request, is_blender_3d_design
+from app.services.media_agent_design import enforce_media_agent_design, is_media_agent_design
+
+
+def _enforce_specialized_agent_design(design: dict, request: str) -> dict:
+    design = _enforce_specialized_agent_design(design, request)
+    return enforce_media_agent_design(design, request)
 
 
 SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니다.
@@ -90,7 +96,7 @@ SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니�
         "name": "machine_readable_step_name",
         "label": "사용자에게 보일 단계명",
         "description": "이 단계가 실제로 수행하는 일",
-        "type": "input|validation|mcp_client|transport|mcp_server|tool|llm|ui|storage|decision|complete"
+        "type": "input|validation|mcp_client|transport|mcp_server|tool|llm|ui|storage|decision|complete|media_input|media_analysis|media_plan|media_process|media_generate|media_validate|approval|preview"
       }
     ],
     "branches": [
@@ -242,6 +248,8 @@ SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니�
 - AgentStudio 자체 제작 Workflow와 생성 대상 Agent의 업무 Workflow를 구분합니다.
 - 기능을 무조건 MCP/Tool로 만들지 말고 필요성을 판단합니다.
 - 기존 프로젝트라면 기존 구조를 최대한 유지합니다.
+- Media Agent는 ComfyUI 저수준 그래프를 복제하지 않고 고수준 Media Node → Provider Adapter → 외부 Engine 구조를 사용합니다.
+- Media Workflow는 기존 Workflow Schema를 additive extension으로 확장하고 Typed Port/Artifact/Async Job/Provider Capability/Validator/Approval 계약을 유지합니다.
 - 신규 파일은 필요한 경우에만 계획합니다.
 - 실행, 테스트, 실패 복구까지 고려합니다.
 - 교육 예제의 특정 모델/포트/제한값을 근거 없이 고정하지 않습니다.
@@ -892,7 +900,7 @@ def build_safe_agent_factory_design(request: str, *, reason: str = "") -> dict:
     _sanitize_requirement_spec(fallback, request)
     fallback["database_plan"] = build_database_plan(request, fallback)
     fallback = _enforce_generated_test_environment_plan(fallback, request)
-    fallback = enforce_blender_3d_agent_design(fallback, request)
+    fallback = _enforce_specialized_agent_design(fallback, request)
     runtime = fallback.setdefault("design_runtime", {})
     runtime.update({
         "workflow_provider": "deterministic_safe_fallback",
@@ -1019,7 +1027,7 @@ async def design_agent_factory(
                 parsed["design_runtime"]["database_provider"] = "deterministic_fallback"
                 parsed["design_runtime"]["database_error"] = f"{type(db_exc).__name__}: {db_exc}"
         parsed = _enforce_generated_test_environment_plan(parsed, request)
-        parsed = enforce_blender_3d_agent_design(parsed, request)
+        parsed = _enforce_specialized_agent_design(parsed, request)
         return parsed
 
     except Exception:
@@ -1031,7 +1039,7 @@ async def design_agent_factory(
         _sanitize_requirement_spec(fallback, request)
         fallback["database_plan"] = build_database_plan(request, fallback)
         fallback = _enforce_generated_test_environment_plan(fallback, request)
-        fallback = enforce_blender_3d_agent_design(fallback, request)
+        fallback = _enforce_specialized_agent_design(fallback, request)
         return fallback
 
 # v5.345: Incremental design revision. Reuse the previous design unless the
@@ -1039,7 +1047,7 @@ async def design_agent_factory(
 _DESIGN_SECTION_KEYS = (
     "requirement_spec", "capability_plan", "tool_mcp_plan",
     "agent_architecture", "database_plan", "target_agent_workflow",
-    "file_plan", "settings_plan", "test_environment_plan", "three_d_agent_plan", "environment_plan",
+    "file_plan", "settings_plan", "test_environment_plan", "three_d_agent_plan", "media_agent_plan", "environment_plan",
 )
 
 
@@ -1097,7 +1105,7 @@ def _impact_sections(changed_groups: list[str], delta_text: str) -> list[str]:
         "llm": {"requirement_spec", "capability_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
         "file_access": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan"},
         "mcp": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "environment_plan"},
-        "agent_specialization": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "three_d_agent_plan", "environment_plan"},
+        "agent_specialization": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "three_d_agent_plan", "media_agent_plan", "environment_plan"},
         "recommendation_settings": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan"},
         "database": {"requirement_spec", "capability_plan", "agent_architecture", "database_plan", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan"},
         "result": {"requirement_spec", "target_agent_workflow", "file_plan", "settings_plan"},
@@ -1141,6 +1149,7 @@ async def design_agent_factory_incremental(
 ) -> dict:
     previous_sections = _preview_design_sections(previous_design)
     preserve_blender_specialization = is_blender_3d_design(previous_design, request)
+    preserve_media_specialization = is_media_agent_design(previous_design, request)
     if not any(previous_sections.values()):
         result = await design_agent_factory(request, project_context, provider)
         result.setdefault("design_runtime", {})["incremental_revision"] = {
@@ -1167,14 +1176,17 @@ async def design_agent_factory_incremental(
             "reused_sections": list(_DESIGN_SECTION_KEYS),
         }
         result["design_runtime"] = runtime
-        result = enforce_blender_3d_agent_design(result, request)
+        result = _enforce_specialized_agent_design(result, request)
         return result
 
     if _needs_full_redesign(changed_groups, delta_text):
         result = await design_agent_factory(request, project_context, provider)
         if preserve_blender_specialization:
             result.setdefault("design_runtime", {})["agent_specialization"] = "BLENDER_3D"
-            result = enforce_blender_3d_agent_design(result, request)
+            result = _enforce_specialized_agent_design(result, request)
+        if preserve_media_specialization:
+            result.setdefault("design_runtime", {})["agent_specialization"] = "MEDIA_CREATION"
+            result = _enforce_specialized_agent_design(result, request)
         result.setdefault("design_runtime", {})["incremental_revision"] = {
             "mode": "FULL_REDESIGN",
             "llm_called": True,
@@ -1260,7 +1272,7 @@ async def design_agent_factory_incremental(
                     runtime["database_provider"] = "deterministic_fallback"
                     runtime["database_error"] = f"{type(db_exc).__name__}: {db_exc}"
         result = _enforce_generated_test_environment_plan(result, request)
-        result = enforce_blender_3d_agent_design(result, request)
+        result = _enforce_specialized_agent_design(result, request)
         runtime["workflow_provider"] = getattr(llm, "last_provider", "")
         runtime["incremental_revision"] = {
             "mode": "PARTIAL_REVISE",
@@ -1280,7 +1292,10 @@ async def design_agent_factory_incremental(
         result = await design_agent_factory(request, project_context, provider)
         if preserve_blender_specialization:
             result.setdefault("design_runtime", {})["agent_specialization"] = "BLENDER_3D"
-            result = enforce_blender_3d_agent_design(result, request)
+            result = _enforce_specialized_agent_design(result, request)
+        if preserve_media_specialization:
+            result.setdefault("design_runtime", {})["agent_specialization"] = "MEDIA_CREATION"
+            result = _enforce_specialized_agent_design(result, request)
         result.setdefault("design_runtime", {})["incremental_revision"] = {
             "mode": "FULL_REDESIGN_FALLBACK",
             "llm_called": True,
