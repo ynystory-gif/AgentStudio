@@ -1,0 +1,25 @@
+name: Decode v5.500 Helper
+
+on:
+  push:
+    branches:
+      - fix/v5.500-interview-question-state
+
+jobs:
+  decode:
+    if: contains(github.event.head_commit.message, '[decode-v5500]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decode helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat scripts/v5500_patch.part01 scripts/v5500_patch.part02 scripts/v5500_patch.part03 scripts/v5500_patch.part04 scripts/v5500_patch.part05 > /tmp/patch_v5500.py.gz.b64
+          base64 -d /tmp/patch_v5500.py.gz.b64 | gzip -d > patch_v5500.py
+          python -m py_compile patch_v5500.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decoded-v5500-helper
+          path: patch_v5500.py
+          if-no-files-found: error
