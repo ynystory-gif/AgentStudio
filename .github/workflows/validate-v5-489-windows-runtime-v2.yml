@@ -1,0 +1,76 @@
+name: Validate v5.489 Windows Python Runtime v2
+
+on:
+  push:
+    branches:
+      - fix/v5.489-windows-python-worker-runtime
+    paths:
+      - '.github/workflows/validate-v5-489-windows-runtime-v2.yml'
+
+permissions:
+  contents: write
+
+env:
+  PATCH_GZ_B64: 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
+
+jobs:
+  apply-build-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/v5.489-windows-python-worker-runtime
+          fetch-depth: 0
+      - name: Apply structural patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64, gzip, os
+          from pathlib import Path
+          payload = base64.b64decode(os.environ['PATCH_GZ_B64'])
+          Path('.github/apply_v5489.py').write_bytes(gzip.decompress(payload))
+          PY
+          python .github/apply_v5489.py
+      - name: Backend syntax and runtime contract
+        run: |
+          python -m py_compile backend/app/services/python_execution_service.py backend/app/services/python_worker_runtime.py backend/app/api/routes.py backend/app/main.py
+          python backend/validate_v5489_windows_python_worker_runtime_contract.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend clean build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Commit tested v5.489 source
+        run: |
+          git config user.name "ynystory-gif"
+          git config user.email "ynystory@gmail.com"
+          git add backend/app/services/python_execution_service.py backend/app/services/python_worker_runtime.py backend/app/api/routes.py backend/app/main.py frontend/src/App.jsx README.md README_V5_489_WindowsPythonWorkerRuntimeFix.md backend/validate_v5489_windows_python_worker_runtime_contract.py
+          git commit -m "fix: externalize Python worker runtime for v5.489"
+          git push origin HEAD:fix/v5.489-windows-python-worker-runtime
+
+  windows-runtime-regression:
+    needs: apply-build-commit
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/v5.489-windows-python-worker-runtime
+          fetch-depth: 0
+      - name: Refresh tested branch head
+        shell: pwsh
+        run: |
+          git fetch origin fix/v5.489-windows-python-worker-runtime
+          git checkout -B fix/v5.489-windows-python-worker-runtime origin/fix/v5.489-windows-python-worker-runtime
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Windows worker CreateProcess regression
+        shell: pwsh
+        run: |
+          python -m py_compile backend/app/services/python_execution_service.py backend/app/services/python_worker_runtime.py
+          python backend/validate_v5489_windows_python_worker_runtime_contract.py
