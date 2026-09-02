@@ -3525,7 +3525,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.488", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering+SchedulerWorkspace+ParallelRenderedThemeFallback+AuthenticatedPptExportCors+InteractiveThemePagePreview+RenderedMenuMotionProbe+UILayoutSidebarHeaderIconOptions+Blender3DAgentTemplate+RequirementRecommendationToolRouting+AuthenticatedBinaryDocumentPreview+LearningProblemPersistenceRepair+LearningDatasetTopicScrollLayout+LearningExactMisjudgmentTraceSqlExport+LearningCenterLoadProgressHeartbeat+LearningSqlListParityCurrentPcFastRead+LearningSchemaDeadlockGuard+CodeEditorSelectionLlmReference+EditableLlmReferenceCompactChat+LlmComposerBottomDock+CodeSaveLabelClarification+TopSaveToolbar+ReferenceHeaderSummaryRelocation+InlineDirtySaveButton+PdfPreviewHeadingRemoval+AdaptiveDevelopmentStagePlannerApprovalWorkflow+NewAgentDevelopmentPlanUXStageEditor+DatabaseResourceProvisionPlanApprovalFlow+RuntimeDatabaseFinalPreviewTablePolicyPortRecommendationUX+CodeDocumentationOption+SmartPairTypingEscapedQuoteCaretGuard+CodeDocumentationCssLiteralNewlineFix+CodeDocumentationToggleTitleRelocation+CodeIntelligenceDefinitionHoverSignatureNavigation+NotebookNameErrorDiagnostic+DocumentWideLlmReferenceSelection+StaleReferenceSelectionGuard+FrontendBuildFailureDetail+ElevatedFailureWindowHold+PowerShellNpmStderrGuard+CtrlSpaceSymbolCompletion+ManualLlmReferenceEntry+UnifiedSaveDirtyDot+SelectedTextExactReplacePairTyping+ContextAwareCallArgumentCompletion+CodexCodeResponseAiProposalRouting+CtrlSpaceCompletionNavigationSeparation+NotebookLongRunProgressHeartbeat+ProjectFileMemoTab+SingleMemoPerFileResizableMemoSplit+SaveButtonEventGuard+GlobalMediaSessionBackgroundRecording+LiveTranscriptPersistence+TemporaryExternalMediaTab+UserCodingStyleProfile+BackendFasterWhisperStreamingStt+SttOverlapVad+StopTimeTranscriptRefinement+MediaSessionLastSegmentUndefinedGuard+CodingStylePopoverLayout+LiveTranscriptSummary+ScreenAudioTrackGuard+AttachmentSummaryFileOpen+ManualDatabaseResourceCreate+Global13pxTextFloor+CodingStylePanelPolish+LiveTranscriptProvisionalImmediateRender+TimeRangeRefinedReplacement+TranscriptCollectionRefineCompleteStatus+NotebookStreamingRecovery+PackageInstallProtectedExecution"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.489", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering+SchedulerWorkspace+ParallelRenderedThemeFallback+AuthenticatedPptExportCors+InteractiveThemePagePreview+RenderedMenuMotionProbe+UILayoutSidebarHeaderIconOptions+Blender3DAgentTemplate+RequirementRecommendationToolRouting+AuthenticatedBinaryDocumentPreview+LearningProblemPersistenceRepair+LearningDatasetTopicScrollLayout+LearningExactMisjudgmentTraceSqlExport+LearningCenterLoadProgressHeartbeat+LearningSqlListParityCurrentPcFastRead+LearningSchemaDeadlockGuard+CodeEditorSelectionLlmReference+EditableLlmReferenceCompactChat+LlmComposerBottomDock+CodeSaveLabelClarification+TopSaveToolbar+ReferenceHeaderSummaryRelocation+InlineDirtySaveButton+PdfPreviewHeadingRemoval+AdaptiveDevelopmentStagePlannerApprovalWorkflow+NewAgentDevelopmentPlanUXStageEditor+DatabaseResourceProvisionPlanApprovalFlow+RuntimeDatabaseFinalPreviewTablePolicyPortRecommendationUX+CodeDocumentationOption+SmartPairTypingEscapedQuoteCaretGuard+CodeDocumentationCssLiteralNewlineFix+CodeDocumentationToggleTitleRelocation+CodeIntelligenceDefinitionHoverSignatureNavigation+NotebookNameErrorDiagnostic+DocumentWideLlmReferenceSelection+StaleReferenceSelectionGuard+FrontendBuildFailureDetail+ElevatedFailureWindowHold+PowerShellNpmStderrGuard+CtrlSpaceSymbolCompletion+ManualLlmReferenceEntry+UnifiedSaveDirtyDot+SelectedTextExactReplacePairTyping+ContextAwareCallArgumentCompletion+CodexCodeResponseAiProposalRouting+CtrlSpaceCompletionNavigationSeparation+NotebookLongRunProgressHeartbeat+ProjectFileMemoTab+SingleMemoPerFileResizableMemoSplit+SaveButtonEventGuard+GlobalMediaSessionBackgroundRecording+LiveTranscriptPersistence+TemporaryExternalMediaTab+UserCodingStyleProfile+BackendFasterWhisperStreamingStt+SttOverlapVad+StopTimeTranscriptRefinement+MediaSessionLastSegmentUndefinedGuard+CodingStylePopoverLayout+LiveTranscriptSummary+ScreenAudioTrackGuard+AttachmentSummaryFileOpen+ManualDatabaseResourceCreate+Global13pxTextFloor+CodingStylePanelPolish+LiveTranscriptProvisionalImmediateRender+TimeRangeRefinedReplacement+TranscriptCollectionRefineCompleteStatus+NotebookStreamingRecovery+PackageInstallProtectedExecution+ExternalPythonWorkerRuntime+BackendPackageExecution+WindowsRuntimeRegression"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -6089,6 +6089,50 @@ async def execute_terminal_command(payload: dict):
             },
         ) from e
 
+
+
+@router.post("/python/packages/execute")
+async def execute_notebook_package_cell(payload: dict):
+    """Run Notebook pip commands outside the persistent Python worker."""
+    root = str(payload.get("root") or "").strip()
+    code = str(payload.get("code") or "")
+    relative_path = str(payload.get("relative_path") or "").strip()
+    session_id = str(payload.get("session_id") or "default").strip() or "default"
+    capture_last_expression = bool(payload.get("capture_last_expression"))
+    notebook_mode = bool(payload.get("notebook_mode", True))
+    raw_cell_index = payload.get("cell_index")
+    try:
+        cell_index = int(raw_cell_index) if raw_cell_index is not None else None
+    except (TypeError, ValueError):
+        cell_index = None
+
+    if not root:
+        raise HTTPException(status_code=400, detail="root가 필요합니다.")
+    if not code.strip():
+        raise HTTPException(status_code=400, detail="실행할 pip 명령이 없습니다.")
+    if relative_path and not relative_path.lower().endswith(".ipynb"):
+        raise HTTPException(status_code=400, detail="Notebook 패키지 실행은 .ipynb 파일에서만 사용할 수 있습니다.")
+
+    try:
+        execution_env = await asyncio.to_thread(get_redis_python_script_runtime_env, root, relative_path)
+        return await asyncio.to_thread(
+            python_execution_manager.execute_package_cell,
+            root=root,
+            code=code,
+            relative_path=relative_path,
+            session_id=session_id,
+            capture_last_expression=capture_last_expression,
+            notebook_mode=notebook_mode,
+            cell_index=cell_index,
+            env_overrides=execution_env,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"message": f"Notebook 패키지 실행 실패: {exc}", "exception": type(exc).__name__},
+        ) from exc
 
 
 @router.post("/python/execute")

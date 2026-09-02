@@ -1,3 +1,12 @@
+## v5.489
+
+### v5.489
+- Windows `WinError 206`의 근본 원인이었던 거대한 `python -c <Worker Code>` 부트스트랩을 제거하고, `backend/app/services/python_worker_runtime.py` 별도 Runtime 파일 실행 구조로 변경했습니다.
+- Notebook `%pip`, `!pip`, `!python -m pip`는 Persistent Worker 내부가 아니라 Backend가 프로젝트 `.venv`의 Python으로 직접 실행합니다. 설치 전 기존 Worker를 종료해 DLL/모듈 파일 잠금을 해제하고 설치 후 새 Worker로 이어집니다.
+- 같은 셀에 pip 명령 뒤 일반 Python 코드가 있으면 패키지 설치 성공 후 새 Worker에서 나머지 코드를 이어 실행합니다.
+- Windows/한글/긴 프로젝트 경로, Persistent 변수, top-level await, pip 보호 실행, Worker 재시작을 포함한 Runtime 회귀검사를 추가했습니다.
+- v5.487 이미지 Preview/Rich Image Output 및 v5.488 Streaming 복구 기능을 유지합니다.
+
 ## v5.488
 
 ### v5.488

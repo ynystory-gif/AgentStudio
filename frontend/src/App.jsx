@@ -33,7 +33,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.488'
+const AGENTSTUDIO_FRONTEND_VERSION='5.489'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_AGENT_CODING_STYLE={
@@ -15732,13 +15732,16 @@ function IDE() {
         })
 
       if(packageManagementMode){
-        term.write('\x1b[36m[패키지 설치 중] Notebook 스트리밍 보호 모드로 실행합니다. 설치가 끝날 때까지 기다려 주세요.\x1b[0m\r\n')
-        result=await api('/python/execute',{
+        // v5.489: pip runs outside the persistent Worker with the project's
+        // selected interpreter. Backend resets stale Worker/DLL handles first
+        // and executes any remaining Python lines in a fresh session.
+        term.write('\x1b[36m[패키지 설치 중] 프로젝트 Python 환경 보호 모드로 실행합니다. 설치가 끝날 때까지 기다려 주세요.\x1b[0m\r\n')
+        result=await api('/python/packages/execute',{
           method:'POST',
           body:JSON.stringify(pythonExecutionPayload)
         })
         if(result?.ok){
-          term.write('\x1b[32m[패키지 설치 완료] 다음 셀부터 갱신된 프로젝트 환경을 사용합니다.\x1b[0m\r\n')
+          term.write('\x1b[32m[패키지 설치 완료] Python Worker를 새 환경으로 갱신했습니다.\x1b[0m\r\n')
         }
       }else{
         const streamResponse=await apiFetch('/python/execute/stream',{
