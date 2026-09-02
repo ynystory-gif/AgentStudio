@@ -33,7 +33,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.485'
+const AGENTSTUDIO_FRONTEND_VERSION='5.486'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_AGENT_CODING_STYLE={
@@ -4136,6 +4136,21 @@ function IDE() {
   const editorFileDirtyRef=useRef({})
   const selectedEditorFileRef=useRef('')
   const [pinnedEditorFiles,setPinnedEditorFiles]=useState([])
+
+  // v5.486: Pinned editor tabs are a priority group. Keep every pinned tab
+  // together at the far left while preserving the existing relative order
+  // inside both the pinned and normal groups. Watching the open-file count also
+  // restores the grouping when a pinned file is reopened or tabs are restored.
+  useEffect(()=>{
+    const pinnedSet=new Set(pinnedEditorFiles)
+    setOpenEditorFiles(prev=>{
+      if(prev.length<2) return prev
+      const pinned=prev.filter(path=>pinnedSet.has(path))
+      const normal=prev.filter(path=>!pinnedSet.has(path))
+      const next=[...pinned,...normal]
+      return next.every((path,index)=>path===prev[index])?prev:next
+    })
+  },[pinnedEditorFiles,openEditorFiles.length])
   const [fileSaveStatus,setFileSaveStatus]=useState('')
   const [editorTabMenu,setEditorTabMenu]=useState(null)
   const [editorFilesMenu,setEditorFilesMenu]=useState(null)
