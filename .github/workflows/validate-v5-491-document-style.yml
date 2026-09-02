@@ -1,0 +1,141 @@
+name: Validate v5.491 Document Driven Coding Style
+
+on:
+  push:
+    branches: [fix/v5.491-document-driven-coding-style]
+
+permissions:
+  contents: write
+
+jobs:
+  build-test-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply v5.491 source changes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+
+          root = Path('.')
+
+          def rw(rel, old, new, count=-1):
+              p = root / rel
+              text = p.read_text(encoding='utf-8')
+              if old not in text:
+                  raise SystemExit(f'missing patch anchor: {rel}: {old[:80]!r}')
+              text = text.replace(old, new, count)
+              p.write_text(text, encoding='utf-8')
+
+          # Frontend version and user-selectable coding style profile.
+          rw('frontend/src/App.jsx', "const AGENTSTUDIO_FRONTEND_VERSION='5.490'", "const AGENTSTUDIO_FRONTEND_VERSION='5.491'")
+          rw('frontend/src/App.jsx', '  avoid_magic_numbers:true,\n}', '''  avoid_magic_numbers:true,\n  staged_data_flow:true,\n  validate_key_results:true,\n  safe_resource_management:true,\n  external_io_validation:true,\n  preserve_source_metadata:true,\n  normalize_external_data:true,\n  prefer_lazy_loading:true,\n  avoid_global_warning_suppression:true,\n}''')
+          rw('frontend/src/App.jsx', "    ['avoid_magic_numbers','Magic Number 최소화','반복되는 모델명·수치·경로·옵션은 상수나 설정으로 분리합니다.','구조 · Notebook'],", '''    ['avoid_magic_numbers','Magic Number 최소화','반복되는 모델명·수치·경로·옵션은 상수나 설정으로 분리합니다.','구조 · Notebook'],\n    ['staged_data_flow','단계가 보이는 처리 흐름','설정 → 입력/로딩 → 처리 → 검증 → 결과 순서가 코드에서 드러나도록 구성합니다.','구조 · Notebook'],\n    ['validate_key_results','핵심 결과 검증','문서 수·필수 필드·비어 있지 않은 결과 등 중요한 경계 결과를 즉시 검증합니다.','데이터 · 안정성'],\n    ['safe_resource_management','리소스 안전 정리','파일·PDF·DB 등 종료가 필요한 리소스는 with/yield/finally 등 안전한 수명주기로 관리합니다.','데이터 · 안정성'],\n    ['preserve_source_metadata','출처 Metadata 보존','RAG/문서 적재 시 source·page·id·date 등 추적 가능한 메타데이터를 유지합니다.','데이터 · 안정성'],\n    ['normalize_external_data','외부 데이터 정규화','외부 텍스트/CSV/JSON을 Domain 객체로 넣기 전에 공백·None·인코딩 등 경계 데이터를 정리합니다.','데이터 · 안정성'],\n    ['external_io_validation','외부 I/O 검증','HTTP/API 호출은 Timeout·상태코드·업무 상태를 확인하고 선택적 설정 누락을 명시적으로 처리합니다.','외부 · 운영'],\n    ['prefer_lazy_loading','대용량 Lazy Loading','대량 문서/행 처리에서는 가능하면 lazy/streaming 로딩을 사용해 불필요한 전체 적재를 피합니다.','외부 · 운영'],\n    ['avoid_global_warning_suppression','경고 전체 숨김 금지',\"운영 코드에서는 warnings.filterwarnings('ignore') 같은 전역 경고 숨김을 피하고 필요한 범위만 제한합니다.\",'외부 · 운영'],''')
+          rw('frontend/src/App.jsx', "    ['구조 · Notebook','구조 · Notebook','Notebook과 반복 로직의 구조를 일관되게 정리합니다.'],", '''    ['구조 · Notebook','구조 · Notebook','처리 단계와 Notebook 흐름을 위에서 아래로 쉽게 읽도록 정리합니다.'],\n    ['데이터 · 안정성','데이터 · 안정성','문서·외부 데이터의 검증, 출처, 리소스 수명주기를 지킵니다.'],\n    ['외부 · 운영','외부 · 운영','외부 연동과 대용량 처리에서 실패·성능·경고를 안전하게 다룹니다.'],''')
+
+          # Backend style policy used by generation/redevelopment/repair prompts.
+          rw('backend/app/services/agent_workflow.py', '    "avoid_magic_numbers": True,\n}', '''    "avoid_magic_numbers": True,\n    "staged_data_flow": True,\n    "validate_key_results": True,\n    "safe_resource_management": True,\n    "external_io_validation": True,\n    "preserve_source_metadata": True,\n    "normalize_external_data": True,\n    "prefer_lazy_loading": True,\n    "avoid_global_warning_suppression": True,\n}''')
+          rw('backend/app/services/agent_workflow.py', '    if policy.get("avoid_magic_numbers"):\n        rules.append("반복되는 모델명·임계값·Chunk 크기·Top-K·경로·Timeout 등의 Magic Number/String은 상수, Settings 또는 환경설정으로 분리하십시오.")\n\n    if not rules:', '''    if policy.get("avoid_magic_numbers"):\n        rules.append("반복되는 모델명·임계값·Chunk 크기·Top-K·경로·Timeout 등의 Magic Number/String은 상수, Settings 또는 환경설정으로 분리하십시오.")\n    if policy.get("staged_data_flow"):\n        rules.append("데이터 처리 코드는 설정/상수 → 입력·로딩 → 핵심 처리 → 검증 → 결과 반환·표시 순서가 위에서 아래로 드러나게 구성하고 서로 다른 단계의 책임을 한 블록에 뒤섞지 마십시오.")\n    if policy.get("validate_key_results"):\n        rules.append("문서 수, 필수 필드, 비어 있지 않은 결과, Shape/Schema 등 다음 단계가 전제로 삼는 핵심 결과는 경계 직후 검증하십시오. 개발·테스트 assert와 운영 Validator/예외 처리를 구분하십시오.")\n    if policy.get("safe_resource_management"):\n        rules.append("파일·PDF·DB Session·Transaction 등 종료가 필요한 리소스는 with/context manager, yield dependency, try/finally 등 안전한 수명주기로 관리하십시오.")\n    if policy.get("external_io_validation"):\n        rules.append("외부 HTTP/API/File I/O는 Timeout과 전송 상태를 확인하고 별도 업무 상태 코드가 있으면 함께 검증하십시오. 선택적 API Key/설정 누락은 명시적 Skip/대체 경로로 처리하십시오.")\n    if policy.get("preserve_source_metadata"):\n        rules.append("RAG·문서 수집·검색 데이터는 page_content만 남기지 말고 source, page/pdf_page, id, date, tags 등 답변 근거와 재추적에 필요한 Metadata를 가능한 범위에서 보존하십시오.")\n    if policy.get("normalize_external_data"):\n        rules.append("외부 Text/CSV/JSON/OCR 데이터는 Domain Document/Model에 넣기 전에 인코딩, 공백, None/빈 값 등 경계 데이터를 필요한 범위에서 정규화하되 원문의 의미를 바꾸지 마십시오.")\n    if policy.get("prefer_lazy_loading"):\n        rules.append("대량 문서·CSV·검색 결과처럼 전체 적재가 불필요한 경우 lazy_load/iterator/streaming 기능을 우선 검토하되 작은 데이터에 과도한 복잡성을 추가하지 마십시오.")\n    if policy.get("avoid_global_warning_suppression"):\n        rules.append("운영 코드에서 warnings.filterwarnings('ignore')처럼 모든 경고를 전역으로 숨기지 마십시오. 필요한 경우 알려진 Warning category와 최소 Scope만 제한하고 원인 해결을 우선하십시오.")\n\n    if not rules:''')
+
+          # Context tags so RAG/document-loader rules are actually selected.
+          rw('backend/app/services/coding_rule_selector.py', '    if path.lower().endswith(".py") or "python" in text or "파이썬" in text:\n        tags.add("python")\n', '''    if path.lower().endswith(".py") or "python" in text or "파이썬" in text:\n        tags.add("python")\n\n    if path.lower().endswith(".ipynb") or "notebook" in text or "노트북" in text:\n        tags.update({"python", "notebook", "data_pipeline"})\n\n    if any(token in text for token in (\n        "rag", "retrieval", "문서 로딩", "문서로딩", "document loader",\n        "pypdf", "pymupdf", "pdfplumber", "easyocr", "ocr", ".pdf",\n        ".csv", ".json", "csvloader", "jsonloader", "webbaseloader",\n    )):\n        tags.update({"rag", "data_pipeline", "document_loader"})\n\n    if any(token in text for token in ("requests", "httpx", "외부 api", "외부 연동", "web loader", "웹 로더")):\n        tags.add("external_io")\n''')
+
+          # Structured registry rules derived from the uploaded Notebook.
+          rules_path = root / 'backend/app/data/coding_style/rules.json'
+          registry = json.loads(rules_path.read_text(encoding='utf-8'))
+          registry['version'] = '1.9'
+          derived = [
+            {'id':'CS-154','category':'architecture','name':'단계가 보이는 데이터 처리 흐름','level':'recommended','applies_to':['python','data_pipeline','rag','document_loader','notebook'],'rule':'설정/상수, 입력·로딩, 핵심 처리, 검증, 결과 반환·표시의 단계가 코드 흐름에서 분명히 보이게 구성하고 서로 다른 책임을 한 블록에 뒤섞지 않는다.','rationale':'데이터가 어디서 들어와 어떤 검증을 거쳐 결과가 되는지 위에서 아래로 추적하기 쉬워진다.','source':'document_loading_pdf_web_json_csv_notebook'},
+            {'id':'CS-155','category':'correctness','name':'핵심 경계 결과 즉시 검증','level':'recommended','applies_to':['python','data_pipeline','rag','document_loader','testing'],'rule':'다음 단계가 전제로 삼는 문서 수, 필수 필드, 비어 있지 않은 결과, Shape/Schema 등은 생성 직후 검증한다. 개발·테스트 assert와 운영 Validation을 구분한다.','rationale':'후속 단계에서 모호한 오류가 발생하는 것을 줄인다.','source':'document_loading_pdf_web_json_csv_notebook'},
+            {'id':'CS-156','category':'reliability','name':'외부 HTTP/API 이중 상태 검증','level':'required','applies_to':['api','external_io','tool','data_pipeline'],'rule':'외부 HTTP/API 호출은 Timeout과 HTTP 상태를 확인하고, 서비스가 별도 업무 상태 코드를 제공하면 그 상태도 함께 검증한다.','rationale':'HTTP 200이어도 업무 API가 실패 상태를 반환하는 경우를 놓치지 않는다.','source':'document_loading_pdf_web_json_csv_notebook'},
+            {'id':'CS-157','category':'reliability','name':'종료가 필요한 리소스 Context 관리','level':'recommended','applies_to':['python','data_pipeline','document_loader','db'],'rule':'파일, PDF, DB Session/Transaction 등 종료가 필요한 리소스는 with/context manager, yield dependency 또는 try/finally 등 안전한 수명주기 패턴으로 관리한다.','rationale':'정상·예외 경로 모두에서 리소스 누수를 줄인다.','source':'document_loading_pdf_web_json_csv_notebook'},
+            {'id':'CS-158','category':'data_quality','name':'외부 데이터 경계 정규화','level':'recommended','applies_to':['data_pipeline','rag','document_loader','python'],'rule':'외부 Text/CSV/JSON/OCR 데이터는 Domain Document/Model에 넣기 전에 필요한 범위에서 인코딩, 공백, None/빈 값을 정규화하되 원문 의미는 보존한다.','rationale':'검색·비교·Chunking 전 형식 편차를 줄인다.','source':'document_loading_pdf_web_json_csv_notebook'},
+            {'id':'CS-159','category':'traceability','name':'RAG Document 출처 Metadata 보존','level':'required','applies_to':['rag','document_loader','data_pipeline'],'rule':'RAG/문서 적재 단계에서 page_content와 함께 source, page/pdf_page, id, date, tags 등 답변 근거와 재추적에 필요한 Metadata를 가능한 범위에서 보존한다.','rationale':'출처 표시, 보안 필터, 문서 제외, 재색인과 Fact Check의 근거를 유지한다.','source':'document_loading_pdf_web_json_csv_notebook'},
+            {'id':'CS-160','category':'performance','name':'대량 문서 Lazy Loading 우선 검토','level':'conditional','applies_to':['rag','document_loader','data_pipeline','performance'],'rule':'대량 문서·CSV·검색 결과를 모두 메모리에 올릴 필요가 없으면 lazy_load, iterator 또는 streaming API를 우선 검토한다.','rationale':'대용량 데이터의 메모리 사용량과 첫 처리 지연을 줄인다.','source':'document_loading_pdf_web_json_csv_notebook'},
+            {'id':'CS-161','category':'reliability','name':'선택적 외부 연동 누락의 명시적 분기','level':'recommended','applies_to':['external_io','api','agent','tool','environment'],'rule':'선택적 API Key나 외부 설정이 없으면 None을 흘려보내지 말고 명시적 Skip/비활성/대체 경로와 상태 메시지로 분기한다.','rationale':'선택 기능의 설정 누락이 Agent 전체 Workflow 실패로 번지는 것을 방지한다.','source':'document_loading_pdf_web_json_csv_notebook'},
+            {'id':'CS-162','category':'maintainability','name':'운영 코드 전역 Warning 숨김 금지','level':'recommended','applies_to':['python','production','agentstudio'],'rule':"운영 코드에서 warnings.filterwarnings('ignore')처럼 모든 경고를 전역으로 숨기지 않고 필요한 경우 알려진 Warning category와 최소 Scope만 제한한다.",'rationale':'교육 화면 정리용 패턴 때문에 Deprecation·Runtime 경고를 놓치는 것을 방지한다.','source':'document_loading_pdf_web_json_csv_notebook'},
+          ]
+          ids = {r.get('id') for r in registry.get('rules') or []}
+          if any(r['id'] in ids for r in derived):
+              raise SystemExit('v5.491 rule id already exists')
+          registry['rules'].extend(derived)
+          rules_path.write_text(json.dumps(registry, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+          source = root / 'backend/app/data/coding_style/sources/document_loading_pdf_web_json_csv_notebook.md'
+          source.write_text('''# 문서 로딩 PDF · 웹 · JSON · CSV Notebook 코딩 스타일 추출\n\n사용자가 제공한 `2. 문서_로딩_1_PDF_웹_JSON_CSV.ipynb`의 실제 코드 작성 방식에서 Agent 개발 코드에 재사용 가치가 있는 패턴만 구조화합니다.\n\n## 반영 패턴\n- `PDF_PATH`, `WEB_URL`, `OCR_PDF_PATH`처럼 입력·경로·설정을 핵심 처리와 구분합니다.\n- `pdf_docs`, `json_docs`, `csv_docs`, `ocr_target_document`처럼 단계와 역할이 드러나는 이름을 사용합니다.\n- 설정/입력 → 로딩 → 처리 → 검증 → 결과 확인 순서를 유지합니다.\n- 문서 수·`page_content`·필수 구조를 다음 단계 전에 검증합니다. 운영 Agent에서는 assert만 의존하지 않고 Validator/예외 처리로 승격합니다.\n- 외부 HTTP 호출은 `timeout`, `raise_for_status()`와 업무 상태 코드를 함께 확인합니다.\n- 선택적 API Key 누락은 명시적 Skip/비활성 경로로 처리합니다.\n- `with pdfplumber.open(...)`, `with pymupdf.open(...)`처럼 리소스 수명주기를 안전하게 관리합니다.\n- `metadata_func`, `Document(metadata=...)`처럼 source/page/id/date/tags를 유지합니다.\n- 대량 입력에는 `lazy_load()`/iterator를 고려합니다.\n- UTF-8, 공백, None 등 외부 데이터 경계를 최소 정규화합니다.\n\n## 그대로 복사하지 않는 교육용 패턴\n- `print` 중심 확인은 운영 서비스에서는 Logging/Metric/Trace로 바꿀 수 있습니다.\n- `warnings.filterwarnings("ignore")`를 운영 Agent 기본 코드에 적용하지 않습니다.\n- 실습용 고정 파일명·페이지·예상 건수는 Settings/입력/테스트 Fixture로 분리합니다.\n- 작은 예제를 불필요하게 Service/Class로 과도하게 추상화하지 않습니다.\n''', encoding='utf-8')
+
+          # Version markers and release notes.
+          rw('backend/app/main.py', 'version="5.490"', 'version="5.491"')
+          rw('backend/app/api/routes.py', '"version": "5.490"', '"version": "5.491"')
+          rw('backend/app/api/routes.py', '+NotebookWarningOutputClassification"}', '+NotebookWarningOutputClassification+DocumentDrivenAgentCodingStyle"}')
+          readme = root / 'README.md'
+          readme.write_text('''## v5.491\n\n### v5.491\n- 사용자 제공 문서 로딩 Notebook의 실제 코드 패턴을 분석해 Agent 생성용 Coding Style에 반영했습니다.\n- 기존 10개 선택 규칙에 처리 흐름, 결과 검증, 리소스 관리, 외부 I/O, Metadata, 정규화, Lazy Loading, Warning 정책 8개를 추가했습니다.\n- RAG/PDF/CSV/JSON/OCR/Web Loader 요청을 자동 감지해 문서 전용 Registry 규칙을 생성·재개발·수정 Prompt에 적용합니다.\n- 교육용 print/고정 파일명/전역 Warning 숨김은 운영 Agent 기본 스타일로 복사하지 않습니다.\n\n''' + readme.read_text(encoding='utf-8'), encoding='utf-8')
+          old = root / 'README_V5_490_NotebookWarningOutputClassification.md'
+          if old.exists(): old.unlink()
+          (root / 'README_V5_491_DocumentDrivenAgentCodingStyle.md').write_text('''# THEANOVA AgentStudio v5.491 - DocumentDrivenAgentCodingStyle\n\n- 사용자 제공 문서 로딩 Notebook의 코드 스타일을 Agent 생성 규칙으로 구조화\n- 단계형 데이터 흐름·핵심 결과 검증·리소스 안전 관리\n- 외부 HTTP/API 상태 검증과 선택적 연동 명시적 분기\n- RAG source/page/id/date/tags Metadata 보존\n- 외부 데이터 정규화·대량 Lazy Loading\n- 운영 코드의 전역 Warning 숨김 금지\n- 사용자 선택 Coding Style 10개 → 18개 확장\n''', encoding='utf-8')
+
+          validator = root / 'backend/validate_v5491_document_driven_agent_coding_style_contract.py'
+          validator.write_text('''from pathlib import Path\nimport json\nROOT=Path(__file__).resolve().parents[1]\nAPP=(ROOT/'frontend/src/App.jsx').read_text(encoding='utf-8')\nWF=(ROOT/'backend/app/services/agent_workflow.py').read_text(encoding='utf-8')\nSEL=(ROOT/'backend/app/services/coding_rule_selector.py').read_text(encoding='utf-8')\nMAIN=(ROOT/'backend/app/main.py').read_text(encoding='utf-8')\nROUTES=(ROOT/'backend/app/api/routes.py').read_text(encoding='utf-8')\nREG=json.loads((ROOT/'backend/app/data/coding_style/rules.json').read_text(encoding='utf-8'))\nkeys=['staged_data_flow','validate_key_results','safe_resource_management','external_io_validation','preserve_source_metadata','normalize_external_data','prefer_lazy_loading','avoid_global_warning_suppression']\nassert "AGENTSTUDIO_FRONTEND_VERSION='5.491'" in APP\nassert 'version="5.491"' in MAIN and '"version": "5.491"' in ROUTES\nassert all(f'{k}:true' in APP and f'"{k}": True' in WF for k in keys)\nassert all(x in APP for x in ['데이터 · 안정성','외부 · 운영'])\nassert REG.get('version')=='1.9'\nids={r.get('id') for r in REG.get('rules') or []}\nassert all(f'CS-{n}' in ids for n in range(154,163))\nassert all(x in SEL for x in ['data_pipeline','document_loader','pymupdf','easyocr'])\nassert 'source, page/pdf_page, id, date, tags' in WF\nprint('v5.491 document-driven coding style contract: ALL PASS')\n''', encoding='utf-8')
+          PY
+
+      - name: Backend syntax and coding style contract
+        run: |
+          python -m compileall -q backend/app
+          python backend/validate_v5491_document_driven_agent_coding_style_contract.py
+          PYTHONPATH=backend python - <<'PY'
+          from app.services.coding_rule_selector import coding_rules_for_request
+          result=coding_rules_for_request('PDF OCR CSV JSON 문서를 처리하고 외부 API를 호출하는 RAG Agent를 만들어줘', path='services/document_loader.py', project_scope=True)
+          ids={r['id'] for r in result['rules']}
+          expected={f'CS-{n}' for n in range(154,163)}
+          missing=expected-ids
+          assert not missing, missing
+          print('selected v5.491 rules:', sorted(expected))
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend clean build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Commit tested v5.491 source
+        shell: bash
+        run: |
+          git config user.name 'ynystory-gif'
+          git config user.email 'ynystory@gmail.com'
+          git rm .github/workflows/validate-v5-491-document-style.yml
+          git add -A
+          git commit -m 'feat: derive Agent coding style from document-loading notebook for v5.491'
+          git push origin HEAD:fix/v5.491-document-driven-coding-style
+
+      - name: Build clean distribution tree
+        shell: bash
+        run: |
+          mkdir -p package/THEANOVA_AgentStudio_v5_491_DocumentDrivenAgentCodingStyle
+          rsync -a ./ package/THEANOVA_AgentStudio_v5_491_DocumentDrivenAgentCodingStyle/ \
+            --exclude '.git/' \
+            --exclude 'package/' \
+            --exclude 'frontend/node_modules/' \
+            --exclude 'frontend/dist/' \
+            --exclude '**/__pycache__/' \
+            --exclude '*.pyc' \
+            --exclude '.venv/' \
+            --exclude 'logs/'
+          find package/THEANOVA_AgentStudio_v5_491_DocumentDrivenAgentCodingStyle -maxdepth 1 -type f -name 'README_V5_*.md' ! -name 'README_V5_491_DocumentDrivenAgentCodingStyle.md' -delete
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: THEANOVA_AgentStudio_v5_491_DocumentDrivenAgentCodingStyle
+          path: package/THEANOVA_AgentStudio_v5_491_DocumentDrivenAgentCodingStyle
+          if-no-files-found: error
