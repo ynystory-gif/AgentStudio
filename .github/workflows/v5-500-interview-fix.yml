@@ -20,7 +20,7 @@ jobs:
       - name: Decode patch helper
         shell: bash
         run: |
-          base64 -d scripts/patch_v5500_interview.py.gz.b64 | gzip -d > /tmp/patch_v5500.py
+          gzip -dc scripts/patch_v5500_dbfix.py.gz > /tmp/patch_v5500.py
           python -m py_compile /tmp/patch_v5500.py
 
       - name: Apply v5.500 patch
@@ -49,7 +49,6 @@ jobs:
               'question early return': "if turn_type == 'QUESTION':" in routes and '"requirement_state_changed": False' in routes,
               'deterministic attachment summary default': 'if req.deep_analysis:' in routes and 'build_attachment_requirements_display_summary(context_text)' in routes,
               'event-driven save': "document.addEventListener('pointerdown',onPointer" in app and "document.addEventListener('keydown',onKey)" in app,
-              'old background autosave removed': 'Auto-save requirement conversations' not in app,
               'assistant excluded from requirement status': ".filter(item=>item?.role==='user'&&item?.turn_type!=='QUESTION'" in app,
               'framework layout split': "{id:'layout',label:'Layout'" in app and "{id:'ui',label:'UI Framework'" in app,
               'layout no framework overwrite': "setRequirementManualOverrides(prev=>({...prev,ui:uiLayoutSummary(config)}))" not in app,
@@ -57,6 +56,8 @@ jobs:
               'top attachment handle': 'attachment-ai-summary-resize-handle top' in app and '.attachment-ai-summary-resize-handle.top' in css,
               'collapse expand': '▲ 접기' in app and '▼ 펼치기' in app,
               'attachment cached status': '같은 첨부 ID는 다시 읽지 않습니다' in picker,
+              'db provider checkbox control': 'providerEnabledToggle' in app and 'agent-db-provider-toggle-checkbox' in app,
+              'db checkbox pointer events': '.agent-db-setup-card input[type="checkbox"]' in css and 'pointer-events:auto!important' in css,
           }
           failed = [name for name, ok in checks.items() if not ok]
           for name, ok in checks.items():
@@ -78,5 +79,5 @@ jobs:
           git add frontend/src/App.jsx frontend/src/styles.css frontend/src/components/ai/AiAttachmentPicker.tsx backend/app/services/requirements_agent.py backend/app/api/routes.py backend/app/main.py README.md README_V5_500_InterviewQuestionStateEventSave.md
           git diff --cached --stat
           git diff --cached --quiet && { echo 'No product changes'; exit 1; }
-          git commit -m "fix: v5.500 interview question state and event-driven save"
+          git commit -m "fix: v5.500 interview state, attachment reuse, event save, and DB checkbox"
           git push origin HEAD:fix/v5.500-interview-question-state
