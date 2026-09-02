@@ -1,0 +1,54 @@
+name: Package v5.484 Download
+
+on:
+  push:
+    branches:
+      - packaging/v5.484-download
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout v5.484 commit
+        uses: actions/checkout@v4
+        with:
+          ref: f9af02d10d6213e085a5a3fb6fe01266766f13de
+
+      - name: Build clean distribution folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG="THEANOVA_AgentStudio_v5_484_LiveSttRollingContextAccuracyFix"
+          mkdir -p "$RUNNER_TEMP/$PKG"
+          rsync -a ./ "$RUNNER_TEMP/$PKG/" \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='README_V5_*.md'
+
+          cat > "$RUNNER_TEMP/$PKG/README_V5_484_LiveSttRollingContextAccuracyFix.md" <<'EOF'
+          # THEANOVA AgentStudio v5.484
+
+          ## Live STT Rolling Context Accuracy Fix
+
+          - 실시간 STT를 최근 6초 Rolling Context 방식으로 변경
+          - 최초 2.8초 문맥 확보 후 1.4초 간격 재분석
+          - 최근 확정 Transcript를 initial_prompt로 전달해 문맥 연속성 개선
+          - substring 기반 중복 제거를 시간 범위 기반 안전 중복 제거로 변경
+          - 기존 앞부분 반복 시 새로 인식된 뒷부분은 보존
+          - 외부 강의/스피커 음성에 맞춰 VAD 및 RMS gate 조정
+          - 녹음 중지 시 마지막 holdback 구간을 한 번 더 처리
+          - 종료 후 정밀 보정 beam_size/best_of 4 적용
+
+          기준 커밋: f9af02d10d6213e085a5a3fb6fe01266766f13de
+          EOF
+
+      - name: Upload v5.484 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: THEANOVA_AgentStudio_v5_484_LiveSttRollingContextAccuracyFix
+          path: ${{ runner.temp }}/THEANOVA_AgentStudio_v5_484_LiveSttRollingContextAccuracyFix
+          if-no-files-found: error
+          compression-level: 6
