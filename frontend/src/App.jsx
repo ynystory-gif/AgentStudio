@@ -34,7 +34,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.500'
+const AGENTSTUDIO_FRONTEND_VERSION='5.501'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_TOOL_PROMPT_SETTINGS={
@@ -509,9 +509,9 @@ const normalizeAgentDatabaseSetup=(value=null)=>{
   const source=value&&typeof value==='object'?value:{}
   return {
     ...base,...source,mode:String(source.mode||base.mode).toUpperCase(),
-    postgresql:{...base.postgresql,...(source.postgresql||{}),enabled:Boolean(source?.postgresql?.use_in_agent??source?.postgresql?.enabled),password:String(source?.postgresql?.password||'')},
-    firestore:{...base.firestore,...(source.firestore||{}),enabled:Boolean(source?.firestore?.use_in_agent??source?.firestore?.enabled),service_account_path:String(source?.firestore?.service_account_path||'')},
-    redis:{...base.redis,...(source.redis||{}),enabled:Boolean(source?.redis?.use_in_agent??source?.redis?.enabled),password:String(source?.redis?.password||''),tls:Boolean(source?.redis?.tls??source?.redis?.ssl)},
+    postgresql:{...base.postgresql,...(source.postgresql||{}),enabled:Boolean(source?.postgresql?.enabled??source?.postgresql?.use_in_agent),use_in_agent:Boolean(source?.postgresql?.enabled??source?.postgresql?.use_in_agent),password:String(source?.postgresql?.password||'')},
+    firestore:{...base.firestore,...(source.firestore||{}),enabled:Boolean(source?.firestore?.enabled??source?.firestore?.use_in_agent),use_in_agent:Boolean(source?.firestore?.enabled??source?.firestore?.use_in_agent),service_account_path:String(source?.firestore?.service_account_path||'')},
+    redis:{...base.redis,...(source.redis||{}),enabled:Boolean(source?.redis?.enabled??source?.redis?.use_in_agent),use_in_agent:Boolean(source?.redis?.enabled??source?.redis?.use_in_agent),password:String(source?.redis?.password||''),tls:Boolean(source?.redis?.tls??source?.redis?.ssl)},
   }
 }
 
@@ -626,7 +626,14 @@ function AgentDatabaseSetupPanel({value,onChange,onTest,onAnalyze,onCreateResour
   const [activeProvider,setActiveProvider]=useState('postgresql')
   const configure=['CONFIGURE','CONNECTION_ONLY'].includes(setup.mode)
   const selectedProviders=selectedAgentDatabaseProviders(setup)
-  const patchProvider=(provider,patch)=>onChange?.({...setup,mode:setup.mode==='PENDING'?'CONFIGURE':setup.mode,[provider]:{...setup[provider],...patch}})
+  const patchProvider=(provider,patch)=>{
+    const normalizedPatch={...patch}
+    if(Object.prototype.hasOwnProperty.call(normalizedPatch,'enabled')){
+      normalizedPatch.enabled=Boolean(normalizedPatch.enabled)
+      normalizedPatch.use_in_agent=Boolean(normalizedPatch.enabled)
+    }
+    onChange?.({...setup,mode:setup.mode==='PENDING'?'CONFIGURE':setup.mode,[provider]:{...setup[provider],...normalizedPatch}})
+  }
   const providerEnabledToggle=(provider,label)=>{
     const enabled=Boolean(setup?.[provider]?.enabled)
     return <button
@@ -641,7 +648,7 @@ function AgentDatabaseSetupPanel({value,onChange,onTest,onAnalyze,onCreateResour
   const setMode=(mode)=>{
     const next={...setup,mode}
     if(mode==='CONNECTION_ONLY') for(const key of ['postgresql','firestore','redis']) next[key]={...next[key],auto_provision:false}
-    if(['NO_DB','SKIP','LATER_EDITOR'].includes(mode)) for(const key of ['postgresql','firestore','redis']) next[key]={...next[key],enabled:false,auto_provision:false}
+    if(['NO_DB','SKIP','LATER_EDITOR'].includes(mode)) for(const key of ['postgresql','firestore','redis']) next[key]={...next[key],enabled:false,use_in_agent:false,auto_provision:false}
     onChange?.(next)
   }
   const renderTestState=(provider)=>{
@@ -11389,9 +11396,10 @@ function IDE() {
     }
 
     return requirementKeywordDefinitions.map(def=>{
-      let collected=def.keywords.some(keyword=>
-        text.includes(String(keyword).toLowerCase())
-      )
+      // v5.501: keyword mention alone is not a completed requirement. A slot is
+      // complete only when a concrete value, confirmed state, manual override,
+      // or explicit structured selection exists.
+      let collected=false
 
       if(def.id==='purpose'){
         collected=Boolean(

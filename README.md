@@ -136,3 +136,9 @@ Temp/Cache/Output 기본 경로를 실제 런타임과 다운로드 저장 경�
 - 첨부 분석 정리 패널의 높이 조절 Handle을 상단으로 이동하고 `▲ 접기 / ▼ 펼치기` 버튼을 추가했습니다.
 - 일반 인터뷰 LLM 호출은 60초 hard timeout 후 deterministic interview fallback으로 전환해 2분 이상 무한 대기하지 않습니다.
 - `지금 DB 설정`의 PostgreSQL/Firestore/Redis 사용 체크 컨트롤과 하위 옵션 체크박스의 클릭 영역을 복구했습니다.
+
+## v5.501 DB Checkbox & Requirement Completion State Fix
+- `지금 DB 설정`의 PostgreSQL/Firestore/Redis 사용 상태를 `enabled`와 `use_in_agent` 양쪽에 동시에 기록하고, 과거 저장값을 읽을 때도 `enabled`를 우선해 체크 직후 원상복귀되는 문제를 차단했습니다.
+- `DB 없이 생성`/`건너뛰기`/`나중에 설정` 선택 시 두 사용 상태를 함께 해제해 다시 열었을 때 체크 상태가 일치합니다.
+- 요구사항 수집 현황은 단순 키워드 언급만으로 완료 처리하지 않습니다. 실제 값·확정값·사용자 선택·수동 재정의가 있는 경우에만 완료 표시합니다.
+- v5.500의 정보 질문 즉답, 첨부 분석 1회 캐시, Event-driven Save, 상단 높이 조절/접기, Tool/Prompt 단계, UI Framework/Layout 분리, 인터뷰 timeout 보호를 그대로 유지합니다.
