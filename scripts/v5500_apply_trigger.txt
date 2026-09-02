@@ -1,1 +1,2 @@
 Trigger v5.500 product patch application and validation.
+Run 2: concatenate five payload parts, apply, build, and commit.
