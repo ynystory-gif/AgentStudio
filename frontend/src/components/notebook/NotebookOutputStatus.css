@@ -1,0 +1,71 @@
+.notebook-output-stream.stderr {
+  color: #d7c9a6;
+  background: rgba(117, 91, 34, 0.08);
+  border-left: 2px solid rgba(194, 157, 78, 0.34);
+}
+
+.notebook-output-warning {
+  margin: 6px 12px;
+  border: 1px solid rgba(214, 170, 60, 0.42);
+  border-radius: 6px;
+  background: rgba(112, 82, 19, 0.13);
+  overflow: hidden;
+}
+
+.notebook-output-warning > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 7px 10px;
+  cursor: pointer;
+  user-select: none;
+  color: #e8d39b;
+  font-size: 13px;
+  list-style: none;
+}
+
+.notebook-output-warning > summary::-webkit-details-marker {
+  display: none;
+}
+
+.notebook-output-warning-title {
+  color: #ffd36a;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.notebook-output-warning-type {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #d9c899;
+}
+
+.notebook-output-warning-action {
+  margin-left: auto;
+  color: #b9a873;
+  white-space: nowrap;
+}
+
+.notebook-output-warning[open] .notebook-output-warning-action::before {
+  content: '접기';
+  font-size: 0;
+}
+
+.notebook-output-warning[open] .notebook-output-warning-action {
+  font-size: 0;
+}
+
+.notebook-output-warning[open] .notebook-output-warning-action::after {
+  content: '접기';
+  font-size: 13px;
+}
+
+.notebook-output-stream.warning {
+  margin: 0;
+  border-top: 1px solid rgba(214, 170, 60, 0.24);
+  color: #e3d6b2;
+  background: rgba(70, 53, 19, 0.12);
+}

@@ -1,3 +1,11 @@
+## v5.490
+
+### v5.490
+- Notebook에서 Python `DeprecationWarning`, `FutureWarning`, `UserWarning`, `RuntimeWarning` 등 정상 경고를 실제 오류와 분리합니다.
+- Warning은 셀 실행 성공 상태를 유지하면서 노란 `⚠ 경고 N개` 요약으로 표시하고, 상세 원문은 `자세히 보기`로 접고 펼칠 수 있습니다.
+- 일반 `stderr`는 중립적인 안내 색상으로 표시하고, `output_type=error`인 실제 Exception/Traceback만 기존 빨간 오류 스타일을 사용합니다.
+- v5.489의 외부 Python Worker Runtime, Windows WinError 206 방지, 패키지 보호 실행 구조를 그대로 유지합니다.
+
 ## v5.489
 
 ### v5.489

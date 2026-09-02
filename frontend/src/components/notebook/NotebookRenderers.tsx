@@ -1,5 +1,6 @@
 import React, { type ReactNode } from 'react'
 import type { NotebookAttachments, NotebookOutputData } from '../../types/notebook'
+import './NotebookOutputStatus.css'
 
 export interface NotebookMarkdownProps {
   text?: string | null
@@ -429,16 +430,47 @@ function SmoothNotebookOutputImage({ src }: SmoothNotebookOutputImageProps) {
   )
 }
 
+const NOTEBOOK_WARNING_TYPE_PATTERN = /\b(?:DeprecationWarning|PendingDeprecationWarning|FutureWarning|UserWarning|RuntimeWarning|SyntaxWarning|ResourceWarning|ImportWarning|UnicodeWarning|BytesWarning|EncodingWarning)\b/g
+const NOTEBOOK_WARNING_TYPE_TEST = /\b(?:DeprecationWarning|PendingDeprecationWarning|FutureWarning|UserWarning|RuntimeWarning|SyntaxWarning|ResourceWarning|ImportWarning|UnicodeWarning|BytesWarning|EncodingWarning)\b/
+
+function notebookWarningInfo(text: string): { count: number; types: string[] } | null {
+  const source = String(text || '')
+  const matches = Array.from(source.matchAll(NOTEBOOK_WARNING_TYPE_PATTERN))
+  if (!matches.length || !NOTEBOOK_WARNING_TYPE_TEST.test(source)) return null
+  const types = Array.from(new Set(matches.map(match => String(match[0] || '').trim()).filter(Boolean)))
+  return { count: Math.max(1, matches.length), types }
+}
+
+function NotebookWarningOutput({ text }: { text: string }) {
+  const info = notebookWarningInfo(text)
+  if (!info) return <pre className="notebook-output-stream stderr">{text}</pre>
+  const countLabel = `경고 ${info.count}개`
+  const typeLabel = info.types.length ? info.types.join(', ') : 'Python Warning'
+  return (
+    <details className="notebook-output-warning">
+      <summary>
+        <span className="notebook-output-warning-title">⚠ {countLabel}</span>
+        <span className="notebook-output-warning-type">{typeLabel}</span>
+        <span className="notebook-output-warning-action">자세히 보기</span>
+      </summary>
+      <pre className="notebook-output-stream warning">{text}</pre>
+    </details>
+  )
+}
+
 export function NotebookOutput({ output }: NotebookOutputProps) {
   if (!output) return null
   const outputType = String(output.output_type || '')
 
   if (outputType === 'stream') {
-    return (
-      <pre className={output.name === 'stderr' ? 'notebook-output-stream error' : 'notebook-output-stream'}>
-        {notebookSourceToText(output.text)}
-      </pre>
-    )
+    const streamText = notebookSourceToText(output.text)
+    if (output.name === 'stderr') {
+      // v5.490: Python warnings are successful execution diagnostics, not failures.
+      // Keep actual output_type='error' exceptions red while warnings are shown
+      // as a compact yellow disclosure and ordinary stderr stays neutral.
+      return <NotebookWarningOutput text={streamText} />
+    }
+    return <pre className="notebook-output-stream">{streamText}</pre>
   }
 
   if (outputType === 'error') {
