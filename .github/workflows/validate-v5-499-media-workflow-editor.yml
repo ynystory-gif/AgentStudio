@@ -1,0 +1,159 @@
+name: Validate v5.499 Media Workflow Editor UI
+
+on:
+  push:
+    branches: [fix/v5.499-media-workflow-editor-ui]
+
+permissions:
+  contents: write
+
+jobs:
+  validate-build-package:
+    if: github.event.head_commit.message == 'test: validate v5.499 media workflow editor UI'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply v5.499 Media Workflow Editor UI
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64, io, tarfile
+
+          payload = '''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'''
+          raw = base64.b64decode(payload)
+          with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as tf:
+              tf.extractall('.')
+
+          app = Path('frontend/src/App.jsx')
+          text = app.read_text(encoding='utf-8')
+          replacements = [
+              ("import { useMediaSession } from './components/media/MediaSessionProvider'", "import { useMediaSession } from './components/media/MediaSessionProvider'\nimport { MediaWorkflowEditor } from './components/media/MediaWorkflowEditor'"),
+              ("const AGENTSTUDIO_FRONTEND_VERSION='5.498'", "const AGENTSTUDIO_FRONTEND_VERSION='5.499'"),
+              ("function TargetWorkflowDiagram({workflow}){\n  const [selectedGroup,setSelectedGroup]=useState(null)", "function TargetWorkflowDiagram({workflow,onWorkflowChange}){\n  const [selectedGroup,setSelectedGroup]=useState(null)\n  const [workflowMode,setWorkflowMode]=useState('GROUPS')"),
+          ]
+          for old,new in replacements:
+              if text.count(old) != 1:
+                  raise AssertionError(f'App.jsx expected exactly one match: {old[:80]!r}, got {text.count(old)}')
+              text = text.replace(old,new,1)
+
+          old = '''  if(!rawSteps.length){\n    return <div className="target-empty">'''
+          new = '''  const mediaStepTypes=new Set(['media_input','media_analysis','media_plan','media_process','media_generate','media_validate','approval','preview'])\n  const hasMediaWorkflow=rawSteps.some(step=>mediaStepTypes.has(String(step?.type||'').toLowerCase()))\n    ||(Array.isArray(workflow?.nodes)&&workflow.nodes.some(node=>String(node?.type||'').toUpperCase().includes('IMAGE')||String(node?.type||'').toUpperCase().includes('VIDEO')))\n\n  if(!rawSteps.length){\n    return <div className="target-empty">'''
+          if text.count(old) != 1: raise AssertionError('rawSteps insertion marker mismatch')
+          text = text.replace(old,new,1)
+
+          old = '''  const activeGroup=groups.find(x=>x.id===selectedGroup)\n\n  if(activeGroup){'''
+          new = '''  const activeGroup=groups.find(x=>x.id===selectedGroup)\n\n  if(workflowMode==='MEDIA_EDITOR'&&hasMediaWorkflow){\n    return <div className="media-workflow-editor-back-shell">\n      <MediaWorkflowEditor\n        workflow={workflow}\n        onChange={onWorkflowChange}\n        onClose={()=>setWorkflowMode('GROUPS')}\n      />\n    </div>\n  }\n\n  if(activeGroup){'''
+          if text.count(old) != 1: raise AssertionError('active group insertion marker mismatch')
+          text = text.replace(old,new,1)
+
+          old = '''      <span>그룹을 클릭하면 상세 단계가 표시됩니다.</span>\n    </div>'''
+          new = '''      <div className="media-workflow-editor-actions">\n        <span>그룹을 클릭하면 상세 단계가 표시됩니다.</span>\n        {hasMediaWorkflow&&<button type="button" className="media-workflow-editor-open" onClick={()=>setWorkflowMode('MEDIA_EDITOR')}>▧ Media Workflow Editor</button>}\n      </div>\n    </div>'''
+          if text.count(old) != 1: raise AssertionError('workflow header marker mismatch')
+          text = text.replace(old,new,1)
+
+          old = '''            <TargetWorkflowDiagram workflow={targetWorkflowPreview?.target_agent_workflow||(selectedProjectId?loadedProjectAnalysis?.adaptive_report?.workflow:null)}/>'''
+          new = '''            <TargetWorkflowDiagram\n              workflow={targetWorkflowPreview?.target_agent_workflow||(selectedProjectId?loadedProjectAnalysis?.adaptive_report?.workflow:null)}\n              onWorkflowChange={(nextWorkflow)=>{\n                setTargetWorkflowPreview(prev=>prev?{...prev,target_agent_workflow:nextWorkflow}:prev)\n                setPreviousTargetWorkflowPreview(prev=>prev?{...prev,target_agent_workflow:nextWorkflow}:prev)\n                setAgentBuildMessage('Media Workflow Editor 변경사항을 설계에 반영했습니다. Draft/Checkpoint에 자동 저장됩니다.')\n              }}\n            />'''
+          if text.count(old) != 1: raise AssertionError('TargetWorkflowDiagram invocation marker mismatch')
+          text = text.replace(old,new,1)
+          app.write_text(text,encoding='utf-8')
+
+          for path in ('backend/app/main.py','backend/app/api/routes.py'):
+              p=Path(path); value=p.read_text(encoding='utf-8')
+              if '5.498' not in value: raise AssertionError(f'{path}: v5.498 marker missing')
+              p.write_text(value.replace('5.498','5.499'),encoding='utf-8')
+
+          readme=Path('README.md')
+          intro='''## v5.499 Media Workflow Editor UI\n\n- 기존 그룹형 Target Agent Workflow를 유지하면서 Media Agent에 Node Palette · 편집 Canvas · Node 설정 · Preview/Job 상태 UI를 추가했습니다.\n- Backend Media Node Catalog를 직접 읽고 Typed Port 연결을 `/api/media/workflow/validate-port`로 검증합니다.\n- Canvas에서 Node 추가/이동/삭제, Output→Input 연결, Provider/Model/크기/Retry 설정, Workflow JSON 가져오기/내보내기를 지원합니다.\n- `/api/media/workflow/validate`와 `/normalize`로 전체 Workflow를 검증·정규화한 뒤 Agent 설계 Draft/Checkpoint에 반영합니다.\n- 현재 Editor의 실행/정지 버튼은 설계 단계임을 명시하며 실제 Provider 실행은 생성 대상 Agent의 Adapter Runtime이 연결된 경우에만 담당합니다.\n\n'''
+          readme.write_text(intro+readme.read_text(encoding='utf-8'),encoding='utf-8')
+          print('v5.499 source integration applied')
+          PY
+
+      - name: Validate backend and editor contracts
+        shell: bash
+        run: |
+          python -m compileall -q backend/app
+          python - <<'PY'
+          from pathlib import Path
+          app=Path('frontend/src/App.jsx').read_text(encoding='utf-8')
+          component=Path('frontend/src/components/media/MediaWorkflowEditor.jsx').read_text(encoding='utf-8')
+          service=Path('frontend/src/services/mediaWorkflowApi.js').read_text(encoding='utf-8')
+          assert "AGENTSTUDIO_FRONTEND_VERSION='5.499'" in app
+          assert "import { MediaWorkflowEditor }" in app
+          assert "media-workflow-editor-open" in app
+          assert "onWorkflowChange" in app
+          assert "design = enforce_blender_3d_agent_design(design, request)" in Path('backend/app/services/agent_factory_workflow_design.py').read_text(encoding='utf-8')
+          for endpoint in ('/media/workflow/catalog','/media/workflow/validate-port','/media/workflow/normalize','/media/workflow/validate'):
+              assert endpoint in service, endpoint
+          for marker in ('draggable','connectToInput','Node 설정','Preview / Job 상태','JSON 가져오기','JSON 내보내기','EDITOR MODE','Provider'):
+              assert marker in component, marker
+          assert 'version="5.499"' in Path('backend/app/main.py').read_text(encoding='utf-8')
+          assert '"version": "5.499"' in Path('backend/app/api/routes.py').read_text(encoding='utf-8')
+          print('v5.499 source contract PASS')
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend clean production build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Commit tested v5.499 source
+        shell: bash
+        run: |
+          git config user.name "ynystory-gif"
+          git config user.email "ynystory@gmail.com"
+          git add README.md README_V5_499_MediaWorkflowEditorUI.md \
+            frontend/src/App.jsx \
+            frontend/src/components/media/MediaWorkflowEditor.jsx \
+            frontend/src/components/media/MediaWorkflowEditor.css \
+            frontend/src/services/mediaWorkflowApi.js \
+            backend/app/main.py backend/app/api/routes.py
+          git commit -m "feat: add Media Workflow Editor UI v5.499 [skip ci]"
+          git push origin HEAD:fix/v5.499-media-workflow-editor-ui
+
+      - name: Build clean distribution tree
+        shell: bash
+        run: |
+          rm -rf package
+          mkdir package
+          rsync -a ./ package/ \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'package' \
+            --exclude 'frontend/node_modules' \
+            --exclude 'frontend/dist' \
+            --exclude '__pycache__' \
+            --exclude '*.pyc' \
+            --exclude 'README_V5_*.md'
+          cp README_V5_499_MediaWorkflowEditorUI.md package/
+          find package -type d -name '__pycache__' -prune -exec rm -rf {} +
+          find package -type f -name '*.pyc' -delete
+          python - <<'PY'
+          from pathlib import Path
+          root=Path('package')
+          assert (root/'README.md').exists()
+          assert [p.name for p in root.glob('README_V5_*.md')] == ['README_V5_499_MediaWorkflowEditorUI.md']
+          assert (root/'frontend/src/components/media/MediaWorkflowEditor.jsx').exists()
+          assert (root/'frontend/src/services/mediaWorkflowApi.js').exists()
+          assert "AGENTSTUDIO_FRONTEND_VERSION='5.499'" in (root/'frontend/src/App.jsx').read_text(encoding='utf-8')
+          assert not (root/'.github').exists()
+          assert not any(root.rglob('__pycache__'))
+          assert not any(root.rglob('*.pyc'))
+          print('v5.499 distribution contract PASS')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: THEANOVA_AgentStudio_v5_499_MediaWorkflowEditorUI
+          path: package
+          if-no-files-found: error
