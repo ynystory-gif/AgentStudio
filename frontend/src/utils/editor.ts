@@ -80,7 +80,13 @@ export function isPresentationFile(filePath = ''): boolean {
   return value.endsWith('.ppt') || value.endsWith('.pptx')
 }
 
-export const isBinaryPreviewFile = (filePath = ''): boolean => isPdfFile(filePath) || isPresentationFile(filePath)
+export function isImageFile(filePath = ''): boolean {
+  const ext = String(filePath || '').trim().toLowerCase().split('.').pop() || ''
+  return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif'].includes(ext)
+}
+
+export const isBinaryPreviewFile = (filePath = ''): boolean =>
+  isPdfFile(filePath) || isPresentationFile(filePath) || isImageFile(filePath)
 
 
 // v5.462: Code editors use one shared VS Code-style pair typing policy.

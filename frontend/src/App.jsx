@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { api, apiFetch, connectJobs, runtimeInfo } from './api'
 import { NotebookEditor } from './components/notebook/NotebookEditor'
-import { PdfViewer, PresentationViewer } from './components/viewers/DocumentViewers'
+import { ImageViewer, PdfViewer, PresentationViewer } from './components/viewers/DocumentViewers'
 import { MiniBadge, SectionTitle, StatusDot, StudioIcon } from './components/common/CommonUi'
 import { FileChangeList, KeyValueGrid, MetricCard, ReportSection, StatusBadge, WorkflowMiniMap } from './components/reports/ReportComponents'
 import { ArchitectureConformancePanel, AsBuiltAgentArchitecturePanel, GeneratedAgentArchitecturePanel } from './components/architecture/ArchitecturePanels'
@@ -27,13 +27,13 @@ import { AiAttachmentPicker } from './components/ai/AiAttachmentPicker'
 import { AgentActivityProgress } from './components/ai/AgentActivityProgress'
 import { AgentDesignProjectToolbar, AgentFeatureManager } from './components/ai/AgentDesignProjectManager'
 import { parseTerminalServerMessage, serializeTerminalClientMessage, terminalCellWidth, terminalNextCharacter, terminalPreviousCharacter } from './utils/terminal'
-import { CODE_EDITOR_PAIR_TYPING_OPTIONS, getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isDatabaseDiagramFile, isNotebookFile, isPdfFile, isPresentationFile, registerEscapedDoubleQuotePairGuard } from './utils/editor'
+import { CODE_EDITOR_PAIR_TYPING_OPTIONS, getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isDatabaseDiagramFile, isImageFile, isNotebookFile, isPdfFile, isPresentationFile, registerEscapedDoubleQuotePairGuard } from './utils/editor'
 import { registerCodeIntelligence } from './utils/codeIntelligence'
 import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSqlCode } from './utils/notebook'
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.486'
+const AGENTSTUDIO_FRONTEND_VERSION='5.487'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_AGENT_CODING_STYLE={
@@ -20178,8 +20178,15 @@ function IDE() {
                   value={code}
                   filePath={selected}
                 />
-            : isPdfFile(selected)
-              ? <PdfViewer
+            : isImageFile(selected) ? <ImageViewer
+                  filePath={selected}
+                  projectRoot={resolveWorkspaceRoot(editorFileRootRef.current?.[selected]||fileTreeRootRef.current||'')}
+                  revision={pdfPreviewRevision[normalizeProjectRelativePath(selected)]||0}
+                  page={pdfSearchNavigation[normalizeProjectRelativePath(selected)]?.page||0}
+                  searchQuery={pdfSearchNavigation[normalizeProjectRelativePath(selected)]?.query||''}
+                  navigationToken={pdfSearchNavigation[normalizeProjectRelativePath(selected)]?.nonce||0}
+                  matchSnippet={pdfSearchNavigation[normalizeProjectRelativePath(selected)]?.snippet||''}
+                /> : isPdfFile(selected) ? <PdfViewer
                   filePath={selected}
                   projectRoot={resolveWorkspaceRoot(editorFileRootRef.current?.[selected]||fileTreeRootRef.current||'')}
                   revision={pdfPreviewRevision[normalizeProjectRelativePath(selected)]||0}

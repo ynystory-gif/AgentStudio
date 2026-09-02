@@ -50,6 +50,101 @@ const initialPresentationPreviewState = (): PresentationPreviewState => ({
   attempts: [],
 })
 
+export function ImageViewer({ filePath = '', projectRoot = '', revision = 0 }: BinaryViewerProps) {
+  const [previewUrl, setPreviewUrl] = useState('')
+  const [previewError, setPreviewError] = useState('')
+  const [previewLoading, setPreviewLoading] = useState(true)
+  const [naturalSize, setNaturalSize] = useState({ width: 0, height: 0 })
+  const [zoom, setZoom] = useState(1)
+
+  useEffect(() => {
+    let cancelled = false
+    let objectUrl = ''
+    setPreviewLoading(true)
+    setPreviewError('')
+    setPreviewUrl('')
+    setNaturalSize({ width: 0, height: 0 })
+    setZoom(1)
+
+    const params = new URLSearchParams({
+      root: String(projectRoot || ''),
+      relative_path: String(filePath || ''),
+      v: String(revision),
+    })
+
+    apiFetch(`/files/image?${params.toString()}`)
+      .then(response => response.blob())
+      .then(blob => {
+        if (cancelled) return
+        objectUrl = URL.createObjectURL(blob)
+        setPreviewUrl(objectUrl)
+        setPreviewLoading(false)
+      })
+      .catch(error => {
+        if (cancelled) return
+        setPreviewLoading(false)
+        setPreviewError(error instanceof Error ? error.message : String(error || '이미지 미리보기를 불러오지 못했습니다.'))
+      })
+
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [filePath, projectRoot, revision])
+
+  const zoomPercent = Math.round(zoom * 100)
+  const changeZoom = (delta: number) => setZoom(value => Math.min(5, Math.max(0.1, Number((value + delta).toFixed(2)))))
+
+  return (
+    <div className="image-viewer-shell">
+      <div className="image-viewer-toolbar">
+        <div>
+          <strong>이미지 미리보기</strong>
+          <span>{filePath}</span>
+        </div>
+        <div className="image-viewer-actions">
+          {naturalSize.width > 0 && naturalSize.height > 0 && (
+            <small>{naturalSize.width} × {naturalSize.height}px</small>
+          )}
+          <button type="button" onClick={() => changeZoom(-0.1)} disabled={zoom <= 0.1} title="축소">−</button>
+          <button type="button" onClick={() => setZoom(1)} title="원본 배율">{zoomPercent}%</button>
+          <button type="button" onClick={() => changeZoom(0.1)} disabled={zoom >= 5} title="확대">＋</button>
+          <button type="button" onClick={() => setZoom(1)} title="배율 초기화">↺</button>
+        </div>
+      </div>
+      {previewLoading ? (
+        <div className="presentation-viewer-message">
+          <strong>이미지 불러오는 중...</strong>
+          <span>프로젝트 이미지를 Backend에서 인증 후 읽고 있습니다.</span>
+        </div>
+      ) : previewError ? (
+        <div className="presentation-viewer-message error">
+          <strong>이미지 파일을 열 수 없습니다.</strong>
+          <span>{previewError}</span>
+          <small>파일 형식과 프로젝트 경로 등록 상태를 확인해 주세요.</small>
+        </div>
+      ) : (
+        <div className="image-viewer-canvas">
+          <img
+            key={`${filePath}:${revision}:${previewUrl}`}
+            src={previewUrl}
+            alt={filePath || '프로젝트 이미지'}
+            decoding="async"
+            draggable={false}
+            style={{ width: naturalSize.width ? `${naturalSize.width * zoom}px` : 'auto' }}
+            onLoad={event => {
+              setNaturalSize({
+                width: event.currentTarget.naturalWidth || 0,
+                height: event.currentTarget.naturalHeight || 0,
+              })
+            }}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function PdfViewer({
   filePath = '',
   projectRoot = '',

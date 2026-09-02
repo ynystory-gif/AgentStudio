@@ -739,7 +739,18 @@ for raw in sys.stdin:
                           expression_compiled = compile(expression, filename, "eval", flags=compile_flags)
                           result = _agentstudio_execute_compiled(expression_compiled, namespace)
                           if result is not None:
-                              print(repr(result))
+                              if notebook_mode:
+                                  rich_data, rich_metadata = _agentstudio_notebook_mime_bundle(result)
+                                  _agentstudio_emit_notebook_event({
+                                      "event": "display_data",
+                                      "output": {
+                                          "output_type": "execute_result",
+                                          "data": rich_data,
+                                          "metadata": rich_metadata,
+                                      },
+                                  })
+                              else:
+                                  print(repr(result))
                       else:
                           compiled = compile(tree, filename, "exec", flags=compile_flags)
                           _agentstudio_execute_compiled(compiled, namespace)

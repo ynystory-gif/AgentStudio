@@ -8,6 +8,7 @@ from app.services.ollama_runtime_manager import get_ollama_runtime_status, start
 from app.services.gpu_runtime_manager import get_gpu_runtime_status, set_gpu_runtime_enabled, gpu_recommendation
 import asyncio
 import json
+import mimetypes
 from app.models.entities import Project, ProjectAnalysis, AgentDesignProject, AgentDesignProjectVersion, UITheme
 from app.services.project_paths import resolve_project_paths
 from app.services.ui_theme_service import analyze_theme_from_url, build_rules, merge_theme_analyses
@@ -408,6 +409,9 @@ def _normalize_project_analysis(project_root: str, summary, scan) -> dict:
 
 
 router = APIRouter()
+
+_PROJECT_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif"}
+
 
 class ChatRequest(BaseModel):
     message: str
@@ -3521,7 +3525,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.483", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering+SchedulerWorkspace+ParallelRenderedThemeFallback+AuthenticatedPptExportCors+InteractiveThemePagePreview+RenderedMenuMotionProbe+UILayoutSidebarHeaderIconOptions+Blender3DAgentTemplate+RequirementRecommendationToolRouting+AuthenticatedBinaryDocumentPreview+LearningProblemPersistenceRepair+LearningDatasetTopicScrollLayout+LearningExactMisjudgmentTraceSqlExport+LearningCenterLoadProgressHeartbeat+LearningSqlListParityCurrentPcFastRead+LearningSchemaDeadlockGuard+CodeEditorSelectionLlmReference+EditableLlmReferenceCompactChat+LlmComposerBottomDock+CodeSaveLabelClarification+TopSaveToolbar+ReferenceHeaderSummaryRelocation+InlineDirtySaveButton+PdfPreviewHeadingRemoval+AdaptiveDevelopmentStagePlannerApprovalWorkflow+NewAgentDevelopmentPlanUXStageEditor+DatabaseResourceProvisionPlanApprovalFlow+RuntimeDatabaseFinalPreviewTablePolicyPortRecommendationUX+CodeDocumentationOption+SmartPairTypingEscapedQuoteCaretGuard+CodeDocumentationCssLiteralNewlineFix+CodeDocumentationToggleTitleRelocation+CodeIntelligenceDefinitionHoverSignatureNavigation+NotebookNameErrorDiagnostic+DocumentWideLlmReferenceSelection+StaleReferenceSelectionGuard+FrontendBuildFailureDetail+ElevatedFailureWindowHold+PowerShellNpmStderrGuard+CtrlSpaceSymbolCompletion+ManualLlmReferenceEntry+UnifiedSaveDirtyDot+SelectedTextExactReplacePairTyping+ContextAwareCallArgumentCompletion+CodexCodeResponseAiProposalRouting+CtrlSpaceCompletionNavigationSeparation+NotebookLongRunProgressHeartbeat+ProjectFileMemoTab+SingleMemoPerFileResizableMemoSplit+SaveButtonEventGuard+GlobalMediaSessionBackgroundRecording+LiveTranscriptPersistence+TemporaryExternalMediaTab+UserCodingStyleProfile+BackendFasterWhisperStreamingStt+SttOverlapVad+StopTimeTranscriptRefinement+MediaSessionLastSegmentUndefinedGuard+CodingStylePopoverLayout+LiveTranscriptSummary+ScreenAudioTrackGuard+AttachmentSummaryFileOpen+ManualDatabaseResourceCreate+Global13pxTextFloor+CodingStylePanelPolish+LiveTranscriptProvisionalImmediateRender+TimeRangeRefinedReplacement+TranscriptCollectionRefineCompleteStatus"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.487", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering+SchedulerWorkspace+ParallelRenderedThemeFallback+AuthenticatedPptExportCors+InteractiveThemePagePreview+RenderedMenuMotionProbe+UILayoutSidebarHeaderIconOptions+Blender3DAgentTemplate+RequirementRecommendationToolRouting+AuthenticatedBinaryDocumentPreview+LearningProblemPersistenceRepair+LearningDatasetTopicScrollLayout+LearningExactMisjudgmentTraceSqlExport+LearningCenterLoadProgressHeartbeat+LearningSqlListParityCurrentPcFastRead+LearningSchemaDeadlockGuard+CodeEditorSelectionLlmReference+EditableLlmReferenceCompactChat+LlmComposerBottomDock+CodeSaveLabelClarification+TopSaveToolbar+ReferenceHeaderSummaryRelocation+InlineDirtySaveButton+PdfPreviewHeadingRemoval+AdaptiveDevelopmentStagePlannerApprovalWorkflow+NewAgentDevelopmentPlanUXStageEditor+DatabaseResourceProvisionPlanApprovalFlow+RuntimeDatabaseFinalPreviewTablePolicyPortRecommendationUX+CodeDocumentationOption+SmartPairTypingEscapedQuoteCaretGuard+CodeDocumentationCssLiteralNewlineFix+CodeDocumentationToggleTitleRelocation+CodeIntelligenceDefinitionHoverSignatureNavigation+NotebookNameErrorDiagnostic+DocumentWideLlmReferenceSelection+StaleReferenceSelectionGuard+FrontendBuildFailureDetail+ElevatedFailureWindowHold+PowerShellNpmStderrGuard+CtrlSpaceSymbolCompletion+ManualLlmReferenceEntry+UnifiedSaveDirtyDot+SelectedTextExactReplacePairTyping+ContextAwareCallArgumentCompletion+CodexCodeResponseAiProposalRouting+CtrlSpaceCompletionNavigationSeparation+NotebookLongRunProgressHeartbeat+ProjectFileMemoTab+SingleMemoPerFileResizableMemoSplit+SaveButtonEventGuard+GlobalMediaSessionBackgroundRecording+LiveTranscriptPersistence+TemporaryExternalMediaTab+UserCodingStyleProfile+BackendFasterWhisperStreamingStt+SttOverlapVad+StopTimeTranscriptRefinement+MediaSessionLastSegmentUndefinedGuard+CodingStylePopoverLayout+LiveTranscriptSummary+ScreenAudioTrackGuard+AttachmentSummaryFileOpen+ManualDatabaseResourceCreate+Global13pxTextFloor+CodingStylePanelPolish+LiveTranscriptProvisionalImmediateRender+TimeRangeRefinedReplacement+TranscriptCollectionRefineCompleteStatus"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -3990,6 +3994,66 @@ async def project_file_raw(root: str = Query(...), relative_path: str = Query(..
         path=str(target),
         filename=target.name,
         media_type="application/octet-stream",
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@router.get("/files/image")
+async def project_image_view(root: str = Query(...), relative_path: str = Query(...)):
+    """등록 프로젝트 안의 이미지 파일을 인증된 inline binary 응답으로 전송합니다."""
+    project_root = Path(str(root or "")).expanduser().resolve()
+    relative = str(relative_path or "").strip()
+    if not relative:
+        raise HTTPException(status_code=400, detail="relative_path가 필요합니다.")
+
+    try:
+        await get_file_meta(str(project_root), relative)
+    except PermissionError as exc:
+        restored = await ensure_persisted_project_root(str(project_root))
+        if not restored.get("registered"):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "PROJECT_ROOT_NOT_ALLOWED",
+                    "message": str(exc),
+                    "project_root": str(project_root),
+                    "recovery": restored,
+                },
+            ) from exc
+        await get_file_meta(str(project_root), relative)
+
+    target = (project_root / Path(relative.replace("\\", "/"))).resolve()
+    try:
+        target.relative_to(project_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="프로젝트 밖의 이미지는 열 수 없습니다.") from exc
+
+    suffix = target.suffix.casefold()
+    if suffix not in _PROJECT_IMAGE_SUFFIXES:
+        raise HTTPException(status_code=415, detail="지원하는 이미지 형식이 아닙니다.")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail=f"이미지 파일을 찾을 수 없습니다: {target}")
+
+    media_type = mimetypes.guess_type(target.name)[0] or {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+        ".ico": "image/x-icon",
+        ".avif": "image/avif",
+    }.get(suffix, "application/octet-stream")
+
+    return FileResponse(
+        path=str(target),
+        media_type=media_type,
+        filename=target.name,
         content_disposition_type="inline",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -4752,6 +4816,14 @@ async def project_file_read(payload: dict):
     project_root = Path(root).expanduser().resolve()
     target = (project_root / Path(relative_path.replace("\\", "/"))).resolve()
 
+    if target.suffix.casefold() in _PROJECT_IMAGE_SUFFIXES:
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "code": "IMAGE_BINARY_VIEWER_REQUIRED",
+                "message": "이미지는 텍스트 파일이 아닙니다. /api/files/image Viewer를 사용하세요.",
+            },
+        )
     if target.suffix.casefold() == ".pdf":
         raise HTTPException(
             status_code=415,
@@ -4842,6 +4914,14 @@ async def project_file_content(root: str, relative_path: str):
         / Path(relative_path.replace("\\", "/"))
     ).resolve()
 
+    if target.suffix.casefold() in _PROJECT_IMAGE_SUFFIXES:
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "code": "IMAGE_BINARY_VIEWER_REQUIRED",
+                "message": "이미지는 텍스트 파일이 아닙니다. /api/files/image Viewer를 사용하세요.",
+            },
+        )
     if target.suffix.casefold() == ".pdf":
         raise HTTPException(
             status_code=415,
