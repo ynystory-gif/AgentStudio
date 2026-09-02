@@ -71,3 +71,7 @@
 - 개발/재개발 시작 시 선택한 스타일 Profile을 Agent Factory `design_bundle.user_coding_style`로 전달하고 코드 생성·수정·테스트 실패 Repair·증분 재개발 Prompt에 일관되게 적용합니다.
 - 함수 Docstring 항목은 `변수·메소드 설명 추가` 옵션과 연동하여 설명 주석을 원하지 않는 프로젝트에 주석을 강제로 만들지 않습니다.
 - 기존 Coding Style Registry의 프로젝트/Framework별 규칙은 유지하며, 이번 사용자 Profile은 그 위에 적용되는 프로젝트별 기본 스타일 정책입니다.
+
+
+## v5.492 Live Transcript Text File Save
+실시간 STT Transcript와 요약정리를 프로젝트 recordings 폴더에 UTF-8 TXT로 저장하고 실제 저장 경로를 UI에 표시합니다.

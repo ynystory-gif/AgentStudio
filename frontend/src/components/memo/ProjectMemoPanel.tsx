@@ -119,6 +119,8 @@ export function ProjectMemoPanel({ projectRoot, activeFile = '', projectFiles = 
   const [liveSummaryLoading, setLiveSummaryLoading] = useState(false)
   const [liveSummaryError, setLiveSummaryError] = useState('')
   const [liveSummarySegmentCount, setLiveSummarySegmentCount] = useState(0)
+  const [liveFileSaving, setLiveFileSaving] = useState<'' | 'TRANSCRIPT' | 'SUMMARY'>('')
+  const [liveSavedFile, setLiveSavedFile] = useState<{ kind: 'TRANSCRIPT' | 'SUMMARY'; path: string; relativePath: string } | null>(null)
   const [memos, setMemos] = useState<ProjectMemo[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [draftFile, setDraftFile] = useState('')
@@ -166,6 +168,8 @@ export function ProjectMemoPanel({ projectRoot, activeFile = '', projectFiles = 
     setLiveSummary('')
     setLiveSummaryError('')
     setLiveSummarySegmentCount(0)
+    setLiveFileSaving('')
+    setLiveSavedFile(null)
     setSelectedId('')
     setDraftFile(normalizedActiveFile)
     setDraftTitle('')
@@ -320,6 +324,67 @@ export function ProjectMemoPanel({ projectRoot, activeFile = '', projectFiles = 
       setLiveSummaryError(`요약정리 실패: ${String((summaryError as Error)?.message || summaryError)}`)
     } finally {
       setLiveSummaryLoading(false)
+    }
+  }
+
+  const persistLiveTextFile = async (kind: 'TRANSCRIPT' | 'SUMMARY', text: string) => {
+    const content = String(text || '').trim()
+    if (!projectRoot) throw new Error('프로젝트를 먼저 선택하세요.')
+    if (!content) throw new Error(kind === 'SUMMARY' ? '저장할 요약정리 내용이 없습니다.' : '저장할 실시간 Transcript가 없습니다.')
+    const result = await api<{ path?: string; relative_path?: string }>('/media-stt/save-text', {
+      method: 'POST',
+      body: JSON.stringify({ root: projectRoot, kind: kind.toLowerCase(), text: content })
+    })
+    const savedPath = String(result?.path || '').trim()
+    const relativePath = String(result?.relative_path || '').trim()
+    if (!savedPath) throw new Error('Backend가 저장된 파일 경로를 반환하지 않았습니다.')
+    setLiveSavedFile({ kind, path: savedPath, relativePath })
+    setStatus(`${kind === 'SUMMARY' ? '요약정리' : '실시간 Transcript'} 텍스트 파일을 저장했습니다.`)
+    return savedPath
+  }
+
+  const saveLiveTranscriptFile = async () => {
+    if (liveFileSaving) return
+    const transcript = String(mediaSession.transcriptText || '').trim()
+    if (!transcript) {
+      setStatus('저장할 실시간 Transcript가 없습니다.')
+      return
+    }
+    setLiveFileSaving('TRANSCRIPT')
+    try {
+      await persistLiveTextFile('TRANSCRIPT', transcript)
+    } catch (saveError) {
+      setStatus(`실시간 Transcript 파일 저장 실패: ${String((saveError as Error)?.message || saveError)}`)
+    } finally {
+      setLiveFileSaving('')
+    }
+  }
+
+  const saveLiveSummaryFile = async () => {
+    if (liveFileSaving || liveSummaryLoading) return
+    const transcript = String(mediaSession.transcriptText || '').trim()
+    if (!transcript) {
+      setStatus('요약정리할 실시간 Transcript가 없습니다.')
+      return
+    }
+    setLiveFileSaving('SUMMARY')
+    setLiveSummaryError('')
+    try {
+      const result = await api<{ summary?: string; truncated?: boolean }>('/media-stt/summarize', {
+        method: 'POST',
+        body: JSON.stringify({ root: projectRoot, transcript })
+      })
+      const summary = String(result?.summary || '').trim()
+      if (!summary) throw new Error('요약 결과가 비어 있습니다.')
+      setLiveSummary(summary)
+      setLiveSummarySegmentCount(mediaSession.transcriptSegments.length)
+      await persistLiveTextFile('SUMMARY', summary)
+    } catch (saveError) {
+      const message = String((saveError as Error)?.message || saveError)
+      setLiveSummaryError(`요약정리 파일 저장 실패: ${message}`)
+      setStatus(`요약정리 파일 저장 실패: ${message}`)
+    } finally {
+      setLiveFileSaving('')
     }
   }
 
@@ -541,7 +606,9 @@ export function ProjectMemoPanel({ projectRoot, activeFile = '', projectFiles = 
           </div>
           <div className="project-live-transcript-head-actions">
             <span>{mediaSession.transcriptSegments.length}{mediaSession.interimSegment ? '+1' : ''}개 구간</span>
-            <button type="button" className="summary" onClick={() => void summarizeLiveTranscript()} disabled={!mediaSession.transcriptText.trim() || liveSummaryLoading}>{liveSummaryLoading ? '요약 중…' : '✦ 요약정리'}</button>
+            <button type="button" className="save-file" onClick={() => void saveLiveTranscriptFile()} disabled={!mediaSession.transcriptText.trim() || Boolean(liveFileSaving)}>{liveFileSaving === 'TRANSCRIPT' ? '저장 중…' : '💾 파일 저장'}</button>
+            <button type="button" className="save-file summary-file" onClick={() => void saveLiveSummaryFile()} disabled={!mediaSession.transcriptText.trim() || Boolean(liveFileSaving) || liveSummaryLoading}>{liveFileSaving === 'SUMMARY' ? '요약·저장 중…' : '💾 요약 파일 저장'}</button>
+            <button type="button" className="summary" onClick={() => void summarizeLiveTranscript()} disabled={!mediaSession.transcriptText.trim() || liveSummaryLoading || Boolean(liveFileSaving)}>{liveSummaryLoading ? '요약 중…' : '✦ 요약정리'}</button>
           </div>
         </div>
         <div className="project-live-transcript-body">
@@ -567,6 +634,13 @@ export function ProjectMemoPanel({ projectRoot, activeFile = '', projectFiles = 
         <button type="button" onClick={() => void navigator.clipboard?.writeText?.(mediaSession.transcriptText)} disabled={!mediaSession.transcriptText.trim()}>텍스트 복사</button>
         <button type="button" onClick={() => void mediaSession.clearTranscript()} disabled={!mediaSession.transcriptText.trim() || mediaSession.status === 'RECORDING'}>기록 지우기</button>
       </div>
+
+      {liveSavedFile && (
+        <div className="project-live-save-path" title={liveSavedFile.path}>
+          <strong>{liveSavedFile.kind === 'SUMMARY' ? '요약 파일 저장 경로' : 'Transcript 파일 저장 경로'}</strong>
+          <code>{liveSavedFile.path}</code>
+        </div>
+      )}
 
       {(liveSummary || liveSummaryLoading || liveSummaryError) && (
         <div className={`project-live-summary ${liveSummaryError ? 'error' : ''}`}>
