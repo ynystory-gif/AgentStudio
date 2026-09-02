@@ -1,0 +1,251 @@
+name: Apply v5.485 Notebook Cell Resize
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-v5-485-notebook-cell-resize.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply notebook cell resize patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('frontend/src/components/notebook/NotebookEditor.tsx')
+          text = path.read_text(encoding='utf-8')
+
+          import_marker = "import { NotebookMarkdown, NotebookOutput, notebookSourceToText } from './NotebookRenderers'\n"
+          if "import './NotebookEditorResize.css'" not in text:
+              text = text.replace(import_marker, import_marker + "import './NotebookEditorResize.css'\n", 1)
+
+          scroll_marker = "const NOTEBOOK_SCROLL_POSITIONS = new Map<string, number>()\n"
+          resize_constants = """const NOTEBOOK_SCROLL_POSITIONS = new Map<string, number>()
+// v5.485: Keep user-resized code-cell heights outside the component so the
+// height survives temporary NotebookEditor unmounts while switching files.
+const NOTEBOOK_CELL_EDITOR_HEIGHTS = new Map<string, number>()
+const NOTEBOOK_CELL_EDITOR_MIN_HEIGHT = 92
+const NOTEBOOK_CELL_EDITOR_MAX_HEIGHT = 2400
+
+function notebookCellEditorHeightKey(scrollKey: string, cellIndex: number): string {
+  return `${scrollKey}::${cellIndex}`
+}
+"""
+          if "NOTEBOOK_CELL_EDITOR_HEIGHTS" not in text:
+              if scroll_marker not in text:
+                  raise SystemExit('scroll marker not found')
+              text = text.replace(scroll_marker, resize_constants, 1)
+
+          effect_marker = """  useEffect(() => {
+    scrollKeyRef.current = scrollKey
+  }, [scrollKey])
+"""
+          resize_handler = """  useEffect(() => {
+    scrollKeyRef.current = scrollKey
+  }, [scrollKey])
+
+  const beginCellEditorResize = (index: number, event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const handle = event.currentTarget
+    const container = handle.parentElement as HTMLDivElement | null
+    if (!container) return
+
+    const startY = event.clientY
+    const startHeight = container.getBoundingClientRect().height
+    const heightKey = notebookCellEditorHeightKey(scrollKey, index)
+    const maxHeight = Math.min(
+      NOTEBOOK_CELL_EDITOR_MAX_HEIGHT,
+      Math.max(900, Math.round(window.innerHeight * 2.5)),
+    )
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const nextHeight = Math.min(
+        maxHeight,
+        Math.max(NOTEBOOK_CELL_EDITOR_MIN_HEIGHT, startHeight + (moveEvent.clientY - startY)),
+      )
+      const roundedHeight = Math.round(nextHeight)
+      container.style.height = `${roundedHeight}px`
+      NOTEBOOK_CELL_EDITOR_HEIGHTS.set(heightKey, roundedHeight)
+    }
+
+    const finishResize = () => {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', finishResize)
+      window.removeEventListener('pointercancel', finishResize)
+      document.body.classList.remove('notebook-cell-resizing')
+    }
+
+    document.body.classList.add('notebook-cell-resizing')
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', finishResize)
+    window.addEventListener('pointercancel', finishResize)
+  }
+"""
+          if "const beginCellEditorResize" not in text:
+              if effect_marker not in text:
+                  raise SystemExit('scroll effect marker not found')
+              text = text.replace(effect_marker, resize_handler, 1)
+
+          height_marker = "        const editorHeight = Math.min(520, Math.max(92, lineCount * 20 + 30))\n"
+          height_replacement = """        const autoEditorHeight = Math.min(520, Math.max(NOTEBOOK_CELL_EDITOR_MIN_HEIGHT, lineCount * 20 + 30))
+        const storedEditorHeight = NOTEBOOK_CELL_EDITOR_HEIGHTS.get(notebookCellEditorHeightKey(scrollKey, index))
+        const editorHeight = Math.min(
+          NOTEBOOK_CELL_EDITOR_MAX_HEIGHT,
+          Math.max(NOTEBOOK_CELL_EDITOR_MIN_HEIGHT, storedEditorHeight ?? autoEditorHeight),
+        )
+"""
+          if "const storedEditorHeight = NOTEBOOK_CELL_EDITOR_HEIGHTS.get" not in text:
+              if height_marker not in text:
+                  raise SystemExit('editorHeight marker not found')
+              text = text.replace(height_marker, height_replacement, 1)
+
+          editor_open = """            {cellType === 'code'
+              ? <Editor
+                  height={`${editorHeight}px`}
+"""
+          editor_open_replacement = """            {cellType === 'code'
+              ? <div
+                  className="notebook-code-editor-resizable"
+                  style={{ height: `${editorHeight}px` }}
+                >
+                  <Editor
+                    height="100%"
+"""
+          if "className=\"notebook-code-editor-resizable\"" not in text:
+              if editor_open not in text:
+                  raise SystemExit('code editor open marker not found')
+              text = text.replace(editor_open, editor_open_replacement, 1)
+
+          editor_close = """                  }}
+                />
+              : cellType === 'markdown'
+"""
+          editor_close_replacement = """                  }}
+                  />
+                  <div
+                    className="notebook-code-editor-resize-handle"
+                    role="separator"
+                    aria-orientation="horizontal"
+                    aria-label="코드 셀 높이 조절"
+                    title="위/아래로 드래그해 코드 셀 높이를 조절합니다. 더블클릭하면 자동 높이로 돌아갑니다."
+                    onPointerDown={(event: React.PointerEvent<HTMLDivElement>) => beginCellEditorResize(index, event)}
+                    onDoubleClick={(event: React.MouseEvent<HTMLDivElement>) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      NOTEBOOK_CELL_EDITOR_HEIGHTS.delete(notebookCellEditorHeightKey(scrollKey, index))
+                      const container = event.currentTarget.parentElement as HTMLDivElement | null
+                      if (container) container.style.height = `${autoEditorHeight}px`
+                    }}
+                  >
+                    <span />
+                  </div>
+                </div>
+              : cellType === 'markdown'
+"""
+          if "aria-label=\"코드 셀 높이 조절\"" not in text:
+              if editor_close not in text:
+                  raise SystemExit('code editor close marker not found')
+              text = text.replace(editor_close, editor_close_replacement, 1)
+
+          path.write_text(text, encoding='utf-8')
+
+          css = Path('frontend/src/components/notebook/NotebookEditorResize.css')
+          css.write_text("""/* v5.485 Notebook code-cell vertical resize handle */
+.notebook-code-editor-resizable {
+  position: relative;
+  width: 100%;
+  min-height: 92px;
+  max-height: 2400px;
+  overflow: hidden;
+}
+
+.notebook-code-editor-resize-handle {
+  position: absolute;
+  z-index: 8;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 10px;
+  cursor: ns-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(to bottom, transparent 0%, rgba(70, 108, 137, 0.16) 100%);
+  touch-action: none;
+  user-select: none;
+}
+
+.notebook-code-editor-resize-handle span {
+  width: 56px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(139, 180, 211, 0.42);
+  box-shadow: 0 0 0 1px rgba(10, 22, 32, 0.55);
+  pointer-events: none;
+}
+
+.notebook-code-editor-resize-handle:hover,
+.notebook-code-editor-resize-handle:active {
+  background: rgba(44, 126, 180, 0.18);
+}
+
+.notebook-code-editor-resize-handle:hover span,
+.notebook-code-editor-resize-handle:active span {
+  background: rgba(156, 211, 246, 0.82);
+}
+
+body.notebook-cell-resizing,
+body.notebook-cell-resizing * {
+  cursor: ns-resize !important;
+  user-select: none !important;
+}
+""", encoding='utf-8')
+
+          app = Path('frontend/src/App.jsx')
+          app_text = app.read_text(encoding='utf-8')
+          app_text = app_text.replace("const AGENTSTUDIO_FRONTEND_VERSION='5.483'", "const AGENTSTUDIO_FRONTEND_VERSION='5.485'", 1)
+          app.write_text(app_text, encoding='utf-8')
+
+          readme = Path('README_V5_485_NotebookCellVerticalResize.md')
+          readme.write_text("""# THEANOVA AgentStudio v5.485 NotebookCellVerticalResize
+
+- Notebook Code 셀 하단에 세로 크기 조절 핸들을 추가했습니다.
+- 핸들을 위/아래로 드래그하면 코드 영역을 92px~최대 2400px 범위에서 직접 조절할 수 있습니다.
+- 파일을 잠깐 전환했다 돌아와도 같은 앱 실행 세션에서는 셀별 사용자 높이를 유지합니다.
+- 조절 핸들을 더블클릭하면 해당 셀의 코드 줄 수 기준 자동 높이로 복원합니다.
+- Monaco `automaticLayout`을 그대로 사용해 높이 변경 시 코드 편집 영역도 함께 재배치됩니다.
+- 기존 Notebook 실행/디버그/북마크/스크롤 경계 전달 기능은 변경하지 않았습니다.
+""", encoding='utf-8')
+          PY
+
+          rm -f .github/workflows/apply-v5-485-notebook-cell-resize.yml
+          git diff --check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'feat: add draggable notebook code cell height for v5.485'
+          git push origin HEAD:main
