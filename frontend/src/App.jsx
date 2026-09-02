@@ -33,7 +33,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.487'
+const AGENTSTUDIO_FRONTEND_VERSION='5.488'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_AGENT_CODING_STYLE={
@@ -15706,71 +15706,111 @@ function IDE() {
       }
 
       let result=null
-      const streamResponse=await apiFetch('/python/execute/stream',{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          root:workspaceRoot,
-          relative_path:normalizedPath,
-          code:executableCode,
-          mode:mode==='full'?'full':'selection',
-          session_id:runtimeSessionId,
-          capture_last_expression:true,
-          notebook_mode:true,
-          cell_index:Number(cellIndex),
-        })
-      })
-      if(!streamResponse.ok){
-        const detail=await streamResponse.text()
-        throw new Error(`Notebook 스트리밍 실행 실패 (${streamResponse.status}): ${detail||streamResponse.statusText}`)
+      const pythonExecutionPayload={
+        root:workspaceRoot,
+        relative_path:normalizedPath,
+        code:executableCode,
+        mode:mode==='full'?'full':'selection',
+        session_id:runtimeSessionId,
+        capture_last_expression:true,
+        notebook_mode:true,
+        cell_index:Number(cellIndex),
       }
-      if(!streamResponse.body){
+      // v5.488: package-management magics can replace packages used by the
+      // persistent Notebook worker while they run. Route these cells through
+      // the normal request/response endpoint instead of the NDJSON rich-output
+      // stream so a successful pip subprocess cannot leave the browser waiting
+      // for a stream-final packet that never arrives.
+      const packageManagementMode=String(executableCode||'')
+        .split(/\r?\n/)
+        .some(rawLine=>{
+          const line=String(rawLine||'').trim()
+          if(!line||line.startsWith('#')) return false
+          return /^%pip(?:\s|$)/i.test(line)
+            || /^!\s*(?:pip|pip3)(?:\.exe)?(?:\s|$)/i.test(line)
+            || /^!\s*(?:python|python3|py)(?:\.exe)?\s+-m\s+pip(?:\s|$)/i.test(line)
+        })
+
+      if(packageManagementMode){
+        term.write('\x1b[36m[패키지 설치 중] Notebook 스트리밍 보호 모드로 실행합니다. 설치가 끝날 때까지 기다려 주세요.\x1b[0m\r\n')
         result=await api('/python/execute',{
           method:'POST',
-          body:JSON.stringify({
-            root:workspaceRoot,
-            relative_path:normalizedPath,
-            code:executableCode,
-            mode:mode==='full'?'full':'selection',
-            session_id:runtimeSessionId,
-            capture_last_expression:true,
-            notebook_mode:true,
-            cell_index:Number(cellIndex),
-          })
+          body:JSON.stringify(pythonExecutionPayload)
         })
+        if(result?.ok){
+          term.write('\x1b[32m[패키지 설치 완료] 다음 셀부터 갱신된 프로젝트 환경을 사용합니다.\x1b[0m\r\n')
+        }
       }else{
-        const reader=streamResponse.body.getReader()
-        const decoder=new TextDecoder('utf-8')
-        let buffer=''
-        const consumePacket=(packet)=>{
-          if(!packet||typeof packet!=='object') return
-          if(packet.type==='event'){
-            try{ onOutputEvent?.(packet.event||{}) }catch{}
-          }else if(packet.type==='result'){
-            result=packet.result||null
-          }
+        const streamResponse=await apiFetch('/python/execute/stream',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(pythonExecutionPayload)
+        })
+        if(!streamResponse.ok){
+          const detail=await streamResponse.text()
+          throw new Error(`Notebook 스트리밍 실행 실패 (${streamResponse.status}): ${detail||streamResponse.statusText}`)
         }
-        while(true){
-          const {value,done}=await reader.read()
-          buffer+=decoder.decode(value||new Uint8Array(),{stream:!done})
-          let newlineIndex=buffer.indexOf('\n')
-          while(newlineIndex>=0){
-            const line=buffer.slice(0,newlineIndex).trim()
-            buffer=buffer.slice(newlineIndex+1)
-            if(line){
-              try{ consumePacket(JSON.parse(line)) }catch{}
+        if(!streamResponse.body){
+          result=await api('/python/execute',{
+            method:'POST',
+            body:JSON.stringify(pythonExecutionPayload)
+          })
+        }else{
+          const reader=streamResponse.body.getReader()
+          const decoder=new TextDecoder('utf-8')
+          let buffer=''
+          const consumePacket=(packet)=>{
+            if(!packet||typeof packet!=='object') return
+            if(packet.type==='event'){
+              try{ onOutputEvent?.(packet.event||{}) }catch{}
+            }else if(packet.type==='result'){
+              result=packet.result||null
             }
-            newlineIndex=buffer.indexOf('\n')
           }
-          if(done) break
+          while(true){
+            const {value,done}=await reader.read()
+            buffer+=decoder.decode(value||new Uint8Array(),{stream:!done})
+            let newlineIndex=buffer.indexOf('\n')
+            while(newlineIndex>=0){
+              const line=buffer.slice(0,newlineIndex).trim()
+              buffer=buffer.slice(newlineIndex+1)
+              if(line){
+                try{ consumePacket(JSON.parse(line)) }catch{}
+              }
+              newlineIndex=buffer.indexOf('\n')
+            }
+            if(done) break
+          }
+          const tail=buffer.trim()
+          if(tail){
+            try{ consumePacket(JSON.parse(tail)) }catch{}
+          }
         }
-        const tail=buffer.trim()
-        if(tail){
-          try{ consumePacket(JSON.parse(tail)) }catch{}
+        if(!result){
+          // Do not automatically re-run arbitrary Python here: a second run can
+          // duplicate DB INSERTs, file writes, API calls, or other side effects.
+          // Reset only the persistent worker so the next manual cell execution
+          // starts from a clean session and report the recovery accurately.
+          let recovered=false
+          try{
+            const recovery=await api('/python/reset',{
+              method:'POST',
+              body:JSON.stringify({root:workspaceRoot,session_id:runtimeSessionId})
+            })
+            recovered=!!recovery?.ok
+          }catch{}
+          result={
+            ok:false,
+            stdout:'',
+            stderr:'',
+            error_type:'NotebookStreamingRecovered',
+            error_message:recovered
+              ? 'Notebook 스트림의 최종 결과가 누락되어 Python 세션을 자동 복구했습니다. 중복 실행 방지를 위해 해당 셀은 자동 재실행하지 않았습니다. 셀을 다시 실행해 주세요.'
+              : 'Notebook 스트림의 최종 결과가 누락되었습니다. 자동 재실행은 부작용 방지를 위해 수행하지 않았습니다. 셀을 다시 실행해 주세요.',
+            traceback:'',
+            session_recovered:recovered,
+          }
         }
-      }
-      if(!result){
-        result={ok:false,stdout:'',stderr:'',error_type:'NotebookStreamingError',error_message:'Notebook 스트리밍 실행의 최종 결과를 받지 못했습니다.',traceback:''}
       }
 
       const stdout=String(result?.stdout||'')

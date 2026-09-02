@@ -1272,14 +1272,20 @@ class PythonExecutionManager:
                         }
                         response_json = ""
                         break
-                    raise RuntimeError(
-                        "Python 실행 세션이 프로토콜 응답 전에 종료되었습니다."
-                        + (
-                            f"\n자식 프로세스 출력:\n{''.join(native_output_parts)[-4000:]}"
-                            if native_output_parts
-                            else ""
-                        )
-                    )
+                    # v5.488: preserve native output and discard a dead worker.
+                    with self._sessions_lock:
+                        self._sessions.pop(session.key, None)
+                    response = {
+                        "ok": False,
+                        "stdout": "".join(native_output_parts),
+                        "stderr": "",
+                        "error_type": "PythonWorkerExited",
+                        "error_message": "Python 실행 세션이 최종 응답 전에 종료되었습니다. 다음 실행은 새 세션에서 자동 시작됩니다.",
+                        "traceback": "",
+                        "session_recovered": True,
+                    }
+                    response_json = ""
+                    break
 
                 marker_index = response_line.find(_WORKER_RESPONSE_PREFIX)
                 if marker_index < 0:
@@ -1302,7 +1308,7 @@ class PythonExecutionManager:
                     ) from exc
 
         native_output = "".join(native_output_parts)
-        if native_output:
+        if native_output and not bool(response.get("session_recovered")):
             # subprocess.run(..., capture_output=False) 같은 native 출력도 실행 결과에
             # 포함해 사용자가 터미널에서 볼 수 있게 한다.
             response["stdout"] = native_output + str(response.get("stdout") or "")
@@ -1428,14 +1434,19 @@ class PythonExecutionManager:
                             "traceback": "",
                         }
                         break
-                    raise RuntimeError(
-                        "Python 실행 세션이 프로토콜 응답 전에 종료되었습니다."
-                        + (
-                            f"\n자식 프로세스 출력:\n{''.join(native_output_parts)[-4000:]}"
-                            if native_output_parts
-                            else ""
-                        )
-                    )
+                    # v5.488: keep NDJSON final-result semantics when the worker exits.
+                    with self._sessions_lock:
+                        self._sessions.pop(session.key, None)
+                    response = {
+                        "ok": False,
+                        "stdout": "".join(native_output_parts),
+                        "stderr": "",
+                        "error_type": "PythonWorkerExited",
+                        "error_message": "Python 실행 세션이 최종 응답 전에 종료되어 세션을 자동 복구했습니다. 다음 실행은 새 Python 세션에서 시작됩니다.",
+                        "traceback": "",
+                        "session_recovered": True,
+                    }
+                    break
 
                 event_index = response_line.find(_WORKER_EVENT_PREFIX)
                 response_index = response_line.find(_WORKER_RESPONSE_PREFIX)
@@ -1500,7 +1511,7 @@ class PythonExecutionManager:
             }
 
         native_output = "".join(native_output_parts)
-        if native_output:
+        if native_output and not bool(response.get("session_recovered")):
             response["stdout"] = native_output + str(response.get("stdout") or "")
 
         dependency = _dependency_diagnostic(

@@ -1,3 +1,11 @@
+## v5.488
+
+### v5.488
+- Notebook의 `%pip`, `!pip`, `!python -m pip` 패키지 설치 셀은 Rich Output NDJSON 스트림 대신 보호된 일반 실행 경로를 사용합니다.
+- 패키지 설치 중/완료 상태를 표시하고, Worker 비정상 종료 시 실제 native 출력을 보존한 `PythonWorkerExited` 결과와 세션 자동 복구를 제공합니다.
+- 일반 Notebook 스트림 최종 결과 누락 시 세션을 자동 Reset합니다. DB INSERT·파일 쓰기·API 호출 중복 방지를 위해 임의 셀 자체는 자동 재실행하지 않습니다.
+- v5.487 이미지 Preview와 Notebook Rich Image Output 기능을 그대로 유지합니다.
+
 ## v5.483
 
 ### v5.483
