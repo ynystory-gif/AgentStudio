@@ -1,0 +1,82 @@
+name: v5.500 Interview Question State Fix
+
+on:
+  push:
+    branches:
+      - fix/v5.500-interview-question-state
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-commit:
+    if: contains(github.event.head_commit.message, '[v5500-apply]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decode patch helper
+        shell: bash
+        run: |
+          base64 -d scripts/patch_v5500_interview.py.gz.b64 | gzip -d > /tmp/patch_v5500.py
+          python -m py_compile /tmp/patch_v5500.py
+
+      - name: Apply v5.500 patch
+        run: python /tmp/patch_v5500.py
+
+      - name: Backend syntax validation
+        run: python -m compileall -q backend/app
+
+      - name: v5.500 source contracts
+        shell: python
+        run: |
+          from pathlib import Path
+          app = Path('frontend/src/App.jsx').read_text(encoding='utf-8')
+          req = Path('backend/app/services/requirements_agent.py').read_text(encoding='utf-8')
+          routes = Path('backend/app/api/routes.py').read_text(encoding='utf-8')
+          main = Path('backend/app/main.py').read_text(encoding='utf-8')
+          picker = Path('frontend/src/components/ai/AiAttachmentPicker.tsx').read_text(encoding='utf-8')
+          css = Path('frontend/src/styles.css').read_text(encoding='utf-8')
+          checks = {
+              'frontend version': "AGENTSTUDIO_FRONTEND_VERSION='5.500'" in app,
+              'backend main version': 'version="5.500"' in main,
+              'health version': '"version": "5.500"' in routes,
+              'question turn classifier': 'def interview_turn_type' in req,
+              'exact question response policy': 'INFORMATION_ANSWER_SYSTEM' in req,
+              'question route no attachments': "effective_attachment_ids = [] if turn_type == 'QUESTION'" in routes,
+              'question early return': "if turn_type == 'QUESTION':" in routes and '"requirement_state_changed": False' in routes,
+              'deterministic attachment summary default': 'if req.deep_analysis:' in routes and 'build_attachment_requirements_display_summary(context_text)' in routes,
+              'event-driven save': "document.addEventListener('pointerdown',onPointer" in app and "document.addEventListener('keydown',onKey)" in app,
+              'old background autosave removed': 'Auto-save requirement conversations' not in app,
+              'assistant excluded from requirement status': ".filter(item=>item?.role==='user'&&item?.turn_type!=='QUESTION'" in app,
+              'framework layout split': "{id:'layout',label:'Layout'" in app and "{id:'ui',label:'UI Framework'" in app,
+              'layout no framework overwrite': "setRequirementManualOverrides(prev=>({...prev,ui:uiLayoutSummary(config)}))" not in app,
+              'tool prompt settings': 'ToolPromptSettingsPanel' in app and 'tool_prompt_settings' in routes,
+              'top attachment handle': 'attachment-ai-summary-resize-handle top' in app and '.attachment-ai-summary-resize-handle.top' in css,
+              'collapse expand': '▲ 접기' in app and '▼ 펼치기' in app,
+              'attachment cached status': '같은 첨부 ID는 다시 읽지 않습니다' in picker,
+          }
+          failed = [name for name, ok in checks.items() if not ok]
+          for name, ok in checks.items():
+              print(('PASS' if ok else 'FAIL'), name)
+          if failed:
+              raise SystemExit('Contract failures: ' + ', '.join(failed))
+
+      - name: Frontend production build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Commit patched product source
+        shell: bash
+        run: |
+          git config user.name "ynystory-gif"
+          git config user.email "ynystory@gmail.com"
+          git add frontend/src/App.jsx frontend/src/styles.css frontend/src/components/ai/AiAttachmentPicker.tsx backend/app/services/requirements_agent.py backend/app/api/routes.py backend/app/main.py README.md README_V5_500_InterviewQuestionStateEventSave.md
+          git diff --cached --stat
+          git diff --cached --quiet && { echo 'No product changes'; exit 1; }
+          git commit -m "fix: v5.500 interview question state and event-driven save"
+          git push origin HEAD:fix/v5.500-interview-question-state
