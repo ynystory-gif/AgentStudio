@@ -33,7 +33,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.494'
+const AGENTSTUDIO_FRONTEND_VERSION='5.495'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_AGENT_CODING_STYLE={
@@ -55,6 +55,13 @@ const DEFAULT_AGENT_CODING_STYLE={
   normalize_external_data:true,
   prefer_lazy_loading:true,
   avoid_global_warning_suppression:true,
+  preflight_validation:true,
+  non_destructive_environment:true,
+  quality_gated_fallback:true,
+  typed_result_contract:true,
+  external_artifact_guard:true,
+  controlled_benchmark:true,
+  actionable_error_messages:true,
 }
 const normalizeAgentCodingStyle=(value={})=>{
   const source=value&&typeof value==='object'?value:{}
@@ -3816,15 +3823,23 @@ function CodingStyleSettingsMenu({ value, busy=false, stage='', codeDocumentatio
     ['safe_resource_management','리소스 안전 정리','파일·PDF·DB 등 종료가 필요한 리소스는 with/yield/finally 등 안전한 수명주기로 관리합니다.','데이터 · 안정성'],
     ['preserve_source_metadata','출처 Metadata 보존','RAG/문서 적재 시 source·page·id·date 등 추적 가능한 메타데이터를 유지합니다.','데이터 · 안정성'],
     ['normalize_external_data','외부 데이터 정규화','외부 텍스트/CSV/JSON을 Domain 객체로 넣기 전에 공백·None·인코딩 등 경계 데이터를 정리합니다.','데이터 · 안정성'],
+    ['typed_result_contract','결과 Typed Contract','핵심 Service 반환값은 Pydantic/dataclass/TypedDict 등 명시적인 타입 계약을 우선합니다.','이름 · 타입'],
     ['external_io_validation','외부 I/O 검증','HTTP/API 호출은 Timeout·상태코드·업무 상태를 확인하고 선택적 설정 누락을 명시적으로 처리합니다.','외부 · 운영'],
     ['prefer_lazy_loading','대용량 Lazy Loading','대량 문서/행 처리에서는 가능하면 lazy/streaming 로딩을 사용해 불필요한 전체 적재를 피합니다.','외부 · 운영'],
     ['avoid_global_warning_suppression','경고 전체 숨김 금지',"운영 코드에서는 warnings.filterwarnings('ignore') 같은 전역 경고 숨김을 피하고 필요한 범위만 제한합니다.",'외부 · 운영'],
+    ['external_artifact_guard','외부 Artifact 검증','모델·파일·Repository 다운로드는 버전/Revision을 고정하고 다운로드 결과와 가능하면 Checksum을 검증합니다.','외부 · 운영'],
+    ['controlled_benchmark','비교 Benchmark 조건 통제','CPU/GPU·구현 비교 시 입력·모델·옵션을 동일하게 유지하고 Cold/Warm 시간을 구분합니다.','외부 · 운영'],
+    ['preflight_validation','실행 전 Preflight 검증','설치·실행·환경 변경 전에 OS·GPU·명령어·파일·패키지·외부 서비스 조건을 먼저 확인합니다.','환경 · 복구'],
+    ['non_destructive_environment','기존 환경 비파괴','충돌이 있어도 기존 패키지·설정·데이터를 자동 삭제/덮어쓰기보다 격리 환경·명시적 승인을 우선합니다.','환경 · 복구'],
+    ['quality_gated_fallback','품질 기준 Fallback','기본 처리 결과가 명시한 품질 기준에 미달할 때만 OCR·대체 Loader·보조 경로로 전환합니다.','환경 · 복구'],
+    ['actionable_error_messages','조치 가능한 오류 메시지','오류에는 원인·현재 상태·보존된 항목·다음 조치를 함께 제시합니다.','환경 · 복구'],
   ]
   const groups=[
     ['이름 · 타입','이름 · 타입','읽기 쉬운 이름과 타입 안정성을 유지합니다.'],
     ['구조 · Notebook','구조 · Notebook','처리 단계와 Notebook 흐름을 위에서 아래로 쉽게 읽도록 정리합니다.'],
     ['데이터 · 안정성','데이터 · 안정성','문서·외부 데이터의 검증, 출처, 리소스 수명주기를 지킵니다.'],
     ['외부 · 운영','외부 · 운영','외부 연동과 대용량 처리에서 실패·성능·경고를 안전하게 다룹니다.'],
+    ['환경 · 복구','환경 · 복구','실행 전 조건을 확인하고 기존 환경을 보존하며 품질 기반 대체 경로를 사용합니다.'],
   ]
   const update=(key,checked)=>onChange?.({...normalized,[key]:Boolean(checked)})
   return <details className="agent-coding-style-menu">

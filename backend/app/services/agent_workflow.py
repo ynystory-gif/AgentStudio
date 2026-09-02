@@ -156,6 +156,13 @@ USER_CODING_STYLE_DEFAULTS = {
     "normalize_external_data": True,
     "prefer_lazy_loading": True,
     "avoid_global_warning_suppression": True,
+    "preflight_validation": True,
+    "non_destructive_environment": True,
+    "quality_gated_fallback": True,
+    "typed_result_contract": True,
+    "external_artifact_guard": True,
+    "controlled_benchmark": True,
+    "actionable_error_messages": True,
 }
 
 
@@ -215,6 +222,20 @@ def _user_coding_style_instruction(state: AgentState) -> str:
         rules.append("대량 문서·CSV·검색 결과처럼 전체 적재가 불필요한 경우 lazy_load/iterator/streaming 기능을 우선 검토하되 작은 데이터에 과도한 복잡성을 추가하지 마십시오.")
     if policy.get("avoid_global_warning_suppression"):
         rules.append("운영 코드에서 warnings.filterwarnings('ignore')처럼 모든 경고를 전역으로 숨기지 마십시오. 필요한 경우 알려진 Warning category와 최소 Scope만 제한하고 원인 해결을 우선하십시오.")
+    if policy.get("preflight_validation"):
+        rules.append("OS/GPU/명령어/입력 파일/필수 패키지/외부 서비스처럼 실행 성공의 전제가 있는 기능은 설치·실행·환경 변경보다 먼저 Preflight 검증을 수행하십시오. 실패할 조건이면 부작용을 만들기 전에 중단하십시오.")
+    if policy.get("non_destructive_environment"):
+        rules.append("기존 패키지·가상환경·설정·사용자 파일을 자동 uninstall/delete/overwrite해서 충돌을 해결하지 마십시오. 변경이 꼭 필요하면 격리된 가상환경/Cache를 우선하고, 사용자 요구 또는 명시적 승인 없이 기존 환경을 파괴하지 마십시오.")
+    if policy.get("quality_gated_fallback"):
+        rules.append("OCR·보조 검색·대체 API처럼 비용이 큰 Fallback은 항상 실행하지 말고 먼저 기본 경로를 수행한 뒤 글자 수·Confidence·필수 필드·검색 품질 등 명시적인 품질 기준이 부족할 때만 전환하십시오. Primary/Fallback 결과는 후속 단계가 동일하게 처리할 수 있는 Schema로 정규화하십시오.")
+    if policy.get("typed_result_contract"):
+        rules.append("핵심 Service/Loader/Tool의 반환값은 의미가 불명확한 dict 남용보다 Pydantic BaseModel, dataclass, TypedDict 또는 언어의 명시적 DTO/Result Type을 우선하십시오. mode, status, fallback_used, source 등 후속 분기에 필요한 상태도 결과 계약에 포함하십시오.")
+    if policy.get("external_artifact_guard"):
+        rules.append("외부 모델·파일·Repository를 다운로드할 때는 가능한 한 Version/Revision을 고정하고 Timeout/상태/파일 존재·크기 및 제공되는 경우 Checksum을 검증하십시오. 최신 HEAD나 무검증 URL에 의존하지 말고 생성 Agent의 설정된 Cache/Temp/Output 경로 정책을 사용하십시오.")
+    if policy.get("controlled_benchmark"):
+        rules.append("CPU/GPU·모델·구현 성능을 비교할 때는 비교 대상 외의 입력, 모델, 옵션, 반복 횟수를 동일하게 유지하고 초기화/Cold 실행과 Warm 실행 시간을 구분해 기록하십시오.")
+    if policy.get("actionable_error_messages"):
+        rules.append("사용자에게 노출되는 오류는 '실패'만 출력하지 말고 실패 원인, 감지된 현재 상태, 변경하지 않고 보존한 항목, 사용자가 다음에 수행할 구체적 조치를 함께 제공하십시오. 내부 Secret이나 불필요한 Stack 정보는 노출하지 마십시오.")
 
     if not rules:
         return ""

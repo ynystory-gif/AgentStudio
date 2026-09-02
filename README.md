@@ -1,3 +1,11 @@
+## v5.495 Resilient Agent Coding Style
+
+- `2-2. 문서_로딩_OCR.ipynb`의 실제 OCR/환경 검증 코드를 기준으로 Agent 생성 코딩 스타일을 추가 개선했습니다.
+- 기존 18개 선택 스타일을 유지하면서 Preflight Validation, 기존 환경 비파괴, 품질 기준 Fallback, Typed Result Contract, 외부 Artifact 검증, 통제된 Benchmark, 조치 가능한 오류 메시지 7개를 추가해 총 25개 기본 ON 스타일을 제공합니다.
+- 생성·증분 수정·테스트 실패 Repair·재개발 Prompt가 동일한 `user_coding_style` 정책을 사용합니다.
+- OCR/Paddle/EasyOCR/Tesseract/GPU/Benchmark/다운로드 요청을 자동 감지해 CS-163~CS-169 Registry 규칙을 선택합니다.
+- 교육용 전역 Warning 숨김, Runtime `%pip`, 무단 패키지 uninstall, 무검증 모델 다운로드, 상대 `result` 경로, raw dict 반환은 Production Agent 기본 스타일로 복사하지 않습니다.
+
 ## v5.491
 
 ### v5.491

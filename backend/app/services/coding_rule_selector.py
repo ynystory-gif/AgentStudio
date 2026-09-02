@@ -30,6 +30,28 @@ def infer_coding_tags(
     )):
         tags.update({"rag", "data_pipeline", "document_loader"})
 
+    if any(token in text for token in (
+        "ocr", "easyocr", "paddleocr", "paddlepaddle", "tesseract",
+        "doclayout", "opencv", "cuda", "nvidia-smi", "gpu",
+    )):
+        tags.update({"ocr", "environment", "gpu", "quality_fallback", "data_pipeline"})
+
+    if any(token in text for token in (
+        "fallback", "대체 경로", "대체경로", "품질 기준", "quality gate",
+    )):
+        tags.update({"quality_fallback", "reliability"})
+
+    if any(token in text for token in (
+        "benchmark", "벤치마크", "성능 비교", "cpu/gpu", "cold start", "warm",
+    )):
+        tags.update({"benchmark", "performance", "testing"})
+
+    if any(token in text for token in (
+        "download", "다운로드", "huggingface", "모델 파일", "model file",
+        "checksum", "revision",
+    )):
+        tags.update({"artifact", "external_io"})
+
     if any(token in text for token in ("requests", "httpx", "외부 api", "외부 연동", "web loader", "웹 로더")):
         tags.add("external_io")
 
