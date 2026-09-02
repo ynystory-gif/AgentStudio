@@ -1,3 +1,4 @@
+import asyncio
 import re
 from difflib import SequenceMatcher
 
@@ -32,6 +33,51 @@ SYSTEM = """당신은 AI Agent + MCP 프로그램 개발 요구사항을 분석�
 17. 최근 Assistant 응답과 거의 동일한 문장을 반복하지 않습니다.
 """
 
+
+INFORMATION_ANSWER_SYSTEM = """사용자가 Agent 설계 인터뷰 도중 기능/기술/선택지에 대해 묻는 정보 질문에 답합니다.
+절대 규칙:
+1. 사용자가 물어본 질문에만 답합니다.
+2. 답변 뒤에 다음 요구사항 질문을 붙이지 않습니다.
+3. 해당 질문을 요구사항 확정값으로 취급하지 않습니다.
+4. 이미 분석된 첨부 파일은 다시 분석하지 않습니다.
+5. 모르는 내용은 추측하지 않고 필요한 범위만 설명합니다.
+"""
+
+
+def interview_turn_type(user_text: str) -> str:
+    text = str(user_text or '').strip()
+    if not text:
+        return 'REQUIREMENT'
+    lowered = re.sub(r'\s+', ' ', text.casefold())
+    info_markers = (
+        '뭐가 있어', '무엇이 있어', '어떤 게 있어', '어떤게 있어', '종류가', '종류는',
+        '차이가 뭐', '차이점', '비교해', '설명해줘', '설명해 줘', '알려줘', '알려 줘',
+        '추천해줘', '추천해 줘', '가능한 ui', '가능한 layout', '가능한 레이아웃',
+    )
+    if any(marker in lowered for marker in info_markers):
+        return 'QUESTION'
+    action_markers = (
+        '적용해', '설정해', '만들어', '추가해', '삭제해', '변경해', '사용해', '구현해', '생성해', '개발해', '로 해줘', '로 해 줘',
+    )
+    if any(marker in lowered for marker in action_markers):
+        return 'REQUIREMENT'
+    return 'QUESTION' if text.endswith(('?', '？')) else 'REQUIREMENT'
+
+
+def _deterministic_information_answer(user_text: str) -> str:
+    lowered = str(user_text or '').casefold()
+    if ('ui' in lowered or '프론트' in lowered or '화면' in lowered) and ('layout' in lowered or '레이아웃' in lowered or '뭐가' in lowered or '무엇' in lowered or '종류' in lowered):
+        return (
+            'UI Framework는 React + TypeScript, React + JavaScript/Vite, Next.js + TypeScript, Vue, '
+            'Streamlit, Gradio, Headless/API 전용 등을 선택할 수 있습니다.\n\n'
+            'Layout 템플릿은 UI 없음/Headless Agent, AI Commerce Split, Commerce Dashboard, Commerce Catalog, '
+            'AI Chat Workspace, RAG Knowledge Workspace, MCP Tool Console, SaaS Dashboard, Analytics Dashboard, '
+            'Admin CRUD, Search Portal, Workspace Sidebar, Top Navigation Web App, Landing + App, Mobile Responsive, '
+            'Monitoring Console이 있습니다.\n\n'
+            'UI Framework와 Layout은 별도 설정입니다. 예를 들어 `React + TypeScript`를 유지한 채 '
+            '`RAG Knowledge Workspace` Layout을 선택할 수 있습니다.'
+        )
+    return ''
 
 
 # v5.342 Question Quality Gate -------------------------------------------------
@@ -227,7 +273,8 @@ def _answered_question_slots(user_text: str, history: list[dict], extra_context:
         # the slot. Explicit NONE is always a legitimate completed value.
         lowered = content.casefold()
         meta_only = any(token in lowered for token in ('추가로 필요한', '더 필요한', '다음 질문')) and len(content) < 80
-        if not meta_only:
+        information_question = interview_turn_type(content) == 'QUESTION'
+        if not meta_only and not information_question:
             answered.add(pending)
             pending = ''
 
@@ -235,7 +282,8 @@ def _answered_question_slots(user_text: str, history: list[dict], extra_context:
     if pending and str(user_text or '').strip():
         lowered = str(user_text or '').casefold()
         meta_only = any(token in lowered for token in ('추가로 필요한', '더 필요한', '다음 질문')) and len(str(user_text)) < 80
-        if _is_explicit_none_answer(user_text) or not meta_only:
+        information_question = interview_turn_type(user_text) == 'QUESTION'
+        if _is_explicit_none_answer(user_text) or (not meta_only and not information_question):
             answered.add(pending)
 
     return answered
@@ -521,6 +569,30 @@ async def next_interview_message(
         part for part in (specialization_context, cached_requirement_context, fresh_attachment_block) if part
     )[-18_000:]
 
+    # v5.500: informational questions are side-band turns. They answer exactly
+    # what the user asked, never close a pending requirement slot, never append
+    # another interview question, and never re-analyze cached attachments.
+    if interview_turn_type(user_text) == 'QUESTION':
+        deterministic = _deterministic_information_answer(user_text)
+        if deterministic:
+            return deterministic
+        llm = model_for_task(LLMTask.REQUIREMENTS_ANALYSIS, provider)
+        compact = "\n".join(f"{x['role']}: {x['content']}" for x in history[-12:])
+        prompt = (
+            f"이전 인터뷰 대화(참고용):\n{compact}\n\n"
+            f"사용자 정보 질문:\n{user_text}\n\n"
+            "질문에 필요한 정보만 답하고, 다음 요구사항 질문은 하지 마세요."
+        )
+        try:
+            result = await asyncio.wait_for(
+                llm.ainvoke([SystemMessage(content=INFORMATION_ANSWER_SYSTEM), HumanMessage(content=prompt)]),
+                timeout=45.0,
+            )
+            answer = str(result.content or '').strip()
+            return answer or '질문에 대한 답을 만들지 못했습니다.'
+        except asyncio.TimeoutError:
+            return '정보 질문 응답이 45초를 초과했습니다. 현재 요구사항 상태는 변경하지 않았습니다.'
+
     # v5.359 Fast Interview Path: 첨부 원문을 새로 분석하는 턴이 아니고,
     # 이미 인터뷰가 시작된 짧은 사용자 답변은 LLM을 다시 호출하지 않습니다.
     # 이 경로는 요구사항 State/요약만 사용하므로 Ollama 단일 모델 환경에서도
@@ -556,8 +628,11 @@ async def next_interview_message(
             )
         )
     ]
-    result = await llm.ainvoke(messages)
-    content = str(result.content).strip()
+    try:
+        result = await asyncio.wait_for(llm.ainvoke(messages), timeout=60.0)
+        content = str(result.content).strip()
+    except asyncio.TimeoutError:
+        return _fast_interview_message(user_text, history, combined_requirement_context)
 
     # Raw/새 첨부 Context에 대한 원문 echo만 검사합니다. 이미 정리된
     # attachment_memory를 echo detector 근거로 사용하면 매 턴 동일 fallback이

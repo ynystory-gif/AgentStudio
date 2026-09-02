@@ -339,7 +339,7 @@ export function AiAttachmentPicker({
   const overallLabel = analysisActive && analysisState.ready
     ? '첨부 Context 준비 완료 · 현재 AI 요청에 사용 중'
     : analysisState.ready && attachments.length > 0
-      ? '첨부 Context 준비 완료 · AI 심층 분석 대기'
+      ? '첨부 Context 준비 완료 · 요구사항 정리 대기'
     : analysisState.busy
       ? `첨부 파일 분석 준비 ${analysisState.overallProgress}%`
       : analysisState.failedFiles
@@ -396,7 +396,7 @@ export function AiAttachmentPicker({
                 <div className="ai-attachment-file-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={item.progress}>
                   <div className="ai-attachment-file-fill" style={{ width: `${item.progress}%` }} />
                 </div>
-                <div className="ai-attachment-stage-message">{analysisActive && item.status === 'SUCCESS' ? '준비된 파일 Context를 현재 AI 요청에 포함하고 있습니다.' : (item.status === 'SUCCESS' ? 'Context 준비 완료. 답변 보내기 또는 첨부만 먼저 분석을 누르면 AI 심층 분석을 시작합니다.' : item.message)}</div>
+                <div className="ai-attachment-stage-message">{analysisActive && item.status === 'SUCCESS' ? '준비된 파일 Context를 현재 AI 요청에 포함하고 있습니다.' : (item.status === 'SUCCESS' ? 'Context 준비 완료. 추출된 Context를 캐시했으며 같은 첨부 ID는 다시 읽지 않습니다.' : item.message)}</div>
               </div>
             })}
           </div>
