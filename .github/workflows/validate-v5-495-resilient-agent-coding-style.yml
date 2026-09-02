@@ -77,8 +77,8 @@ jobs:
         run: |
           git config user.name "ynystory-gif"
           git config user.email "ynystory@gmail.com"
-          git add README.md README_V5_495_ResilientAgentCodingStyle.md frontend/src/App.jsx backend/app/main.py backend/app/api/routes.py backend/app/services/agent_workflow.py backend/app/services/coding_rule_selector.py backend/app/data/coding_style/rules.json backend/validate_v5495_resilient_agent_coding_style_contract.py
-          git add -f backend/app/data/coding_style/sources/document_loading_ocr_notebook.md
+          git add README.md README_V5_495_ResilientAgentCodingStyle.md frontend/src/App.jsx backend/app/main.py backend/app/api/routes.py backend/app/services/agent_workflow.py backend/app/services/coding_rule_selector.py backend/validate_v5495_resilient_agent_coding_style_contract.py
+          git add -f backend/app/data/coding_style/rules.json backend/app/data/coding_style/sources/document_loading_ocr_notebook.md
           git commit -m "feat: add resilient Agent coding style for v5.495"
           git push origin HEAD:fix/v5.495-resilient-agent-coding-style
 
