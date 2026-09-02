@@ -1,0 +1,76 @@
+name: Validate v5.490 Notebook Warning Output
+
+on:
+  push:
+    branches:
+      - fix/v5.490-notebook-warning-output
+    paths:
+      - .github/workflows/validate-v5-490-warning-output.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build-test-package:
+    runs-on: ubuntu-latest
+    env:
+      PATCH_SCRIPT_GZ_B64: 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
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/v5.490-notebook-warning-output
+          fetch-depth: 0
+      - name: Apply v5.490 patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64, gzip, os
+          from pathlib import Path
+          Path('/tmp/apply_v5490.py').write_bytes(gzip.decompress(base64.b64decode(os.environ['PATCH_SCRIPT_GZ_B64'])))
+          PY
+          python /tmp/apply_v5490.py
+      - name: Validate backend and warning contract
+        shell: bash
+        run: |
+          python backend/validate_v5490_notebook_warning_output_contract.py
+          python -m py_compile backend/app/main.py backend/app/api/routes.py backend/app/services/python_execution_service.py backend/app/services/python_worker_runtime.py backend/validate_v5490_notebook_warning_output_contract.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend clean build
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Commit tested source
+        shell: bash
+        run: |
+          git config user.name "ynystory-gif"
+          git config user.email "ynystory@gmail.com"
+          git rm .github/workflows/validate-v5-490-warning-output.yml
+          git add -A
+          git commit -m "fix: classify Notebook warnings separately for v5.490"
+          git push origin HEAD:fix/v5.490-notebook-warning-output
+      - name: Build clean distribution tree
+        shell: bash
+        run: |
+          rm -rf /tmp/dist-v5490
+          mkdir -p /tmp/dist-v5490
+          rsync -a ./ /tmp/dist-v5490/ \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='frontend/node_modules' \
+            --exclude='frontend/dist' \
+            --exclude='**/__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='logs' \
+            --exclude='backend/logs'
+          find /tmp/dist-v5490 -maxdepth 1 -type f -name 'README_V5_*.md' ! -name 'README_V5_490_NotebookWarningOutputClassification.md' -delete
+      - uses: actions/upload-artifact@v4
+        with:
+          name: THEANOVA_AgentStudio_v5_490_NotebookWarningOutputClassification
+          path: /tmp/dist-v5490
+          if-no-files-found: error
+          retention-days: 7
