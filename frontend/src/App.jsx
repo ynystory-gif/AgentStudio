@@ -34,8 +34,16 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.499'
+const AGENTSTUDIO_FRONTEND_VERSION='5.500'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
+
+const DEFAULT_TOOL_PROMPT_SETTINGS={
+  configured:false,
+  tool_mode:'AUTO',
+  selected_tools:'',
+  system_prompt:'',
+  response_policy:'사용자가 정보 질문을 하면 질문에만 정확히 답하고, 별도의 요구사항 질문을 뒤에 붙이지 않는다.'
+}
 
 const DEFAULT_AGENT_CODING_STYLE={
   meaningful_names:true,
@@ -619,6 +627,17 @@ function AgentDatabaseSetupPanel({value,onChange,onTest,onAnalyze,onCreateResour
   const configure=['CONFIGURE','CONNECTION_ONLY'].includes(setup.mode)
   const selectedProviders=selectedAgentDatabaseProviders(setup)
   const patchProvider=(provider,patch)=>onChange?.({...setup,mode:setup.mode==='PENDING'?'CONFIGURE':setup.mode,[provider]:{...setup[provider],...patch}})
+  const providerEnabledToggle=(provider,label)=>{
+    const enabled=Boolean(setup?.[provider]?.enabled)
+    return <button
+      type="button"
+      className={`agent-db-provider-toggle-checkbox ${enabled?'checked':''}`}
+      role="checkbox"
+      aria-checked={enabled}
+      onClick={()=>patchProvider(provider,{enabled:!enabled})}
+      title={`${label} ${enabled?'사용 해제':'사용'}`}
+    ><span className="agent-db-provider-checkbox-glyph" aria-hidden="true">{enabled?'✓':''}</span><b>{label}</b></button>
+  }
   const setMode=(mode)=>{
     const next={...setup,mode}
     if(mode==='CONNECTION_ONLY') for(const key of ['postgresql','firestore','redis']) next[key]={...next[key],auto_provision:false}
@@ -658,7 +677,7 @@ function AgentDatabaseSetupPanel({value,onChange,onTest,onAnalyze,onCreateResour
     </div>}
     {configure&&<div className="agent-db-provider-list">
       <section className={`agent-db-provider ${setup.postgresql.enabled?'enabled':''} ${activeProvider==='postgresql'?'active-provider':''}`}>
-        <header><label><input type="checkbox" checked={Boolean(setup.postgresql.enabled)} onChange={e=>patchProvider('postgresql',{enabled:e.target.checked})}/><b>PostgreSQL 사용</b></label><small>Schema / Table / PK / FK / Index / Constraint / pgvector / Trigger / Seed</small></header>
+        <header>{providerEnabledToggle('postgresql','PostgreSQL 사용')}<small>Schema / Table / PK / FK / Index / Constraint / pgvector / Trigger / Seed</small></header>
         {setup.postgresql.enabled&&<div className="agent-db-field-grid">
           <label><span>Host</span><input value={setup.postgresql.host} onChange={e=>patchProvider('postgresql',{host:e.target.value})}/></label><label><span>Port</span><input value={setup.postgresql.port} onChange={e=>patchProvider('postgresql',{port:e.target.value})}/></label>
           <label><span>Database Name</span><input value={setup.postgresql.database} onChange={e=>patchProvider('postgresql',{database:e.target.value})}/></label><label><span>Schema</span><input value={setup.postgresql.schema} onChange={e=>patchProvider('postgresql',{schema:e.target.value})}/></label>
@@ -673,7 +692,7 @@ function AgentDatabaseSetupPanel({value,onChange,onTest,onAnalyze,onCreateResour
       </section>
 
       <section className={`agent-db-provider ${setup.firestore.enabled?'enabled':''} ${activeProvider==='firestore'?'active-provider':''}`}>
-        <header><label><input type="checkbox" checked={Boolean(setup.firestore.enabled)} onChange={e=>patchProvider('firestore',{enabled:e.target.checked})}/><b>Google Cloud Firestore 사용</b></label><small>Database / Collection / Document / Field / Composite Index / Security Rules</small></header>
+        <header>{providerEnabledToggle('firestore','Google Cloud Firestore 사용')}<small>Database / Collection / Document / Field / Composite Index / Security Rules</small></header>
         {setup.firestore.enabled&&<div className="agent-db-field-grid">
           <label><span>Google Cloud Project ID</span><input value={setup.firestore.project_id} onChange={e=>patchProvider('firestore',{project_id:e.target.value})}/></label><label><span>Firestore Database ID</span><input value={setup.firestore.database_id} onChange={e=>patchProvider('firestore',{database_id:e.target.value})}/></label>
           <label className="span-2"><span>Credential / Service Account JSON</span><input value={setup.firestore.service_account_path} onChange={e=>patchProvider('firestore',{service_account_path:e.target.value})} placeholder="파일 경로 또는 ADC"/></label>
@@ -687,7 +706,7 @@ function AgentDatabaseSetupPanel({value,onChange,onTest,onAnalyze,onCreateResour
       </section>
 
       <section className={`agent-db-provider ${setup.redis.enabled?'enabled':''} ${activeProvider==='redis'?'active-provider':''}`}>
-        <header><label><input type="checkbox" checked={Boolean(setup.redis.enabled)} onChange={e=>patchProvider('redis',{enabled:e.target.checked})}/><b>Redis 사용</b></label><small>Prefix / Key Pattern / Hash / List / Set / Sorted Set / Stream / TTL / Session / Cache / Lock / Queue</small></header>
+        <header>{providerEnabledToggle('redis','Redis 사용')}<small>Prefix / Key Pattern / Hash / List / Set / Sorted Set / Stream / TTL / Session / Cache / Lock / Queue</small></header>
         {setup.redis.enabled&&<div className="agent-db-field-grid">
           <label><span>Host</span><input value={setup.redis.host} onChange={e=>patchProvider('redis',{host:e.target.value})}/></label><label><span>Port</span><input value={setup.redis.port} onChange={e=>patchProvider('redis',{port:e.target.value})}/></label>
           <label><span>Database Number</span><input value={setup.redis.db} onChange={e=>patchProvider('redis',{db:e.target.value})}/></label><label><span>Username</span><input value={setup.redis.username} onChange={e=>patchProvider('redis',{username:e.target.value})}/></label>
@@ -719,6 +738,18 @@ function AgentDatabaseProvisionResultPanel({result,onRetry,onSkip,busyProvider='
       <div><strong>{row.provider}</strong><small>{row.message||''}</small>{row.steps&&<code>{Object.entries(row.steps).map(([k,v])=>`${k}: ${v}`).join(' · ')}</code>}{row.rollback&&<em>Rollback 가능 여부: {row.rollback}</em>}</div>
       {!row.ok&&row.provider!=='runtime_config'&&<div className="agent-db-provision-actions"><button type="button" onClick={()=>onRetry?.(row.provider)} disabled={busyProvider===row.provider}>{busyProvider===row.provider?'재시도 중...':'재시도'}</button><button type="button" onClick={()=>onSkip?.(row.provider)}>해당 DB만 Skip</button></div>}
     </div>)}
+  </div>
+}
+
+function ToolPromptSettingsPanel({value,onChange}){
+  const settings={...DEFAULT_TOOL_PROMPT_SETTINGS,...(value&&typeof value==='object'?value:{})}
+  const patch=(key,next)=>onChange?.({...settings,[key]:next,configured:true})
+  return <div className="tool-prompt-settings-card">
+    <div className="tool-prompt-settings-head"><div><strong>Tool / Prompt 설정</strong><small>Agent가 사용할 Tool 정책과 System Prompt, 질문 응답 정책을 설계 단계에서 확정합니다.</small></div><span>{settings.configured?'설정됨':'미설정'}</span></div>
+    <label className="ux-field"><span>Tool 선택 방식</span><select value={settings.tool_mode||'AUTO'} onChange={e=>patch('tool_mode',e.target.value)}><option value="AUTO">AUTO · AgentStudio 자동 선택</option><option value="SELECTED">SELECTED · 지정 Tool만 사용</option><option value="NONE">NONE · Tool 사용 안 함</option></select></label>
+    <label className="ux-field"><span>사용 Tool / Tool 요구사항</span><textarea rows={4} value={settings.selected_tools||''} onChange={e=>patch('selected_tools',e.target.value)} placeholder="예: 프로젝트 파일 검색, PostgreSQL 조회, Web 검색"/></label>
+    <label className="ux-field"><span>System Prompt</span><textarea rows={6} value={settings.system_prompt||''} onChange={e=>patch('system_prompt',e.target.value)} placeholder="예: 개발팀 문서에 근거해서만 답하고 출처를 표시한다."/></label>
+    <label className="ux-field"><span>질문 응답 정책</span><textarea rows={5} value={settings.response_policy||''} onChange={e=>patch('response_policy',e.target.value)} placeholder="사용자 질문에는 질문에 대한 답만 반환하고 인터뷰 질문을 덧붙이지 않는다."/></label>
   </div>
 }
 
@@ -1066,6 +1097,16 @@ function AttachmentAnalysisSummaryCard({summary='',files=[],requirements=[],cove
     return defaultPanelHeight()
   }
   const [panelHeight,setPanelHeight]=useState(readSavedPanelHeight)
+  const [collapsed,setCollapsed]=useState(()=>{
+    if(compact) return false
+    try{return window.localStorage.getItem('agentstudio.attachmentAnalysisSummaryCollapsed')==='1'}catch{return false}
+  })
+  const setPanelCollapsed=(value)=>{
+    if(compact) return
+    const next=Boolean(value)
+    setCollapsed(next)
+    try{window.localStorage.setItem('agentstudio.attachmentAnalysisSummaryCollapsed',next?'1':'0')}catch{}
+  }
   const clampPanelHeight=(value)=>{
     const viewportHeight=typeof window!=='undefined'?window.innerHeight:900
     const maximum=Math.max(260,Math.floor(viewportHeight*0.72))
@@ -1138,9 +1179,23 @@ function AttachmentAnalysisSummaryCard({summary='',files=[],requirements=[],cove
   const categoryCounts=coverage?.categories&&typeof coverage.categories==='object'?coverage.categories:{}
   return <div
     ref={cardRef}
-    className={`attachment-ai-summary-card ${compact?'compact':'resizable'}`}
-    style={!compact&&panelHeight?{height:`${clampPanelHeight(panelHeight)}px`}:undefined}
+    className={`attachment-ai-summary-card ${compact?'compact':'resizable'} ${collapsed?'collapsed':''}`}
+    style={!compact&&!collapsed&&panelHeight?{height:`${clampPanelHeight(panelHeight)}px`}:undefined}
   >
+    {!compact&&!collapsed&&<div
+      className="attachment-ai-summary-resize-handle top"
+      role="separator"
+      aria-orientation="horizontal"
+      aria-label="첨부 파일 AI 정리 창 높이 조절"
+      tabIndex={0}
+      title="위아래로 드래그해 높이를 조절합니다. 더블클릭하면 기본 높이로 돌아갑니다."
+      onPointerDown={beginPanelResize}
+      onPointerMove={movePanelResize}
+      onPointerUp={endPanelResize}
+      onPointerCancel={endPanelResize}
+      onDoubleClick={resetPanelHeight}
+      onKeyDown={resizePanelFromKeyboard}
+    ><span></span><em>높이 조절</em><span></span></div>}
     <div className="attachment-ai-summary-head">
       <div>
         <strong>첨부 파일 AI 정리</strong>
@@ -1148,10 +1203,11 @@ function AttachmentAnalysisSummaryCard({summary='',files=[],requirements=[],cove
       </div>
       <div className="attachment-ai-summary-head-meta">
         <span className="attachment-ai-summary-status">✓ 요구사항 {requirementCount||'-'}개</span>
-        {!compact&&<small>내부 스크롤 · 아래 조절선을 드래그해 높이 변경</small>}
+        {!compact&&<button type="button" className="attachment-ai-summary-collapse-button" onClick={()=>setPanelCollapsed(!collapsed)} title={collapsed?'첨부 분석 내용 펼치기':'첨부 분석 내용 접기'}>{collapsed?'▼ 펼치기':'▲ 접기'}</button>}
+        {!compact&&!collapsed&&<small>상단 조절선을 드래그해 높이 변경</small>}
       </div>
     </div>
-    <div className="attachment-ai-summary-scroll" tabIndex={compact?-1:0}>
+    {!collapsed&&<div className="attachment-ai-summary-scroll" tabIndex={compact?-1:0}>
       {safeFiles.length>0&&<div className="attachment-ai-summary-files">
         {safeFiles.slice(0,compact?4:12).map((item,index)=>
           typeof onOpenFile==='function'
@@ -1183,26 +1239,12 @@ function AttachmentAnalysisSummaryCard({summary='',files=[],requirements=[],cove
           {compact&&safeRequirements.length>5&&<div className="attachment-requirement-more">+ {safeRequirements.length-5}개 요구사항</div>}
         </div>
       </div>}
-    </div>
-    {!compact&&<div className="attachment-ai-summary-actions">
+    </div>}
+    {!compact&&!collapsed&&<div className="attachment-ai-summary-actions">
       <button type="button" onClick={()=>{try{navigator.clipboard?.writeText([safeSummary,...safeRequirements.map(item=>`${item.id} [${item.category}] ${item.text}`)].filter(Boolean).join('\n'))}catch{}}}>정리 내용 복사</button>
       <button type="button" onClick={resetPanelHeight}>기본 높이</button>
       {typeof onClear==='function'&&<button type="button" className="danger" onClick={onClear}>첨부 분석 Context 지우기</button>}
     </div>}
-    {!compact&&<div
-      className="attachment-ai-summary-resize-handle"
-      role="separator"
-      aria-orientation="horizontal"
-      aria-label="첨부 파일 AI 정리 창 높이 조절"
-      tabIndex={0}
-      title="위아래로 드래그해 높이를 조절합니다. 더블클릭하면 기본 높이로 돌아갑니다."
-      onPointerDown={beginPanelResize}
-      onPointerMove={movePanelResize}
-      onPointerUp={endPanelResize}
-      onPointerCancel={endPanelResize}
-      onDoubleClick={resetPanelHeight}
-      onKeyDown={resizePanelFromKeyboard}
-    ><span></span><em>높이 조절</em><span></span></div>}
   </div>
 }
 
@@ -4568,6 +4610,7 @@ function IDE() {
   const [developmentStagePlan,setDevelopmentStagePlan]=useState(null)
   const [developmentStagePlanBusy,setDevelopmentStagePlanBusy]=useState(false)
   const [codeDocumentationEnabled,setCodeDocumentationEnabled]=useState(false)
+  const [toolPromptSettings,setToolPromptSettings]=useState(()=>({...DEFAULT_TOOL_PROMPT_SETTINGS}))
   const [agentCodingStyle,setAgentCodingStyle]=useState(()=>normalizeAgentCodingStyle(DEFAULT_AGENT_CODING_STYLE))
   const [builderSummaryTab,setBuilderSummaryTab]=useState('REQUIREMENTS')
   const [designProjectSaving,setDesignProjectSaving]=useState(false)
@@ -4580,6 +4623,9 @@ function IDE() {
   const [restoredBuildResume,setRestoredBuildResume]=useState(null)
   const [redevelopmentInfo,setRedevelopmentInfo]=useState(null)
   const requirementCheckpointSignatureRef=useRef('')
+  const latestDesignProjectSaveRef=useRef(null)
+  const userActionSaveTimerRef=useRef(null)
+  const liveDatabasePreviewRequestRef=useRef('')
   const builderMessagesEndRef=useRef(null)
   const [workflow,setWorkflow]=useState(null)
   const [workflowDefinition,setWorkflowDefinition]=useState(null)
@@ -5461,6 +5507,24 @@ function IDE() {
     }
   }
 
+
+  useEffect(()=>{
+    if(busy||interviewAttachmentSummaryBusy||!interviewAttachments.length) return undefined
+    if(interviewAttachmentAnalysis.busy||!interviewAttachmentAnalysis.ready) return undefined
+    if(interviewAttachmentAnalysis.successfulFiles===0&&interviewAttachmentAnalysis.failedFiles>0) return undefined
+    const signature=interviewAttachments.map(item=>String(item?.attachment_id||'')).filter(Boolean).join('|')
+    if(!signature||interviewAttachmentSummaryRunRef.current===signature) return undefined
+    const timer=window.setTimeout(()=>{void summarizeInterviewAttachments()},80)
+    return()=>window.clearTimeout(timer)
+  },[
+    interviewAttachments,
+    interviewAttachmentAnalysis.busy,
+    interviewAttachmentAnalysis.ready,
+    interviewAttachmentAnalysis.successfulFiles,
+    interviewAttachmentAnalysis.failedFiles,
+    busy,
+    interviewAttachmentSummaryBusy
+  ])
 
   const deferredProjectSearch=useDeferredValue(projectSearch)
   const filteredProjects = useMemo(()=>projectList
@@ -9518,6 +9582,7 @@ function IDE() {
     setAgentSpecialization('GENERAL')
     setBlenderMcpReadiness(null)
     setUiLayoutConfig(null)
+    setToolPromptSettings({...DEFAULT_TOOL_PROMPT_SETTINGS})
     setUiLayoutGalleryOpen(false)
     setConfirmedInterviewRequirements({})
     setDesignProjectId(null)
@@ -9565,6 +9630,7 @@ function IDE() {
     setDevelopmentStagePlanBusy(false)
     setBuilderSummaryTab('REQUIREMENTS')
     setUiLayoutConfig(null)
+    setToolPromptSettings({...DEFAULT_TOOL_PROMPT_SETTINGS})
     setUiLayoutGalleryOpen(false)
     setRequirementRedefineId('')
     setRequirementRedefineText('')
@@ -10946,18 +11012,35 @@ function IDE() {
     }
   }
 
+  const looksLikeInterviewInformationQuestion=(value='')=>{
+    const text=String(value||'').trim()
+    if(!text) return false
+    const normalized=text.toLowerCase().replace(/\s+/g,' ')
+    const infoMarkers=[
+      '뭐가 있어','무엇이 있어','어떤 게 있어','어떤게 있어','종류가','종류는',
+      '차이가 뭐','차이점','비교해','설명해줘','설명해 줘','알려줘','알려 줘',
+      '추천해줘','추천해 줘','가능한 ui','가능한 layout','가능한 레이아웃'
+    ]
+    if(infoMarkers.some(token=>normalized.includes(token))) return true
+    const actionMarkers=['적용해','설정해','만들어','추가해','삭제해','변경해','사용해','구현해','생성해','개발해','로 해줘','로 해 줘']
+    if(actionMarkers.some(token=>normalized.includes(token))) return false
+    return /[?？]\s*$/.test(text)
+  }
+
   const requirementKeywordDefinitions=[
-    {id:'purpose',label:'목적',keywords:['agent','요약','프로그램','만들']},
-    {id:'files',label:'파일 형식',keywords:['.txt','.md','.py','파일 형식','확장자']},
-    {id:'output',label:'결과 형식',keywords:['한국어','json','결과','저장','.txt','.md']},
-    {id:'llm',label:'LLM',keywords:['gpt-4o-mini','openai','ollama','llm']},
-    {id:'ui',label:'UI / Layout',keywords:['react','vite','streamlit','웹 gui','웹 ui','웹앱','대시보드','layout','레이아웃']},
-    {id:'backend',label:'Backend',keywords:['fastapi','uvicorn','backend','백엔드']},
+    {id:'purpose',label:'목적',keywords:['agent','에이전트','요약','프로그램','만들']},
+    {id:'files',label:'파일 형식',keywords:['.txt','.md','.py','.pdf','.docx','.xlsx','.csv','.ipynb','파일 형식','확장자']},
+    {id:'output',label:'결과 형식',keywords:['한국어','json','리포트','보고서','결과 형식','저장 형식']},
+    {id:'llm',label:'LLM',keywords:['gpt-4o-mini','openai','ollama','llm','qwen','claude','gemini']},
+    {id:'ui',label:'UI Framework',keywords:['react','vite','typescript','타입스크립트','streamlit','vue','next.js','angular','svelte','gradio','웹 gui','웹 ui','웹앱']},
+    {id:'layout',label:'Layout',keywords:['layout','레이아웃','sidebar','사이드바','top navigation','상단 메뉴']},
+    {id:'backend',label:'Backend',keywords:['fastapi','uvicorn','backend','백엔드','django','flask','nestjs']},
     {id:'mcp',label:'MCP / Transport',keywords:['mcp','stdio','streamable http','transport']},
-    {id:'database',label:'DB',keywords:['데이터베이스','database','postgresql','db']},
+    {id:'tool_prompt',label:'Tool / Prompt',keywords:['tool 설정','tool 요구','tool mode','프롬프트 설정','system prompt','시스템 프롬프트','응답 정책']},
+    {id:'database',label:'DB',keywords:['데이터베이스','database','postgresql','redis','firestore','pgvector','db 사용','db 없음']},
     {id:'permission',label:'권한 / 파일 접근',keywords:['권한','인증','rbac','project root','프로젝트 root','root 내부']},
-    {id:'runtime',label:'실행 환경',keywords:['windows 10','windows 11','python 3.12','온프레미스','로컬 pc','local']},
-    {id:'limits',label:'처리 제한',keywords:['10mb','120초','timeout','타임아웃','chunk','청크']}
+    {id:'runtime',label:'실행 환경',keywords:['windows 10','windows 11','python 3.12','온프레미스','로컬 pc','local','docker','cloud']},
+    {id:'limits',label:'처리 제한',keywords:['10mb','120초','timeout','타임아웃','chunk','청크','처리 제한']}
   ]
 
   const requirementDraftKeyFor=(projectPath='',agentName='')=>{
@@ -10984,7 +11067,9 @@ function IDE() {
         return `${def?.label||id}: ${String(value||'')}`
       })
     return [
-      ...(chat||[]).map(item=>String(item?.content||'')),
+      ...(chat||[])
+        .filter(item=>item?.role==='user'&&item?.turn_type!=='QUESTION'&&!looksLikeInterviewInformationQuestion(item?.content||''))
+        .map(item=>String(item?.content||'')),
       interviewAttachmentSummary||'',
       ...manualLines
     ]
@@ -10994,7 +11079,7 @@ function IDE() {
 
   const getRequirementKeywordStatus=()=>{
     const text=requirementConversationText()
-    const firstUser=(chat||[]).find(item=>item?.role==='user')
+    const firstUser=(chat||[]).find(item=>item?.role==='user'&&item?.turn_type!=='QUESTION'&&!looksLikeInterviewInformationQuestion(item?.content||''))
     const confirmed=confirmedInterviewRequirements||{}
 
     const includesAny=(values=[])=>values.some(value=>
@@ -11054,7 +11139,12 @@ function IDE() {
               : [
                   text.includes('.txt')?'.txt':'',
                   text.includes('.md')?'.md':'',
-                  text.includes('.py')?'.py':''
+                  text.includes('.py')?'.py':'',
+                  text.includes('.pdf')?'.pdf':'',
+                  text.includes('.docx')?'.docx':'',
+                  text.includes('.xlsx')?'.xlsx':'',
+                  text.includes('.csv')?'.csv':'',
+                  text.includes('.ipynb')?'.ipynb':''
                 ]
 
           return unique(values).join(', ')
@@ -11113,18 +11203,28 @@ function IDE() {
         }
 
         case 'ui':{
-              if(uiLayoutConfig?.template_id){
-            const framework=String(confirmed?.ui||'').trim()
-            return [framework,uiLayoutSummary(uiLayoutConfig)].filter(Boolean).join(' · ')
-          }
-          if(
-            String(confirmed?.ui||'').toLowerCase().includes('react')
-            ||includesAny(['react + vite','react+vite','react 기반'])
-          ){
-            return includesAny(['vite'])?'React + Vite':'React'
-          }
+          const framework=String(confirmed?.ui||'').trim()
+          if(framework) return framework
+          if(includesAny(['react + typescript','react+typescript','타입스크립트','tsx'])) return 'React + TypeScript'
+          if(includesAny(['react + vite','react+vite'])) return 'React + Vite'
+          if(includesAny(['react','리액트','리엑트'])) return 'React'
           if(includesAny(['streamlit'])) return 'Streamlit'
-          return confirmed?.ui||''
+          if(includesAny(['vue'])) return 'Vue'
+          return ''
+        }
+
+        case 'layout':{
+          return uiLayoutConfig?.template_id?uiLayoutSummary(uiLayoutConfig):''
+        }
+
+        case 'tool_prompt':{
+          if(!toolPromptSettings?.configured) return ''
+          const rows=[]
+          rows.push(`Tool ${toolPromptSettings.tool_mode||'AUTO'}`)
+          if(String(toolPromptSettings.selected_tools||'').trim()) rows.push('Tool 지정')
+          if(String(toolPromptSettings.system_prompt||'').trim()) rows.push('System Prompt')
+          if(String(toolPromptSettings.response_policy||'').trim()) rows.push('응답 정책')
+          return rows.join(' · ')
         }
 
         case 'backend':{
@@ -11299,22 +11399,28 @@ function IDE() {
         )
       }
 
-      if(def.id==='llm' && confirmed?.llm){
+      if(def.id==='llm' && (confirmed?.llm?.default_provider||confirmed?.llm?.default_model||confirmed?.llm?.ollama_supported)){
         collected=true
       }
       if(def.id==='files' && confirmed?.file_access?.allowed_extensions?.length){
         collected=true
       }
-      if(def.id==='mcp' && confirmed?.mcp){
+      if(def.id==='mcp' && (confirmed?.mcp?.default_transport||confirmed?.mcp?.future_transport||confirmed?.mcp?.explicit_none)){
         collected=true
       }
-      if(def.id==='database' && confirmed?.database){
+      if(def.id==='database' && (confirmed?.database?.decision_status==='CONFIRMED'||selectedAgentDatabaseProviders(agentDatabaseSetup).length>0)){
         collected=true
       }
-      if(def.id==='output' && confirmed?.result){
+      if(def.id==='output' && (confirmed?.result?.ui_display||confirmed?.result?.language||confirmed?.result?.api_format||(confirmed?.result?.export_formats||[]).length)){
         collected=true
       }
-      if(def.id==='ui' && (confirmed?.ui||confirmed?.ui_layout?.template_id||uiLayoutConfig?.template_id)){
+      if(def.id==='ui' && confirmed?.ui){
+        collected=true
+      }
+      if(def.id==='layout' && (confirmed?.ui_layout?.template_id||uiLayoutConfig?.template_id)){
+        collected=true
+      }
+      if(def.id==='tool_prompt' && toolPromptSettings?.configured){
         collected=true
       }
       if(def.id==='backend' && confirmed?.backend){
@@ -11469,7 +11575,7 @@ function IDE() {
     const statuses=getRequirementKeywordStatus()
     const byId=Object.fromEntries(statuses.map(item=>[item.id,item]))
     const conversation=[
-      ...(chat||[]).filter(item=>item?.role==='user').map(item=>String(item?.content||'')),
+      ...(chat||[]).filter(item=>item?.role==='user'&&item?.turn_type!=='QUESTION'&&!looksLikeInterviewInformationQuestion(item?.content||'')).map(item=>String(item?.content||'')),
       interviewAttachmentSummary||'',
       ...Object.values(requirementManualOverrides||{}).map(value=>String(value||'')),
     ].join('\n').toLowerCase()
@@ -11577,6 +11683,7 @@ function IDE() {
       requirement_recommendations:requirementRecommendations||null,
       requirement_recommendation_settings:normalizeRequirementRecommendationSettings(requirementRecommendationSettings||{}),
       development_stage_plan:developmentStagePlan||null,
+      tool_prompt_settings:{...DEFAULT_TOOL_PROMPT_SETTINGS,...(toolPromptSettings||{})},
       code_documentation:{
         enabled:Boolean(codeDocumentationEnabled),
         level:'standard',
@@ -11698,6 +11805,7 @@ function IDE() {
       setRequirementRecommendations(snapshot?.requirement_recommendations&&typeof snapshot.requirement_recommendations==='object'?snapshot.requirement_recommendations:null)
       setRequirementRecommendationSettings(normalizeRequirementRecommendationSettings(snapshot?.requirement_recommendation_settings||snapshot?.requirement_recommendations?.default_settings||EMPTY_REQUIREMENT_RECOMMENDATION_SETTINGS))
       setDevelopmentStagePlan(snapshot?.development_stage_plan&&typeof snapshot.development_stage_plan==='object'?snapshot.development_stage_plan:null)
+      setToolPromptSettings({...DEFAULT_TOOL_PROMPT_SETTINGS,...(snapshot?.tool_prompt_settings&&typeof snapshot.tool_prompt_settings==='object'?snapshot.tool_prompt_settings:{})})
       setCodeDocumentationEnabled(Boolean(snapshot?.code_documentation?.enabled))
       setAgentCodingStyle(normalizeAgentCodingStyle(snapshot?.user_coding_style||DEFAULT_AGENT_CODING_STYLE))
       setAgentRuntimeSetup(snapshot?.runtime_setup&&typeof snapshot.runtime_setup==='object'?normalizeAgentRuntimeSetup(snapshot.runtime_setup):createDefaultAgentRuntimeSetup())
@@ -12078,6 +12186,7 @@ function IDE() {
     setRequirementRecommendations(snapshot?.requirement_recommendations&&typeof snapshot.requirement_recommendations==='object'?snapshot.requirement_recommendations:null)
     setRequirementRecommendationSettings(normalizeRequirementRecommendationSettings(snapshot?.requirement_recommendation_settings||snapshot?.requirement_recommendations?.default_settings||EMPTY_REQUIREMENT_RECOMMENDATION_SETTINGS))
     setDevelopmentStagePlan(snapshot?.development_stage_plan&&typeof snapshot.development_stage_plan==='object'?snapshot.development_stage_plan:null)
+    setToolPromptSettings({...DEFAULT_TOOL_PROMPT_SETTINGS,...(snapshot?.tool_prompt_settings&&typeof snapshot.tool_prompt_settings==='object'?snapshot.tool_prompt_settings:{})})
     setCodeDocumentationEnabled(Boolean(snapshot?.code_documentation?.enabled))
     setAgentCodingStyle(normalizeAgentCodingStyle(snapshot?.user_coding_style||DEFAULT_AGENT_CODING_STYLE))
     setAgentRuntimeSetup(snapshot?.runtime_setup&&typeof snapshot.runtime_setup==='object'?normalizeAgentRuntimeSetup(snapshot.runtime_setup):createDefaultAgentRuntimeSetup())
@@ -12342,49 +12451,39 @@ function IDE() {
     invalidateRequirementWorkflowAfterEdit(`${nextName} ${actionLabel}이 반영되었습니다. 변경된 기능의 영향도를 기준으로 Workflow를 증분 재설계할 수 있습니다.`)
   }
 
-  // v5.434: project persistence is automatic from the first meaningful draft.
-  // This is the DB-backed project save (not only browser localStorage/checkpoint), so
-  // interview typing, design review, project generation and DB/DDL changes survive reloads.
+  // v5.500: autosave is driven by real user interaction, never by background
+  // state churn (DB preview polling, restored status updates, timers, LLM progress).
+  // This keeps the saved-at timestamp stable while the user is idle.
+  latestDesignProjectSaveRef.current=()=>saveAgentDesignProject({silent:true})
   useEffect(()=>{
-    if(designProjectSaving||requirementDraftDecisionPending) return undefined
-    const snapshot=buildRequirementDraftSnapshot()
-    const hasMeaningfulDraft=(snapshot.chat||[]).some(item=>item?.role==='user')
-      ||Boolean(String(snapshot.interview_input_draft||'').trim())
-      ||Boolean(snapshot.workflow_request)
-      ||Boolean(snapshot.agent_name)
-      ||Boolean(snapshot.workflow_preview)
-      ||Object.keys(snapshot.confirmed_requirements||{}).length>0
-      ||(Array.isArray(snapshot.feature_registry)&&snapshot.feature_registry.length>0)
-      ||snapshot.agent_specialization==='BLENDER_3D'
-    if(!hasMeaningfulDraft) return undefined
-    const timer=setTimeout(()=>{
-      void saveAgentDesignProject({silent:true})
-    },900)
-    return()=>clearTimeout(timer)
-  },[
-    designProjectId,
-    chat,
-    input,
-    designFeatureRegistry,
-    requirementRecommendations,
-    requirementRecommendationSettings,
-    confirmedInterviewRequirements,
-    targetWorkflowPreview,
-    targetWorkflowQuality,
-    agentBuildStage,
-    newAgentName,
-    newAgentProjectRoot,
-    agentSpecialization,
-    uiLayoutConfig,
-    requirementManualOverrides,
-    interviewAttachmentSummary,
-    interviewAttachmentMemory,
-    restoredBuildResume
-  ])
+    const schedule=()=>{
+      if(requirementDraftDecisionPendingRef.current) return
+      if(userActionSaveTimerRef.current) window.clearTimeout(userActionSaveTimerRef.current)
+      userActionSaveTimerRef.current=window.setTimeout(()=>{
+        userActionSaveTimerRef.current=null
+        void latestDesignProjectSaveRef.current?.()
+      },800)
+    }
+    const onPointer=()=>schedule()
+    const onKey=(event)=>{
+      if(event?.isComposing) return
+      schedule()
+    }
+    document.addEventListener('pointerdown',onPointer,{passive:true})
+    document.addEventListener('keydown',onKey)
+    return()=>{
+      document.removeEventListener('pointerdown',onPointer)
+      document.removeEventListener('keydown',onKey)
+      if(userActionSaveTimerRef.current){
+        window.clearTimeout(userActionSaveTimerRef.current)
+        userActionSaveTimerRef.current=null
+      }
+    }
+  },[])
 
   const buildRequirementRequestFromCollectedInfo=()=>{
     const userMessages=(chat||[])
-      .filter(item=>item?.role==='user')
+      .filter(item=>item?.role==='user'&&item?.turn_type!=='QUESTION'&&!looksLikeInterviewInformationQuestion(item?.content||''))
       .map(item=>String(item?.content||'').trim())
       .filter(Boolean)
 
@@ -12514,6 +12613,13 @@ function IDE() {
       )
     }
 
+    if(toolPromptSettings?.configured){
+      rows.push(
+        '[사용자가 설정한 Tool / Prompt 정책 - 코드 생성 시 반드시 반영]\n'
+        +JSON.stringify({...DEFAULT_TOOL_PROMPT_SETTINGS,...toolPromptSettings},null,2)
+      )
+    }
+
     const manualRows=Object.entries(requirementManualOverrides||{})
       .map(([id,value])=>{
         const text=String(value||'').trim()
@@ -12559,15 +12665,21 @@ function IDE() {
     const requestText=buildRequirementRequestFromCollectedInfo().trim()
     const hasUserRequirement=Boolean(
       requestText
-      &&((chat||[]).some(item=>item?.role==='user')||workflowReq?.trim()||interviewAttachmentSummary?.trim())
+      &&((chat||[]).some(item=>item?.role==='user'&&item?.turn_type!=='QUESTION'&&!looksLikeInterviewInformationQuestion(item?.content||''))||workflowReq?.trim()||interviewAttachmentSummary?.trim())
     )
 
     if(!hasUserRequirement){
+      liveDatabasePreviewRequestRef.current=''
       setLiveDatabasePreview(null)
       setLiveDatabasePreviewError('')
       setLiveDatabasePreviewLoading(false)
       return undefined
     }
+
+    if(liveDatabasePreviewRequestRef.current===requestText){
+      return undefined
+    }
+    liveDatabasePreviewRequestRef.current=requestText
 
     let cancelled=false
     const timer=setTimeout(async()=>{
@@ -12605,7 +12717,7 @@ function IDE() {
     const collectedCount=statuses.filter(x=>x.collected).length
     return Boolean(
       workflowReq?.trim()
-      || (chat||[]).some(item=>item?.role==='user')
+      || (chat||[]).some(item=>item?.role==='user'&&item?.turn_type!=='QUESTION'&&!looksLikeInterviewInformationQuestion(item?.content||''))
       || collectedCount>=3
       || targetWorkflowPreview
     )
@@ -12614,7 +12726,7 @@ function IDE() {
 
   const buildConfirmedRequirementsFromChat=(sourceChat=chat)=>{
     const userMessages=(sourceChat||[])
-      .filter(item=>item?.role==='user')
+      .filter(item=>item?.role==='user'&&item?.turn_type!=='QUESTION'&&!looksLikeInterviewInformationQuestion(item?.content||''))
       .map(item=>String(item?.content||'').trim())
       .filter(Boolean)
 
@@ -12638,7 +12750,6 @@ function IDE() {
       })
     const allText=[
       ...userMessages,
-      ...assistantMessages,
       interviewAttachmentSummary||'',
       ...(interviewAttachmentRequirements||[]).map(item=>String(item?.text||'')),
       uiLayoutConfig?.template_id?uiLayoutSummary(uiLayoutConfig):'',
@@ -12653,7 +12764,12 @@ function IDE() {
     const extensions=[
       has('.txt')?'.txt':'',
       has('.md')?'.md':'',
-      has('.py')?'.py':''
+      has('.py')?'.py':'',
+      has('.pdf')?'.pdf':'',
+      has('.docx')?'.docx':'',
+      has('.xlsx')?'.xlsx':'',
+      has('.csv')?'.csv':'',
+      has('.ipynb')?'.ipynb':''
     ].filter(Boolean)
 
     const requirements={
@@ -12721,10 +12837,7 @@ function IDE() {
       },
 
       file_access:{
-        allowed_extensions:
-          extensions.length
-            ? extensions
-            : ['.txt','.md','.py'],
+        allowed_extensions:extensions,
         restrict_to_project_root:has(
           'project root 내부',
           '프로젝트 root 내부',
@@ -12750,23 +12863,19 @@ function IDE() {
         )
       },
 
-      database:{
-        enabled:selectedAgentDatabaseProviders(agentDatabaseSetup).length>0
-          ||(agentSpecialization==='BLENDER_3D'
-            ? has('postgresql','database','데이터베이스',' db ','redis','firestore','pgvector')
-            : !(
-                has(
-                  '데이터베이스를 사용하지',
-                  'db 사용하지',
-                  '이번 버전에서는 db',
-                  '이번 버전에서는 데이터베이스'
-                )
-              )),
-        future_extension:has('postgresql'),
-        runtime_setup:safeAgentDatabaseSetup(agentDatabaseSetup),
-        configured_providers:selectedAgentDatabaseProviders(agentDatabaseSetup),
-        connection_setup_mode:agentDatabaseSetup?.mode||'PENDING'
-      },
+      database:(()=>{
+        const providers=selectedAgentDatabaseProviders(agentDatabaseSetup)
+        const explicitNoDb=has('데이터베이스를 사용하지','db 사용하지','db 없음','데이터베이스 없음','no db')
+        const explicitDb=providers.length>0||has('postgresql','database','데이터베이스','redis','firestore','pgvector','db 사용')
+        return {
+          enabled:explicitNoDb?false:(explicitDb?true:null),
+          decision_status:(explicitNoDb||explicitDb)?'CONFIRMED':'UNCONFIRMED',
+          future_extension:has('postgresql'),
+          runtime_setup:safeAgentDatabaseSetup(agentDatabaseSetup),
+          configured_providers:providers,
+          connection_setup_mode:agentDatabaseSetup?.mode||'PENDING'
+        }
+      })(),
 
       result:{
         ui_display:has(
@@ -12808,6 +12917,7 @@ function IDE() {
         ),
         rbac:false
       },
+      tool_prompt:{...DEFAULT_TOOL_PROMPT_SETTINGS,...(toolPromptSettings||{})},
       recommendation_settings:(()=>{
         const settings=normalizeRequirementRecommendationSettings(requirementRecommendationSettings||{})
         const bundle=requirementRecommendations||{}
@@ -14447,8 +14557,9 @@ function IDE() {
     const message=typedMessage || (interviewAttachments.length
       ? '첨부한 참고 파일을 분석해서 Agent 요구사항을 파악해줘.'
       : '')
-    if(!message || busy || interviewAttachmentSummaryBusy) return
-    if(interviewAttachments.length&&!interviewAttachmentAnalysis.ready) return
+    const informationQuestion=looksLikeInterviewInformationQuestion(message)
+    if(!message || busy || (!informationQuestion&&interviewAttachmentSummaryBusy)) return
+    if(!informationQuestion&&interviewAttachments.length&&!interviewAttachmentAnalysis.ready) return
     const requirementsDone=chat.some(item=>
       item?.role==='assistant'
       && String(item?.content||'').includes('요구사항 분석 완료')
@@ -14457,7 +14568,7 @@ function IDE() {
     // v5.393: 인터뷰 완료/개발 실패 이후에도 최신 사용자 요구사항 변경을 즉시
     // 구조화 상태에 반영합니다. 특히 Headless -> React + TypeScript 같은 충돌은
     // 이전 확정값을 계속 노출하지 않고 최신 요구사항으로 supersede합니다.
-    applyExplicitRequirementSupersession(message)
+    if(!informationQuestion) applyExplicitRequirementSupersession(message)
 
     if(requirementsDone && isBuildContinueCommand(message)){
       setInput('')
@@ -14485,21 +14596,23 @@ function IDE() {
 
       return
     }
-    if(developmentStagePlan?.approved){
-      setDevelopmentStagePlan(null)
-      if(targetWorkflowPreview){
-        setPreviousTargetWorkflowPreview(targetWorkflowPreview)
-        setTargetWorkflowPreview(null)
-        setTargetWorkflowQuality(null)
+    if(!informationQuestion){
+      if(developmentStagePlan?.approved){
+        setDevelopmentStagePlan(null)
+        if(targetWorkflowPreview){
+          setPreviousTargetWorkflowPreview(targetWorkflowPreview)
+          setTargetWorkflowPreview(null)
+          setTargetWorkflowQuality(null)
+        }
+        setAgentBuildStage('REQUIREMENTS')
+        setAgentBuildMessage('새 요구사항이 입력되어 승인된 개발 Stage를 무효화했습니다. 최신 요구사항 분석 후 Stage를 다시 추천합니다.')
       }
-      setAgentBuildStage('REQUIREMENTS')
-      setAgentBuildMessage('새 요구사항이 입력되어 승인된 개발 Stage를 무효화했습니다. 최신 요구사항 분석 후 Stage를 다시 추천합니다.')
+      setWorkflowReq(prev=>prev?.trim()?prev:message)
     }
-    setWorkflowReq(prev=>prev?.trim()?prev:message)
 
     const isRetry=Boolean(retryPayload?.historyBeforeSend)
     const historyBeforeSend=isRetry ? retryPayload.historyBeforeSend : [...chat]
-    const userMessage={role:'user',content:sanitizeInterviewDisplayText(message)}
+    const userMessage={role:'user',content:sanitizeInterviewDisplayText(message),turn_type:informationQuestion?'QUESTION':'REQUIREMENT'}
 
     if(!isRetry) setChat(prev=>[...prev,userMessage])
     setInput('')
@@ -14525,7 +14638,7 @@ function IDE() {
           history:historyBeforeSend,
           provider,
           project_root:newAgentProjectRoot||root||'',
-          attachment_ids:interviewAttachments.map(item=>item.attachment_id),
+          attachment_ids:informationQuestion?[]:interviewAttachments.map(item=>item.attachment_id),
           attachment_memory:interviewAttachmentMemory,
           agent_specialization:agentSpecialization
         })
@@ -14562,7 +14675,7 @@ function IDE() {
           })
         })
       }
-      if(interviewAttachments.length){
+      if(!informationQuestion&&result?.attachments_consumed&&interviewAttachments.length){
         const consumedIds=interviewAttachments.map(item=>item.attachment_id)
         setInterviewAttachments([])
         setInterviewAttachmentAnalysis({busy:false,ready:true,overallProgress:100,failedFiles:0,successfulFiles:0,files:[]})
@@ -14578,10 +14691,12 @@ function IDE() {
       ])
       setInterviewRetryPayload(null)
 
-      setTimeout(()=>{
-        buildConfirmedRequirementsFromChat()
-        saveRequirementDraft()
-      },0)
+      if(!informationQuestion){
+        setTimeout(()=>{
+          buildConfirmedRequirementsFromChat()
+          saveRequirementDraft()
+        },0)
+      }
     }catch(e){
       const aborted=controller.signal.aborted || String(e?.name||'')==='AbortError'
       const messageText=aborted
@@ -14883,12 +14998,13 @@ function IDE() {
       ['01','목적',leftSummary.purpose],
       ['02','기능',leftSummary.features],
       ['03','MCP / Tool',leftSummary.mcpTools],
-      ['04','DB 설계',leftSummary.database],
-      ['05','UI / Layout',leftSummary.uiLayout],
-      ['06','실행 환경',runtimeSetupSummary],
-      ['07','DB 구성',databaseSetupSummary],
-      ['08','개발 계획',developmentPlanSummary],
-      ['09','최종 확인',leftSummary.confirmation]
+      ['04','Tool / Prompt',toolPromptSettings?.configured?'설정 완료':'설정 필요'],
+      ['05','DB 설계',leftSummary.database],
+      ['06','UI / Layout',leftSummary.uiLayout],
+      ['07','실행 환경',runtimeSetupSummary],
+      ['08','DB 구성',databaseSetupSummary],
+      ['09','개발 계획',developmentPlanSummary],
+      ['10','최종 확인',leftSummary.confirmation]
     ]
     return <div className="builder-shell">
     <aside className="builder-steps">
@@ -14983,7 +15099,7 @@ function IDE() {
         <textarea value={input} onChange={e=>setInput(e.target.value)}
           onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendBuilderAnswer()}}}
           placeholder="현재 질문에 답해주세요. Shift+Enter로 줄바꿈"/>
-        <button onClick={sendBuilderAnswer} disabled={busy||!input.trim()}>답변 보내기</button>
+        <button onClick={sendBuilderAnswer} disabled={busy||(!input.trim()&&!interviewAttachments.length)||(!looksLikeInterviewInformationQuestion(input)&&(interviewAttachmentSummaryBusy||(interviewAttachments.length&&!interviewAttachmentAnalysis.ready)))}>답변 보내기</button>
       </div>
     </section>
 
@@ -14994,6 +15110,7 @@ function IDE() {
       <div className="builder-summary-tabs" role="tablist" aria-label="신규 Agent 프로젝트 구성">
         <button type="button" className={builderSummaryTab==='REQUIREMENTS'?'active':''} onClick={()=>setBuilderSummaryTab('REQUIREMENTS')}>요구사항</button>
         <button type="button" className={builderSummaryTab==='RUNTIME'?'active':''} onClick={()=>{setBuilderSummaryTab('RUNTIME');if(workspaceRightWidth<430)setWorkspaceRightWidth(430);if(!agentRuntimePortInfo)setTimeout(()=>recommendAgentRuntimePorts(),0)}}>실행 환경</button>
+        <button type="button" className={builderSummaryTab==='TOOL_PROMPT'?'active':''} onClick={()=>{setBuilderSummaryTab('TOOL_PROMPT');if(workspaceRightWidth<430)setWorkspaceRightWidth(430)}}>Tool / Prompt</button>
         <button type="button" className={builderSummaryTab==='DATABASE'?'active':''} onClick={()=>{setBuilderSummaryTab('DATABASE');if(workspaceRightWidth<450)setWorkspaceRightWidth(450)}}>Database</button>
         <button type="button" className={builderSummaryTab==='STAGES'?'active':''} onClick={()=>{setBuilderSummaryTab('STAGES');if(workspaceRightWidth<410)setWorkspaceRightWidth(410)}}>개발 Stage{developmentStagePlan?.stages?.length?` ${developmentStagePlan.stages.length}`:''}</button>
         <button type="button" className={builderSummaryTab==='FINAL'?'active':''} onClick={()=>{setBuilderSummaryTab('FINAL');if(workspaceRightWidth<450)setWorkspaceRightWidth(450)}}>최종 Preview</button>
@@ -15006,7 +15123,7 @@ function IDE() {
           <div>
             <strong>요구사항 수집 현황</strong>
             <small>
-              대화에서 확인된 항목은 자동 저장됩니다.
+              사용자 입력·선택·설정 변경이 있을 때 저장합니다.
             </small>
           </div>
           <span>
@@ -15117,6 +15234,9 @@ function IDE() {
         onApplyDefaults={resetRequirementRecommendationsToDefaults}
       />
       </>}
+
+      {builderSummaryTab==='TOOL_PROMPT'&&<ToolPromptSettingsPanel value={toolPromptSettings} onChange={setToolPromptSettings}/>}
+
 
       {builderSummaryTab==='RUNTIME'&&<AgentRuntimeSetupPanel
         value={agentRuntimeSetup}
@@ -15347,7 +15467,6 @@ function IDE() {
       onApply={(config)=>{
         setUiLayoutConfig(config)
         setUiLayoutGalleryOpen(false)
-        setRequirementManualOverrides(prev=>({...prev,ui:uiLayoutSummary(config)}))
         setConfirmedInterviewRequirements(prev=>({...prev,ui_layout:config}))
         invalidateRequirementWorkflowAfterEdit('UI / Layout 템플릿을 변경했습니다. 선택한 레이아웃을 기준으로 Workflow와 코드 구조를 다시 설계할 수 있습니다.')
         setTimeout(()=>saveRequirementDraft(),0)
@@ -19409,15 +19528,14 @@ function IDE() {
               title="Agent 설계 인터뷰에서 분석할 요구사항/설계/코드 파일을 선택하세요."
               maxFiles={12}
               analysisPurpose="Agent 설계 인터뷰 참고 파일 분석 준비"
-              analysisActive={busy||interviewAttachmentSummaryBusy}
+              analysisActive={interviewAttachmentSummaryBusy}
               onAnalysisStateChange={setInterviewAttachmentAnalysis}
             />
             {interviewAttachments.length>0&&interviewAttachmentAnalysis.ready&&!busy&&!interviewAttachmentSummaryBusy&&<div className="attachment-ready-gate">
               <div>
                 <strong>✓ 첨부 Context 준비 완료</strong>
-                <span>파일 첨부만으로 DB·Workflow·Architecture 심층 분석을 자동 시작하지 않습니다. 답변 보내기 또는 아래 버튼을 눌렀을 때 본격 분석합니다.</span>
+                <span>Context 준비가 끝났습니다. 같은 파일을 다시 읽지 않고 추출된 Context에서 요구사항 정리를 자동 시작합니다.</span>
               </div>
-              <button type="button" onClick={summarizeInterviewAttachments}>첨부만 먼저 분석</button>
             </div>}
             <AgentActivityProgress
               active={busy||interviewAttachmentSummaryBusy}
@@ -19477,7 +19595,7 @@ function IDE() {
               />
               <button
                 onClick={sendBuilderAnswer}
-                disabled={busy||interviewAttachmentSummaryBusy||(!input.trim()&&!interviewAttachments.length)||(interviewAttachments.length&&!interviewAttachmentAnalysis.ready)}
+                disabled={busy||(!input.trim()&&!interviewAttachments.length)||(!looksLikeInterviewInformationQuestion(input)&&(interviewAttachmentSummaryBusy||(interviewAttachments.length&&!interviewAttachmentAnalysis.ready)))}
               >
                 답변 보내기
               </button>
@@ -19492,8 +19610,7 @@ function IDE() {
           onApply={(config)=>{
             setUiLayoutConfig(config)
             setUiLayoutGalleryOpen(false)
-            setRequirementManualOverrides(prev=>({...prev,ui:uiLayoutSummary(config)}))
-            setConfirmedInterviewRequirements(prev=>({...prev,ui_layout:config}))
+                setConfirmedInterviewRequirements(prev=>({...prev,ui_layout:config}))
             invalidateRequirementWorkflowAfterEdit('UI / Layout 템플릿을 변경했습니다. 선택한 레이아웃을 기준으로 Workflow와 코드 구조를 다시 설계할 수 있습니다.')
             setTimeout(()=>saveRequirementDraft(),0)
           }}
@@ -21488,6 +21605,7 @@ function IDE() {
           <div className="builder-summary-tabs workspace-design-tabs" role="tablist" aria-label="신규 Agent 설계 구성">
             <button type="button" className={builderSummaryTab==='REQUIREMENTS'?'active':''} onClick={()=>setBuilderSummaryTab('REQUIREMENTS')}>요구사항</button>
             <button type="button" className={builderSummaryTab==='RUNTIME'?'active':''} onClick={()=>{setBuilderSummaryTab('RUNTIME');if(workspaceRightWidth<430)setWorkspaceRightWidth(430);if(!agentRuntimePortInfo)setTimeout(()=>recommendAgentRuntimePorts(),0)}}>실행 환경</button>
+        <button type="button" className={builderSummaryTab==='TOOL_PROMPT'?'active':''} onClick={()=>{setBuilderSummaryTab('TOOL_PROMPT');if(workspaceRightWidth<430)setWorkspaceRightWidth(430)}}>Tool / Prompt</button>
             <button type="button" className={builderSummaryTab==='DATABASE'?'active':''} onClick={()=>{setBuilderSummaryTab('DATABASE');if(workspaceRightWidth<450)setWorkspaceRightWidth(450)}}>Database</button>
             <button type="button" className={builderSummaryTab==='STAGES'?'active':''} onClick={()=>{setBuilderSummaryTab('STAGES');if(workspaceRightWidth<410)setWorkspaceRightWidth(410)}}>개발 Stage{developmentStagePlan?.stages?.length?` ${developmentStagePlan.stages.length}`:''}</button>
             <button type="button" className={builderSummaryTab==='FINAL'?'active':''} onClick={()=>{setBuilderSummaryTab('FINAL');if(workspaceRightWidth<450)setWorkspaceRightWidth(450)}}>최종 Preview</button>
@@ -21498,6 +21616,8 @@ function IDE() {
             <small>확정된 요구사항과 추천 기능/메뉴/Tool을 확인합니다. 아래 요구사항 패널에서 세부 내용을 수정할 수 있습니다.</small>
             <span>{getRequirementKeywordStatus().filter(x=>x.collected).length}/{getRequirementKeywordStatus().length} 수집</span>
           </div>}
+          {builderSummaryTab==='TOOL_PROMPT'&&<ToolPromptSettingsPanel value={toolPromptSettings} onChange={setToolPromptSettings}/>}
+
           {builderSummaryTab==='RUNTIME'&&<AgentRuntimeSetupPanel
             value={agentRuntimeSetup}
             onChange={updateAgentRuntimeSetup}
@@ -21864,7 +21984,7 @@ function IDE() {
                   : requirementDraftRestored
                     ? '✓ 이전 요구사항 복원됨'
                     : requirementDraftSavedAt
-                      ? '✓ 요구사항 자동 저장됨'
+                      ? '✓ 사용자 액션 저장됨'
                       : '○ 요구사항 수집 중'}
               </span>
               {requirementDraftSavedAt&&

@@ -16199,3 +16199,22 @@ small{font-size:var(--agentstudio-min-readable-font-size);}
 @media(max-width:1100px){
   .project-live-transcript-head-actions{flex-wrap:wrap;justify-content:flex-start;}
 }
+
+
+/* v5.500 Interview Question State + Event-Driven Save */
+.attachment-ai-summary-resize-handle.top{order:-1;margin:0;border-top:0;border-bottom:1px solid var(--border,#263447);cursor:ns-resize;min-height:20px}
+.attachment-ai-summary-card.collapsed{height:auto!important;min-height:0!important}
+.attachment-ai-summary-card.collapsed .attachment-ai-summary-head{border-bottom:0}
+.attachment-ai-summary-collapse-button{border:1px solid #31516c;background:#112c40;color:#cdeaff;border-radius:6px;padding:4px 8px;font-size:12px;cursor:pointer}
+.attachment-ai-summary-collapse-button:hover{background:#173a52}
+.tool-prompt-settings-card{display:flex;flex-direction:column;gap:12px;padding:14px;border:1px solid #25384b;border-radius:10px;background:#0b1722}
+.tool-prompt-settings-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.tool-prompt-settings-head>div{display:flex;flex-direction:column;gap:4px}
+.tool-prompt-settings-head strong{color:#e8f2fb}
+.tool-prompt-settings-head small{color:#8ca3b7;line-height:1.45}
+.tool-prompt-settings-head>span{border:1px solid #31516c;border-radius:999px;padding:3px 8px;color:#9edbff;font-size:12px;white-space:nowrap}
+.tool-prompt-settings-card textarea{resize:vertical;min-height:72px}
+.agent-db-setup-card .agent-db-provider-toggle-checkbox{display:inline-flex;align-items:center;gap:8px;border:0;background:transparent;color:inherit;padding:4px 2px;cursor:pointer;position:relative;z-index:30;pointer-events:auto!important}
+.agent-db-setup-card .agent-db-provider-checkbox-glyph{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border:1px solid #55738f;border-radius:4px;background:#0c1823;color:#8be0a6;font-size:12px;line-height:1}
+.agent-db-setup-card .agent-db-provider-toggle-checkbox.checked .agent-db-provider-checkbox-glyph{border-color:#39a96b;background:#123324}
+.agent-db-setup-card input[type="checkbox"],.agent-db-setup-card label.agent-db-check,.agent-db-setup-card .agent-db-provider header label{pointer-events:auto!important;position:relative;z-index:30;cursor:pointer}

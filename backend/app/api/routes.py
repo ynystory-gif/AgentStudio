@@ -129,7 +129,7 @@ from app.services.ai_attachment_service import (
 from app.services.local_control import list_files, list_directories, read_file, write_file, run_command, register_runtime_project_root, get_runtime_project_roots, create_folder, rename_path, create_file, delete_files, project_file_snapshot, get_file_meta, get_file_hash_states, validate_project_root, watch_project_changes, search_project_text, active_command_processes, ExternalFileChangedError, InvalidNotebookContentError
 from app.services.code_intelligence_service import resolve_code_intelligence
 from app.services.tavily_service import web_search
-from app.services.requirements_agent import next_interview_message, summarize_attachment_requirements, build_attachment_requirements_display_summary
+from app.services.requirements_agent import next_interview_message, summarize_attachment_requirements, build_attachment_requirements_display_summary, interview_turn_type
 from app.services.requirement_recommendation_service import build_requirement_recommendations, apply_recommendation_settings_to_design
 from app.services.development_stage_planner import recommend_development_stage_plan, approve_development_stage_plan, apply_development_stage_plan_to_design
 from app.services.attachment_requirement_mining import extract_attachment_requirement_registry, format_requirement_registry_memory
@@ -428,6 +428,7 @@ class AttachmentRequirementsSummaryRequest(BaseModel):
     attachment_memory: str = ""
     provider: str | None = None
     project_root: str = ""
+    deep_analysis: bool = False
 
 class CodexStartRequest(BaseModel):
     root: str = ""
@@ -3530,7 +3531,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.499", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering+SchedulerWorkspace+ParallelRenderedThemeFallback+AuthenticatedPptExportCors+InteractiveThemePagePreview+RenderedMenuMotionProbe+UILayoutSidebarHeaderIconOptions+Blender3DAgentTemplate+RequirementRecommendationToolRouting+AuthenticatedBinaryDocumentPreview+LearningProblemPersistenceRepair+LearningDatasetTopicScrollLayout+LearningExactMisjudgmentTraceSqlExport+LearningCenterLoadProgressHeartbeat+LearningSqlListParityCurrentPcFastRead+LearningSchemaDeadlockGuard+CodeEditorSelectionLlmReference+EditableLlmReferenceCompactChat+LlmComposerBottomDock+CodeSaveLabelClarification+TopSaveToolbar+ReferenceHeaderSummaryRelocation+InlineDirtySaveButton+PdfPreviewHeadingRemoval+AdaptiveDevelopmentStagePlannerApprovalWorkflow+NewAgentDevelopmentPlanUXStageEditor+DatabaseResourceProvisionPlanApprovalFlow+RuntimeDatabaseFinalPreviewTablePolicyPortRecommendationUX+CodeDocumentationOption+SmartPairTypingEscapedQuoteCaretGuard+CodeDocumentationCssLiteralNewlineFix+CodeDocumentationToggleTitleRelocation+CodeIntelligenceDefinitionHoverSignatureNavigation+NotebookNameErrorDiagnostic+DocumentWideLlmReferenceSelection+StaleReferenceSelectionGuard+FrontendBuildFailureDetail+ElevatedFailureWindowHold+PowerShellNpmStderrGuard+CtrlSpaceSymbolCompletion+ManualLlmReferenceEntry+UnifiedSaveDirtyDot+SelectedTextExactReplacePairTyping+ContextAwareCallArgumentCompletion+CodexCodeResponseAiProposalRouting+CtrlSpaceCompletionNavigationSeparation+NotebookLongRunProgressHeartbeat+ProjectFileMemoTab+SingleMemoPerFileResizableMemoSplit+SaveButtonEventGuard+GlobalMediaSessionBackgroundRecording+LiveTranscriptPersistence+TemporaryExternalMediaTab+UserCodingStyleProfile+BackendFasterWhisperStreamingStt+SttOverlapVad+StopTimeTranscriptRefinement+MediaSessionLastSegmentUndefinedGuard+CodingStylePopoverLayout+LiveTranscriptSummary+ScreenAudioTrackGuard+AttachmentSummaryFileOpen+ManualDatabaseResourceCreate+Global13pxTextFloor+CodingStylePanelPolish+LiveTranscriptProvisionalImmediateRender+TimeRangeRefinedReplacement+TranscriptCollectionRefineCompleteStatus+NotebookStreamingRecovery+PackageInstallProtectedExecution+ExternalPythonWorkerRuntime+BackendPackageExecution+WindowsRuntimeRegression+NotebookWarningOutputClassification+DocumentDrivenAgentCodingStyle+ResilientAgentCodingStyle"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.500", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering+SchedulerWorkspace+ParallelRenderedThemeFallback+AuthenticatedPptExportCors+InteractiveThemePagePreview+RenderedMenuMotionProbe+UILayoutSidebarHeaderIconOptions+Blender3DAgentTemplate+RequirementRecommendationToolRouting+AuthenticatedBinaryDocumentPreview+LearningProblemPersistenceRepair+LearningDatasetTopicScrollLayout+LearningExactMisjudgmentTraceSqlExport+LearningCenterLoadProgressHeartbeat+LearningSqlListParityCurrentPcFastRead+LearningSchemaDeadlockGuard+CodeEditorSelectionLlmReference+EditableLlmReferenceCompactChat+LlmComposerBottomDock+CodeSaveLabelClarification+TopSaveToolbar+ReferenceHeaderSummaryRelocation+InlineDirtySaveButton+PdfPreviewHeadingRemoval+AdaptiveDevelopmentStagePlannerApprovalWorkflow+NewAgentDevelopmentPlanUXStageEditor+DatabaseResourceProvisionPlanApprovalFlow+RuntimeDatabaseFinalPreviewTablePolicyPortRecommendationUX+CodeDocumentationOption+SmartPairTypingEscapedQuoteCaretGuard+CodeDocumentationCssLiteralNewlineFix+CodeDocumentationToggleTitleRelocation+CodeIntelligenceDefinitionHoverSignatureNavigation+NotebookNameErrorDiagnostic+DocumentWideLlmReferenceSelection+StaleReferenceSelectionGuard+FrontendBuildFailureDetail+ElevatedFailureWindowHold+PowerShellNpmStderrGuard+CtrlSpaceSymbolCompletion+ManualLlmReferenceEntry+UnifiedSaveDirtyDot+SelectedTextExactReplacePairTyping+ContextAwareCallArgumentCompletion+CodexCodeResponseAiProposalRouting+CtrlSpaceCompletionNavigationSeparation+NotebookLongRunProgressHeartbeat+ProjectFileMemoTab+SingleMemoPerFileResizableMemoSplit+SaveButtonEventGuard+GlobalMediaSessionBackgroundRecording+LiveTranscriptPersistence+TemporaryExternalMediaTab+UserCodingStyleProfile+BackendFasterWhisperStreamingStt+SttOverlapVad+StopTimeTranscriptRefinement+MediaSessionLastSegmentUndefinedGuard+CodingStylePopoverLayout+LiveTranscriptSummary+ScreenAudioTrackGuard+AttachmentSummaryFileOpen+ManualDatabaseResourceCreate+Global13pxTextFloor+CodingStylePanelPolish+LiveTranscriptProvisionalImmediateRender+TimeRangeRefinedReplacement+TranscriptCollectionRefineCompleteStatus+NotebookStreamingRecovery+PackageInstallProtectedExecution+ExternalPythonWorkerRuntime+BackendPackageExecution+WindowsRuntimeRegression+NotebookWarningOutputClassification+DocumentDrivenAgentCodingStyle+ResilientAgentCodingStyle"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -3585,15 +3586,21 @@ async def interview_attachment_summary(req: AttachmentRequirementsSummaryRequest
     requirement_registry = extract_attachment_requirement_registry(context_text)
     registry_memory = format_requirement_registry_memory(requirement_registry)
 
-    with usage_context(
-        project_root=req.project_root,
-        operation="requirements_attachment_summary",
-    ):
-        summary = await summarize_attachment_requirements(
-            context_text,
-            previous_summary=redact_sensitive_text(req.attachment_memory or ""),
-            provider=req.provider,
-        )
+    # v5.500: file selection performs one deterministic requirement extraction
+    # immediately after Context preparation. Repeated interview turns reuse the
+    # stored attachment_memory. A slower LLM deep summary is opt-in only.
+    if req.deep_analysis:
+        with usage_context(
+            project_root=req.project_root,
+            operation="requirements_attachment_summary_deep",
+        ):
+            summary = await summarize_attachment_requirements(
+                context_text,
+                previous_summary=redact_sensitive_text(req.attachment_memory or ""),
+                provider=req.provider,
+            )
+    else:
+        summary = build_attachment_requirements_display_summary(context_text)
 
     summary = redact_sensitive_text(summary).strip()
     current_memory_parts = []
@@ -3624,12 +3631,14 @@ async def interview_attachment_summary(req: AttachmentRequirementsSummaryRequest
 
 @router.post("/chat/interview")
 async def interview(req: ChatRequest):
+    turn_type = interview_turn_type(req.message)
+    effective_attachment_ids = [] if turn_type == 'QUESTION' else req.attachment_ids
     with usage_context(
         project_root=req.project_root,
         operation="requirements_interview",
     ):
         attachment_context = build_requirements_attachment_context(
-            req.attachment_ids,
+            effective_attachment_ids,
             purpose="Agent 설계 인터뷰 요구사항/참고자료 분석",
         )
         fresh_attachment_text = str(attachment_context.get("text") or "").strip()
@@ -3653,6 +3662,22 @@ async def interview(req: ChatRequest):
             attachment_memory=attachment_memory,
             agent_specialization=req.agent_specialization,
         )
+
+        if turn_type == 'QUESTION':
+            return {
+                "answer": answer,
+                "requirement_recommendations": None,
+                "development_stage_plan": None,
+                "attachments": [],
+                "attachment_warnings": [],
+                "attachment_memory": redact_sensitive_text(req.attachment_memory or ""),
+                "attachment_summary": "",
+                "attachment_requirements": [],
+                "attachment_requirement_coverage": {},
+                "attachments_consumed": False,
+                "turn_type": "QUESTION",
+                "requirement_state_changed": False,
+            }
 
         registered_tools = []
         try:
@@ -3703,7 +3728,9 @@ async def interview(req: ChatRequest):
         "attachment_summary": attachment_summary,
         "attachment_requirements": requirement_registry.get("requirements") or [],
         "attachment_requirement_coverage": requirement_registry.get("coverage") or {},
-        "attachments_consumed": bool(req.attachment_ids),
+        "attachments_consumed": bool(effective_attachment_ids),
+        "turn_type": turn_type,
+        "requirement_state_changed": turn_type != "QUESTION",
     }
 
 @router.post("/agent/plan")
@@ -7824,7 +7851,7 @@ async def save_workflow_design_checkpoint(req: AgentDesignCheckpointRequest):
         "attachment_summary_files", "attachment_requirements",
         "attachment_requirement_coverage", "manual_requirement_overrides",
         "feature_registry", "design_project_id", "design_project_version",
-        "ui_layout", "build_resume",
+        "ui_layout", "tool_prompt_settings", "build_resume",
     }
     snapshot = {
         key: value for key, value in (req.snapshot or {}).items()
