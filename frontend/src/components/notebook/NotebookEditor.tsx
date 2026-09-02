@@ -16,6 +16,7 @@ import type {
   NotebookDebugCommandRequest,
 } from '../../types/notebook'
 import { NotebookMarkdown, NotebookOutput, notebookSourceToText } from './NotebookRenderers'
+import './NotebookEditorResize.css'
 
 interface NotebookSelection {
   startLineNumber: number
@@ -205,6 +206,15 @@ function storeNotebookLineBookmarks(key: string, bookmarks: NotebookLineBookmark
 // notebook scroll position at module scope, keyed by project + file path, so
 // returning to the notebook restores the exact viewport during this app run.
 const NOTEBOOK_SCROLL_POSITIONS = new Map<string, number>()
+// v5.485: Keep user-resized code-cell heights outside the component so the
+// height survives temporary NotebookEditor unmounts while switching files.
+const NOTEBOOK_CELL_EDITOR_HEIGHTS = new Map<string, number>()
+const NOTEBOOK_CELL_EDITOR_MIN_HEIGHT = 92
+const NOTEBOOK_CELL_EDITOR_MAX_HEIGHT = 2400
+
+function notebookCellEditorHeightKey(scrollKey: string, cellIndex: number): string {
+  return `${scrollKey}::${cellIndex}`
+}
 
 function notebookScrollKey(projectRoot?: string, filePath?: string): string {
   const path = String(filePath || '').trim().replace(/\\/g, '/')
@@ -355,6 +365,44 @@ export function NotebookEditor({
   useEffect(() => {
     scrollKeyRef.current = scrollKey
   }, [scrollKey])
+
+  const beginCellEditorResize = (index: number, event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const handle = event.currentTarget
+    const container = handle.parentElement as HTMLDivElement | null
+    if (!container) return
+
+    const startY = event.clientY
+    const startHeight = container.getBoundingClientRect().height
+    const heightKey = notebookCellEditorHeightKey(scrollKey, index)
+    const maxHeight = Math.min(
+      NOTEBOOK_CELL_EDITOR_MAX_HEIGHT,
+      Math.max(900, Math.round(window.innerHeight * 2.5)),
+    )
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const nextHeight = Math.min(
+        maxHeight,
+        Math.max(NOTEBOOK_CELL_EDITOR_MIN_HEIGHT, startHeight + (moveEvent.clientY - startY)),
+      )
+      const roundedHeight = Math.round(nextHeight)
+      container.style.height = `${roundedHeight}px`
+      NOTEBOOK_CELL_EDITOR_HEIGHTS.set(heightKey, roundedHeight)
+    }
+
+    const finishResize = () => {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', finishResize)
+      window.removeEventListener('pointercancel', finishResize)
+      document.body.classList.remove('notebook-cell-resizing')
+    }
+
+    document.body.classList.add('notebook-cell-resizing')
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', finishResize)
+    window.addEventListener('pointercancel', finishResize)
+  }
 
   useEffect(() => {
     const hasRunningCell = Object.values(runningCells).some(Boolean)
@@ -1332,7 +1380,12 @@ export function NotebookEditor({
         const executionStartedAt = Number(executionStartedAtRef.current[index] || executionHeartbeatAt)
         const executionElapsed = formatNotebookExecutionElapsed(executionHeartbeatAt - executionStartedAt)
         const lineCount = Math.max(1, source.replace(/\r\n|\r/g, '\n').split('\n').length)
-        const editorHeight = Math.min(520, Math.max(92, lineCount * 20 + 30))
+        const autoEditorHeight = Math.min(520, Math.max(NOTEBOOK_CELL_EDITOR_MIN_HEIGHT, lineCount * 20 + 30))
+        const storedEditorHeight = NOTEBOOK_CELL_EDITOR_HEIGHTS.get(notebookCellEditorHeightKey(scrollKey, index))
+        const editorHeight = Math.min(
+          NOTEBOOK_CELL_EDITOR_MAX_HEIGHT,
+          Math.max(NOTEBOOK_CELL_EDITOR_MIN_HEIGHT, storedEditorHeight ?? autoEditorHeight),
+        )
 
         return <section
           key={cell?.id || `cell-${index}`}
@@ -1386,8 +1439,12 @@ export function NotebookEditor({
             </div>}
 
             {cellType === 'code'
-              ? <Editor
-                  height={`${editorHeight}px`}
+              ? <div
+                  className="notebook-code-editor-resizable"
+                  style={{ height: `${editorHeight}px` }}
+                >
+                  <Editor
+                    height="100%"
                   path={`${getEditorModelPath(projectRoot, filePath)}?cell=${index}`}
                   language="python"
                   defaultValue={source}
@@ -1514,7 +1571,25 @@ export function NotebookEditor({
                       alwaysConsumeMouseWheel: false,
                     },
                   }}
-                />
+                  />
+                  <div
+                    className="notebook-code-editor-resize-handle"
+                    role="separator"
+                    aria-orientation="horizontal"
+                    aria-label="코드 셀 높이 조절"
+                    title="위/아래로 드래그해 코드 셀 높이를 조절합니다. 더블클릭하면 자동 높이로 돌아갑니다."
+                    onPointerDown={(event: React.PointerEvent<HTMLDivElement>) => beginCellEditorResize(index, event)}
+                    onDoubleClick={(event: React.MouseEvent<HTMLDivElement>) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      NOTEBOOK_CELL_EDITOR_HEIGHTS.delete(notebookCellEditorHeightKey(scrollKey, index))
+                      const container = event.currentTarget.parentElement as HTMLDivElement | null
+                      if (container) container.style.height = `${autoEditorHeight}px`
+                    }}
+                  >
+                    <span />
+                  </div>
+                </div>
               : cellType === 'markdown'
                 ? (editingMarkdown[index]
                     ? <Editor

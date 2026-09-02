@@ -1,0 +1,49 @@
+/* v5.485 Notebook code-cell vertical resize handle */
+.notebook-code-editor-resizable {
+  position: relative;
+  width: 100%;
+  min-height: 92px;
+  max-height: 2400px;
+  overflow: hidden;
+}
+
+.notebook-code-editor-resize-handle {
+  position: absolute;
+  z-index: 8;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 10px;
+  cursor: ns-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(to bottom, transparent 0%, rgba(70, 108, 137, 0.16) 100%);
+  touch-action: none;
+  user-select: none;
+}
+
+.notebook-code-editor-resize-handle span {
+  width: 56px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(139, 180, 211, 0.42);
+  box-shadow: 0 0 0 1px rgba(10, 22, 32, 0.55);
+  pointer-events: none;
+}
+
+.notebook-code-editor-resize-handle:hover,
+.notebook-code-editor-resize-handle:active {
+  background: rgba(44, 126, 180, 0.18);
+}
+
+.notebook-code-editor-resize-handle:hover span,
+.notebook-code-editor-resize-handle:active span {
+  background: rgba(156, 211, 246, 0.82);
+}
+
+body.notebook-cell-resizing,
+body.notebook-cell-resizing * {
+  cursor: ns-resize !important;
+  user-select: none !important;
+}
