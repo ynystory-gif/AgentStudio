@@ -20,11 +20,22 @@ jobs:
       - name: Apply v5.494 source patch
         shell: bash
         run: |
+          cat .github/scripts/v5494_patch.part* > /tmp/v5494_source.patch.gz.b64
           python - <<'PY'
-          import base64, gzip
+          import base64, gzip, hashlib
           from pathlib import Path
-          encoded = Path('.github/scripts/v5494_source.patch.gz.b64').read_text(encoding='utf-8').strip()
-          Path('/tmp/v5494_source.patch').write_bytes(gzip.decompress(base64.b64decode(encoded)))
+          encoded = Path('/tmp/v5494_source.patch.gz.b64').read_text(encoding='utf-8').strip()
+          expected_encoded = 'bf4a6386ace585b6aeed65f141418a7569b417689395f92ce8ea8458e70abf50'
+          actual_encoded = hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+          if actual_encoded != expected_encoded:
+              raise AssertionError(f'encoded patch checksum mismatch: {actual_encoded}')
+          raw = gzip.decompress(base64.b64decode(encoded))
+          expected_raw = '4553c6e052232ae152a2daf78a21c2d2f0a0ff23aca19b0d75222eacf094e331'
+          actual_raw = hashlib.sha256(raw).hexdigest()
+          if actual_raw != expected_raw:
+              raise AssertionError(f'raw patch checksum mismatch: {actual_raw}')
+          Path('/tmp/v5494_source.patch').write_bytes(raw)
+          print('v5.494 patch checksum PASS')
           PY
           git apply --check /tmp/v5494_source.patch
           git apply /tmp/v5494_source.patch
