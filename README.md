@@ -79,3 +79,9 @@
 
 ## v5.493 Runtime Path Policy
 Temp/Cache/Output 기본 경로를 실제 런타임과 다운로드 저장 경로에 연결했습니다.
+
+## v5.494 Active Ollama Model Resolver
+- Ollama 요청 모델의 Source of Truth를 `active_ollama_model_service` 하나로 통합했습니다.
+- 현재 PC에 `theanova-learn:latest`가 적용되어 있으면 모든 일반 Ollama 요청/요청 JSON/상태 표시가 해당 모델을 사용합니다.
+- 학습 파생 모델이 없을 때는 `qwen3.5:4b`, 이후에만 설치된 유효 Chat 모델로 fallback하며 `qwen2.5:*` 레거시 기본값은 제거했습니다.
+- Backend 시작 시 DB 학습 적용 상태, `backend/.env`, 프로세스 `OLLAMA_MODEL`을 동기화해 상단 표시와 실제 `ChatOllama` 호출의 불일치를 방지합니다.

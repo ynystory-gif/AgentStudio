@@ -875,6 +875,16 @@ async def update_settings(
             db_error = str(exc)
             _mark_pending_settings(set(db_values.keys()))
 
+    # v5.494: a manually saved/stale Ollama model value must not diverge from
+    # the model actually used by AgentStudio requests. Re-resolve after DB commit.
+    active_ollama_sync = {}
+    if "OLLAMA_MODEL" in db_values:
+        try:
+            from app.services.active_ollama_model_service import sync_active_ollama_model
+            active_ollama_sync = await sync_active_ollama_model()
+        except Exception as exc:
+            active_ollama_sync = {"ok": False, "error": str(exc) or type(exc).__name__}
+
     restart_required = any(
         key in bootstrap_values
         for key in ("LANGGRAPH_DATABASE_URL", "AGENTSTUDIO_BACKEND_PORT", "AGENTSTUDIO_FRONTEND_PORT")
@@ -912,6 +922,7 @@ async def update_settings(
         "database_rebind_error": database_rebind_error,
         "saved_bootstrap": saved_bootstrap,
         "restart_required": restart_required,
+        "active_ollama_sync": active_ollama_sync,
         "message": message,
         "settings": await get_editable_settings(),
     }

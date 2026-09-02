@@ -33,7 +33,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.493'
+const AGENTSTUDIO_FRONTEND_VERSION='5.494'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_AGENT_CODING_STYLE={

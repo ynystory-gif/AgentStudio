@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
 
     ollama_base_url: str = "http://127.0.0.1:11434"
-    ollama_model: str = "qwen2.5:7b"
+    ollama_model: str = "qwen3.5:4b"
     ollama_embedding_model: str = "nomic-embed-text"
     ollama_auto_start: bool = True
 

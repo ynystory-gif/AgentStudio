@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from app.core.config import get_settings
 from app.services.codex_app_server_service import codex_app_server_manager
 from app.services.llm_provider import get_chat_model
+from app.services.active_ollama_model_service import current_runtime_ollama_model
 from app.services.llm_usage_service import UsageTrackedChatModel, current_usage_context
 
 
@@ -185,7 +186,7 @@ class AdaptiveTaskChatModel:
             s = get_settings()
             provider = self.candidates[0]
             if provider == "ollama":
-                return s.ollama_model
+                return current_runtime_ollama_model()
             if provider == "openai":
                 return s.openai_model
             return "codex"

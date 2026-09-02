@@ -272,6 +272,11 @@ async def persist_current_ollama_model(model_name: str, common_root: str = "") -
     get_settings.cache_clear()
     _MODEL_STATUS_CACHE = {}
     _MODEL_STATUS_CACHE_AT = 0.0
+    try:
+        from app.services.active_ollama_model_service import invalidate_active_ollama_model_cache
+        invalidate_active_ollama_model_cache()
+    except Exception:
+        pass
 
 
 async def _run_download_job(job_id: str, status: dict) -> None:

@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import func, select
 
 from app.core.config import get_settings
+from app.services.active_ollama_model_service import BASE_MODEL_NAME, resolve_active_ollama_model
 from app.core.database import SessionLocal
 from app.core.machine_identity import current_pc_name
 from app.models.learning_entities import LlmLearningDataset, LlmLearningProblem, LlmMisjudgmentCase
@@ -637,8 +638,8 @@ async def prepare_training(dataset_id: str, base_model: str = "") -> dict:
             with (out / f"{name}.jsonl").open("w", encoding="utf-8") as handle:
                 for item in rows:
                     handle.write(json.dumps({"instruction": item["instruction"], "input": item.get("input", ""), "output": item["output"]}, ensure_ascii=False) + "\n")
-        selected_base = str(base_model or settings.ollama_model or "qwen2.5:7b")
-        hf_base = {"qwen2.5:7b": "Qwen/Qwen2.5-7B-Instruct", "qwen2.5:3b": "Qwen/Qwen2.5-3B-Instruct", "qwen2.5:1.5b": "Qwen/Qwen2.5-1.5B-Instruct"}.get(selected_base.lower(), selected_base)
+        selected_base = str(base_model or BASE_MODEL_NAME)
+        hf_base = {BASE_MODEL_NAME.casefold(): "Qwen/Qwen3.5-4B"}.get(selected_base.casefold(), selected_base)
         manifest = {
             "dataset_id": dataset_id,
             "prepared_by_pc_name": current_pc_name(),
@@ -700,7 +701,7 @@ async def apply_to_ollama(dataset_id: str, model_name: str, adapter_path: str = 
         adapter = Path(adapter_path or training.get("adapter_dir") or "")
         if not adapter.exists():
             raise ValueError("학습 Adapter 경로가 이 PC에 존재하지 않습니다. Dataset은 공용이지만 학습 산출물은 PC 로컬 파일입니다.")
-        base_model = str(training.get("ollama_base_model") or get_settings().ollama_model)
+        base_model = str(training.get("ollama_base_model") or BASE_MODEL_NAME)
         deployment = await asyncio.to_thread(_apply_ollama_local, base_model, adapter, model_name, dataset_id)
         dataset.status = "deployed"
         dataset.deployment_json = deployment
@@ -720,11 +721,12 @@ async def learning_summary() -> dict:
         for status in _ALLOWED_DATASET_STATUS:
             dataset_counts[status] = int((await session.execute(select(func.count()).select_from(LlmLearningDataset).where(LlmLearningDataset.status == status))).scalar() or 0)
     settings = get_settings()
+    active_ollama = await resolve_active_ollama_model()
     return {
         "ok": True,
         "cases": case_counts,
         "datasets": dataset_counts,
-        "current_ollama_model": settings.ollama_model,
+        "current_ollama_model": str(active_ollama.get("active_model") or BASE_MODEL_NAME),
         "current_strategy": settings.ai_provider_strategy,
         "storage": "runtime_db_shared",
         "shared_across_pcs": True,

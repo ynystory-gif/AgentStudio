@@ -1,5 +1,6 @@
 import os
 from app.core.config import get_settings
+from app.services.active_ollama_model_service import current_runtime_ollama_model
 
 def configure_langsmith():
     s = get_settings()
@@ -24,13 +25,8 @@ def get_chat_model(provider: str | None = None):
 
     if provider == "ollama":
         from langchain_ollama import ChatOllama
-        # The active PC model can be changed at runtime (for example qwen2.5:7b ->
-        # qwen3.5:4b). Environment state is updated immediately by the model manager,
-        # while the Settings object can still contain its bootstrap value. Always use
-        # the runtime value first so learning/problem generation never calls a removed
-        # previous model and returns Ollama 404.
-        runtime_model = str(os.environ.get("OLLAMA_MODEL") or "").strip()
-        model_name = runtime_model or str(s.ollama_model or "").strip()
+        # v5.494: all Ollama calls use the same active-model resolver as status/catalog.
+        model_name = current_runtime_ollama_model()
         return ChatOllama(model=model_name, base_url=s.ollama_base_url, temperature=0)
 
     raise ValueError(f"지원하지 않는 LLM Provider입니다: {provider}")

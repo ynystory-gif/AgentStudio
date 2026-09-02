@@ -45,6 +45,7 @@ from app.services.settings_service import migrate_env_settings_to_db, load_db_se
 from app.core.machine_identity import ensure_pc_name_env, current_pc_name
 from app.services.project_root_registry import restore_registered_project_roots
 from app.services.llm_usage_service import prune_llm_history
+from app.services.active_ollama_model_service import sync_active_ollama_model
 from app.services.llm_learning_service import sync_misjudgment_candidates
 from app.services.learning_visibility_bridge import backfill_current_pc_learning_group_mappings
 from app.services.learning_relational_schema_service import ensure_learning_relational_schema
@@ -72,6 +73,11 @@ async def lifespan(app: FastAPI):
         print(f"[완료되었습니다] Runtime 경로 적용: Temp={runtime_paths.get('temp_root', '')} · Cache={runtime_paths.get('cache_root', '')} · Output={runtime_paths.get('output_root', '')}")
         runtime_db = await apply_saved_database_provider()
         runtime_metadata = await ensure_runtime_metadata_tables()
+        active_ollama = await sync_active_ollama_model()
+        print(
+            "[완료되었습니다] Active Ollama 모델 동기화: "
+            f"{active_ollama.get('active_model', '')} · reason={active_ollama.get('reason', '')}"
+        )
         print("[완료되었습니다] PostgreSQL/pgvector 초기화")
         print(f"[완료되었습니다] Runtime ORM 테이블 확인: {runtime_metadata.get('table_count', 0)}개 · schema={runtime_metadata.get('schema', '')}")
         print(f"[완료되었습니다] Runtime DB: {runtime_db.get('active_provider', 'local')} · {runtime_db.get('target', '')}")
@@ -141,7 +147,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.493", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.494", lifespan=lifespan)
 
 _PUBLIC_API_PATHS = {
     "/api/health",

@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import os
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.core.config import get_settings
 from app.services.learning_collection_service import get_problem_collection_job, start_problem_collection_job
 from app.services.learning_failure_log_service import attach_failure_log
 from app.services.learning_teacher_router import learning_teacher_priority
-from app.services.ollama_model_manager_service import get_recommended_model_status
+from app.services.active_ollama_model_service import sync_active_ollama_model
 
 router = APIRouter(prefix="/learning", tags=["LLM Learning Diagnostics"])
 
@@ -23,12 +20,8 @@ class ProblemCollectionStartRequest(BaseModel):
 
 
 async def _sync_active_ollama_model() -> str:
-    status = await get_recommended_model_status()
-    current_model = str(status.get("current_model") or "").strip()
-    if current_model:
-        os.environ["OLLAMA_MODEL"] = current_model
-        get_settings.cache_clear()
-    return current_model
+    resolved = await sync_active_ollama_model()
+    return str(resolved.get("active_model") or "")
 
 
 @router.get("/teacher-policy")
