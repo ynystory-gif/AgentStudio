@@ -23,6 +23,24 @@ RULES = [
 
 def analyze_tool(name: str, description: str = "") -> ToolAnalysis:
     text = f"{name} {description}".lower()
+
+    # v5.437: Blender MCP is a first-class 3D Tool category.  Do this before the
+    # generic FILE/WEB/MCP rules because names such as render_scene/add_mesh do
+    # not necessarily contain the literal word "mcp". Script/Python execution
+    # remains high-risk even when it belongs to the Blender server.
+    blender_strong_signals = (
+        "blender", "mesh", "viewport", "render_scene", "geometry node",
+        "add cube", "add object", "scene object", "keyframe", "timeline",
+        "bpy.", "blend file", "gltf", "glb export", "fbx export",
+    )
+    if any(token in text for token in blender_strong_signals):
+        destructive = any(token in text for token in ("delete", "remove", "purge"))
+        script_exec = any(token in text for token in ("python", "script", "exec", "execute code"))
+        risk = 4 if script_exec else 3 if destructive else 1
+        subcategory = "SCRIPT_EXECUTION" if script_exec else "SCENE_MUTATION" if destructive else "SCENE_TOOL"
+        capability = "blender_script_execute" if script_exec else "blender_scene_control"
+        return ToolAnalysis("3D", subcategory, capability, risk, risk >= 3)
+
     for keywords, category, subcategory, capability, risk in RULES:
         if any(k in text for k in keywords):
             return ToolAnalysis(category, subcategory, capability, risk, risk >= 3)

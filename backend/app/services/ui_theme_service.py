@@ -208,7 +208,23 @@ def _declaration_map(body: str) -> dict:
         elif name == "box-shadow":
             result["boxShadow"] = raw[:180]
         elif name == "transition":
-            result["transition"] = raw[:180]
+            result["transition"] = raw[:220]
+        elif name == "transition-property":
+            result["transitionProperty"] = raw[:120]
+        elif name == "transition-duration":
+            result["transitionDuration"] = raw[:80]
+        elif name == "transition-timing-function":
+            result["transitionTimingFunction"] = raw[:120]
+        elif name == "transition-delay":
+            result["transitionDelay"] = raw[:80]
+        elif name == "animation":
+            result["animation"] = raw[:220]
+        elif name == "animation-duration":
+            result["animationDuration"] = raw[:80]
+        elif name == "animation-timing-function":
+            result["animationTimingFunction"] = raw[:120]
+        elif name == "filter":
+            result["filter"] = raw[:140]
         elif name == "transform":
             result["transform"] = raw[:120]
         elif name == "opacity":
@@ -229,6 +245,20 @@ def _declaration_map(body: str) -> dict:
             result["padding"] = raw[:100]
         elif name == "outline":
             result["outline"] = raw[:120]
+        elif name in {"border-top", "border-right", "border-bottom", "border-left"}:
+            result[{"border-top":"borderTop","border-right":"borderRight","border-bottom":"borderBottom","border-left":"borderLeft"}[name]] = raw[:140]
+        elif name == "letter-spacing":
+            result["letterSpacing"] = raw[:60]
+    if "transition" not in result and result.get("transitionDuration"):
+        prop=str(result.get("transitionProperty") or "all")
+        duration=str(result.get("transitionDuration") or "")
+        timing=str(result.get("transitionTimingFunction") or "ease")
+        delay=str(result.get("transitionDelay") or "")
+        result["transition"]=" ".join(part for part in (prop,duration,timing,delay) if part)[:220]
+    if "animation" not in result and result.get("animationDuration"):
+        duration=str(result.get("animationDuration") or "")
+        timing=str(result.get("animationTimingFunction") or "ease")
+        result["motionTransition"]=" ".join(part for part in ("all",duration,timing) if part)[:180]
     return result
 
 
@@ -469,12 +499,36 @@ def merge_theme_analyses(analyses: list[dict]) -> dict:
     if menu_candidates:
         menu = components.get("menu") or {}
         if url_rows:
-            # URL CSS selectors are the strongest source for hover/active semantics.
-            candidate = menu_candidates[0]
+            # v5.435: static CSS and live Chrome hover probes are both authoritative URL
+            # evidence. Pick the strongest evidence per state instead of blindly using
+            # the first URL row, otherwise SPA runtime animation/transform data is lost.
+            selected_sources=[]
             for state in ("normal", "hover", "active"):
-                if isinstance(candidate.get(state), dict):
-                    menu[state] = {**(menu.get(state) or {}), **candidate[state]}
-            menu["source"] = candidate.get("source") or "CSS_SELECTOR_ANALYSIS"
+                ranked=[]
+                for row in url_rows:
+                    candidate=(row.get("component_rules") or {}).get("menu")
+                    if not isinstance(candidate,dict) or not isinstance(candidate.get(state),dict):
+                        continue
+                    evidence=((row.get("component_rules") or {}).get("_evidence") or {}).get(f"menu.{state}") or {}
+                    source=str(evidence.get("source") or candidate.get("source") or "")
+                    confidence=float(evidence.get("confidence") or 0.0)
+                    source_rank=4 if "INTERACTION_PROBE" in source else 3 if "CSS_SELECTOR" in source else 2 if "ACTIVE_STATE" in source else 1 if "COMPUTED_STYLE" in source else 0
+                    confirmed=1 if str(evidence.get("status") or "").lower()=="confirmed" else 0
+                    ranked.append(((confirmed,confidence,source_rank),candidate.get(state),source))
+                if ranked:
+                    ranked.sort(key=lambda item:item[0],reverse=True)
+                    _,state_rule,state_source=ranked[0]
+                    menu[state] = {**(menu.get(state) or {}), **dict(state_rule or {})}
+                    if state_source:
+                        selected_sources.append(state_source)
+            if selected_sources:
+                menu["source"] = "MULTI_SOURCE_INTERACTION_ANALYSIS" if len(set(selected_sources))>1 else selected_sources[0]
+            else:
+                candidate=menu_candidates[0]
+                for state in ("normal", "hover", "active"):
+                    if isinstance(candidate.get(state),dict):
+                        menu[state]={**(menu.get(state) or {}),**candidate[state]}
+                menu["source"]=candidate.get("source") or "CSS_SELECTOR_ANALYSIS"
         else:
             # For 1~3 screenshots, use consensus across the inferred menu regions/states.
             for state in ("normal", "hover", "active"):

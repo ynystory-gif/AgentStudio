@@ -3,7 +3,7 @@ import Editor, { DiffEditor } from '@monaco-editor/react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { api, connectJobs, runtimeInfo } from './api'
+import { api, apiFetch, connectJobs, runtimeInfo } from './api'
 import { NotebookEditor } from './components/notebook/NotebookEditor'
 import { PdfViewer, PresentationViewer } from './components/viewers/DocumentViewers'
 import { MiniBadge, SectionTitle, StatusDot, StudioIcon } from './components/common/CommonUi'
@@ -16,19 +16,705 @@ import { DatabaseErdPanel } from './components/database/DatabaseErdPanel'
 import { SqlResultsPane } from './components/database/SqlResultsPane'
 import { TerminalPanel } from './components/terminal/TerminalPanel'
 import { GpuSettingsPanel, OllamaSettingsPanel, RuntimeDatabasePanel, ServicePortSettingsPanel, SystemStatusSummary } from './components/system/SystemRuntimePanels'
+import { SchedulerPanel } from './components/system/SchedulerPanel'
 import { WebBrowserWorkspace } from './components/browser/WebBrowserWorkspace'
 import { CodexPanel } from './components/codex/CodexPanel'
 import { CodexSettingsPanel } from './components/codex/CodexSettingsPanel'
+import { ProjectMemoPanel } from './components/memo/ProjectMemoPanel'
+import { useMediaSession } from './components/media/MediaSessionProvider'
+import { TemporaryMediaViewer } from './components/media/TemporaryMediaViewer'
 import { AiAttachmentPicker } from './components/ai/AiAttachmentPicker'
 import { AgentActivityProgress } from './components/ai/AgentActivityProgress'
 import { AgentDesignProjectToolbar, AgentFeatureManager } from './components/ai/AgentDesignProjectManager'
 import { parseTerminalServerMessage, serializeTerminalClientMessage, terminalCellWidth, terminalNextCharacter, terminalPreviousCharacter } from './utils/terminal'
-import { getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isDatabaseDiagramFile, isNotebookFile, isPdfFile, isPresentationFile } from './utils/editor'
+import { CODE_EDITOR_PAIR_TYPING_OPTIONS, getEditorLanguage, getEditorModelPath, isBinaryPreviewFile, isDatabaseDiagramFile, isNotebookFile, isPdfFile, isPresentationFile, registerEscapedDoubleQuotePairGuard } from './utils/editor'
+import { registerCodeIntelligence } from './utils/codeIntelligence'
 import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSqlCode } from './utils/notebook'
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.412'
+const AGENTSTUDIO_FRONTEND_VERSION='5.483'
+const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
+
+const DEFAULT_AGENT_CODING_STYLE={
+  meaningful_names:true,
+  uppercase_constants:true,
+  snake_case_functions:true,
+  pascal_case_classes:true,
+  type_hints:true,
+  function_docstrings:true,
+  notebook_single_responsibility:true,
+  refactor_repetition:true,
+  labeled_outputs:true,
+  avoid_magic_numbers:true,
+}
+const normalizeAgentCodingStyle=(value={})=>{
+  const source=value&&typeof value==='object'?value:{}
+  return Object.fromEntries(
+    Object.entries(DEFAULT_AGENT_CODING_STYLE).map(([key,defaultValue])=>[
+      key,
+      source[key]===undefined?defaultValue:source[key]!==false
+    ])
+  )
+}
+const countEnabledAgentCodingStyle=(value={})=>Object.values(normalizeAgentCodingStyle(value)).filter(Boolean).length
+
+const AGENT_SPECIALIZATIONS=[
+  {
+    id:'GENERAL',
+    label:'일반 Agent',
+    icon:'◇',
+    description:'요구사항에 따라 RAG·DB·Browser·MCP·업무 Workflow를 자유롭게 설계합니다.'
+  },
+  {
+    id:'BLENDER_3D',
+    label:'3D 제작 Agent · Blender MCP',
+    icon:'◈',
+    description:'SceneSpec → Validator → LangGraph State → Blender MCP → Viewport QA → 수정 → Render/Export 구조를 기본 적용합니다.'
+  }
+]
+const agentSpecializationById=(id)=>AGENT_SPECIALIZATIONS.find(item=>item.id===id)||AGENT_SPECIALIZATIONS[0]
+
+const EMPTY_REQUIREMENT_RECOMMENDATION_SETTINGS={
+  features:[],
+  menus:[],
+  tools:[],
+  llm_tool_routing:{
+    enabled:true,
+    first_stage_id:'llm_intent_capability_classifier',
+    second_stage_id:'tool_registry_candidate_selector',
+    llm_only_when_ambiguous:true,
+  },
+  customized:false,
+}
+const normalizeRequirementRecommendationSettings=(value={})=>({
+  features:Array.isArray(value?.features)?[...new Set(value.features.map(String))]:[],
+  menus:Array.isArray(value?.menus)?[...new Set(value.menus.map(String))]:[],
+  tools:Array.isArray(value?.tools)?[...new Set(value.tools.map(String))]:[],
+  llm_tool_routing:{
+    enabled:value?.llm_tool_routing?.enabled!==false,
+    first_stage_id:String(value?.llm_tool_routing?.first_stage_id||'llm_intent_capability_classifier'),
+    second_stage_id:String(value?.llm_tool_routing?.second_stage_id||'tool_registry_candidate_selector'),
+    llm_only_when_ambiguous:value?.llm_tool_routing?.llm_only_when_ambiguous!==false,
+  },
+  customized:value?.customized===true,
+})
+
+function RequirementRecommendationPanel({recommendations,settings,onToggle,onRoutingChange,onApplyDefaults}){
+  const bundle=recommendations&&typeof recommendations==='object'?recommendations:{}
+  const normalized=normalizeRequirementRecommendationSettings(settings||{})
+  const features=Array.isArray(bundle.features)?bundle.features:[]
+  const menus=Array.isArray(bundle.menus)?bundle.menus:[]
+  const tools=Array.isArray(bundle.tools)?bundle.tools:[]
+  const routing=bundle.llm_tool_routing||{}
+  const hasAny=features.length||menus.length||tools.length||routing?.enabled
+  if(!hasAny) return <div className="requirement-recommendation-card empty">
+    <div className="requirement-recommendation-head"><div><strong>AI 추천 구성</strong><small>요구사항을 입력하면 추천 기능·메뉴·Tool과 2단계 Tool 분류 설정을 자동 제시합니다.</small></div></div>
+  </div>
+  const renderRows=(kind,rows)=>rows.map(item=>{
+    const selected=(normalized[kind]||[]).includes(String(item.id||''))
+    return <label className={`requirement-recommendation-row ${selected?'selected':''}`} key={`${kind}-${item.id}`}>
+      <input type="checkbox" checked={selected} onChange={event=>onToggle(kind,String(item.id||''),event.target.checked)}/>
+      <span>
+        <strong>{item.label||item.id}</strong>
+        <small>{item.reason||''}</small>
+      </span>
+      {kind==='tools'&&<em className={item.registered?'registered':'planned'}>
+        {item.registered?`Registry · ${item.category||'Tool'}`:'추천 Capability · 미등록'}
+        {Number(item.risk_level||0)>0?` · Risk ${item.risk_level}`:''}
+      </em>}
+      {kind!=='tools'&&<em>추천</em>}
+    </label>
+  })
+  const first=routing?.first_stage||{}
+  const second=routing?.second_stage||{}
+  return <div className="requirement-recommendation-card">
+    <div className="requirement-recommendation-head">
+      <div><strong>AI 추천 구성</strong><small>추천 항목은 기본 적용되며 체크를 해제하면 최종 Workflow/코드 생성에서 제외합니다.</small></div>
+      <button type="button" onClick={onApplyDefaults}>추천값 다시 적용</button>
+    </div>
+    <div className="requirement-recommendation-section">
+      <div className="requirement-recommendation-title"><strong>추천 기능</strong><span>{normalized.features.length}/{features.length} 설정</span></div>
+      <div className="requirement-recommendation-list">{renderRows('features',features)}</div>
+    </div>
+    <div className="requirement-recommendation-section">
+      <div className="requirement-recommendation-title"><strong>추천 메뉴</strong><span>{normalized.menus.length}/{menus.length} 설정</span></div>
+      <div className="requirement-recommendation-list">{renderRows('menus',menus)}</div>
+    </div>
+    <div className="requirement-recommendation-section">
+      <div className="requirement-recommendation-title"><strong>추천 Tool</strong><span>{normalized.tools.length}/{tools.length} 설정</span></div>
+      <div className="requirement-recommendation-list">{renderRows('tools',tools)}</div>
+    </div>
+    <div className="requirement-tool-routing-card">
+      <div className="requirement-recommendation-title"><strong>LLM Tool 2단계 분류</strong><span>{normalized.llm_tool_routing.enabled?'사용':'미사용'}</span></div>
+      <label className="requirement-routing-toggle"><input type="checkbox" checked={normalized.llm_tool_routing.enabled} onChange={event=>onRoutingChange('enabled',event.target.checked)}/> LLM Tool 분류 사용</label>
+      <div className="requirement-routing-grid">
+        <label>
+          <span>1차 분류 Tool</span>
+          <select value={normalized.llm_tool_routing.first_stage_id} onChange={event=>onRoutingChange('first_stage_id',event.target.value)} disabled={!normalized.llm_tool_routing.enabled}>
+            <option value="llm_intent_capability_classifier">{first.label||'1차 분류 · Intent / Capability Router'} (추천)</option>
+            <option value="deterministic_capability_router">Deterministic Capability Router</option>
+          </select>
+          <small>{first.purpose||'요청을 Tool 카테고리/Capability로 먼저 분류합니다.'}</small>
+          {first.llm_condition&&<em>LLM 조건: {first.llm_condition}</em>}
+        </label>
+        <label>
+          <span>2차 분류 Tool</span>
+          <select value={normalized.llm_tool_routing.second_stage_id} onChange={event=>onRoutingChange('second_stage_id',event.target.value)} disabled={!normalized.llm_tool_routing.enabled}>
+            <option value="tool_registry_candidate_selector">{second.label||'2차 분류 · Tool Registry Candidate Selector'} (추천)</option>
+            <option value="highest_validated_registry_score">Validated Registry Score Selector</option>
+          </select>
+          <small>{second.purpose||'후보 Tool의 schema/capability/risk/권한을 비교해 실제 Tool을 선택합니다.'}</small>
+          {second.llm_condition&&<em>LLM 조건: {second.llm_condition}</em>}
+        </label>
+      </div>
+      <label className="requirement-routing-toggle"><input type="checkbox" checked={normalized.llm_tool_routing.llm_only_when_ambiguous} onChange={event=>onRoutingChange('llm_only_when_ambiguous',event.target.checked)} disabled={!normalized.llm_tool_routing.enabled}/> 애매한 경우에만 LLM 분류 사용</label>
+      <p>1차는 카테고리/Capability를 좁히고, 2차는 실제 Tool Registry 후보를 검증해 선택합니다. 비활성 Tool과 권한/위험 정책을 우회하지 않습니다.</p>
+    </div>
+  </div>
+}
+
+function DevelopmentStageRecommendationPanel({plan,busy=false,onRecommend,onApprove,onChangePlan}){
+  const value=plan&&typeof plan==='object'?plan:null
+  const stages=Array.isArray(value?.stages)?value.stages:[]
+  const approved=value?.approved===true
+  const [editing,setEditing]=useState(false)
+  const [draftStages,setDraftStages]=useState([])
+
+  useEffect(()=>{
+    if(editing) return
+    setDraftStages(stages.map((stage,index)=>({
+      ...stage,
+      order:index+1,
+      requirement_topics:Array.isArray(stage?.requirement_topics)?stage.requirement_topics:[],
+      deliverables:Array.isArray(stage?.deliverables)?stage.deliverables:[],
+      validation:Array.isArray(stage?.validation)?stage.validation:[],
+      depends_on:Array.isArray(stage?.depends_on)?stage.depends_on:[],
+    })))
+  },[plan,editing])
+
+  const beginEdit=()=>{
+    setDraftStages(stages.map((stage,index)=>({
+      ...stage,
+      order:index+1,
+      requirement_topics:Array.isArray(stage?.requirement_topics)?stage.requirement_topics:[],
+      deliverables:Array.isArray(stage?.deliverables)?stage.deliverables:[],
+      validation:Array.isArray(stage?.validation)?stage.validation:[],
+      depends_on:Array.isArray(stage?.depends_on)?stage.depends_on:[],
+    })))
+    setEditing(true)
+  }
+  const patchDraft=(index,patch)=>setDraftStages(prev=>prev.map((stage,i)=>i===index?{...stage,...patch}:stage))
+  const moveDraft=(index,direction)=>setDraftStages(prev=>{
+    const next=[...prev]
+    const target=index+direction
+    if(target<0||target>=next.length) return prev
+    ;[next[index],next[target]]=[next[target],next[index]]
+    return next
+  })
+  const removeDraft=(index)=>setDraftStages(prev=>prev.filter((_stage,i)=>i!==index))
+  const addDraft=()=>setDraftStages(prev=>{
+    if(prev.length>=8) return prev
+    const nextIndex=prev.length+1
+    return [...prev,{
+      id:`CUSTOM_STAGE_${Date.now()}_${nextIndex}`,
+      order:nextIndex,
+      title:`새 개발 Stage ${nextIndex}`,
+      goal:'이 단계에서 완성할 목표를 입력하세요.',
+      requirement_topics:[],
+      deliverables:[],
+      validation:['Stage 완료 조건을 입력하세요.'],
+      depends_on:[],
+      status:'RECOMMENDED',
+    }]
+  })
+  const saveDraft=()=>{
+    const validDraftStages=draftStages
+      .filter(stage=>String(stage?.title||'').trim())
+      .slice(0,8)
+    const cleaned=validDraftStages
+      .map((stage,index)=>{
+        const previous=index>0?validDraftStages[index-1]:null
+        return {
+          ...stage,
+          order:index+1,
+          title:String(stage?.title||`Stage ${index+1}`).trim(),
+          goal:String(stage?.goal||'').trim(),
+          requirement_topics:Array.isArray(stage?.requirement_topics)?stage.requirement_topics.filter(Boolean):[],
+          deliverables:Array.isArray(stage?.deliverables)?stage.deliverables.filter(Boolean):[],
+          validation:Array.isArray(stage?.validation)?stage.validation.filter(Boolean):[],
+          depends_on:index>0&&previous?.id?[String(previous.id)]:[],
+          status:'RECOMMENDED',
+        }
+      })
+    if(!cleaned.length) return
+    onChangePlan?.({
+      ...(value||{}),
+      source:'USER_EDITED_DEVELOPMENT_STAGE_PLAN',
+      status:'RECOMMENDED',
+      approved:false,
+      approved_at:'',
+      approval_required:true,
+      recommended_stage_count:cleaned.length,
+      stages:cleaned,
+    })
+    setEditing(false)
+  }
+
+  if(!value||!stages.length){
+    return <div className="development-stage-plan-card empty">
+      <div className="development-stage-plan-head">
+        <div><strong>개발 Stage 추천</strong><small>요구사항 규모를 분석해 한 번에 만들지 않고 몇 단계로 나눌지 자동 추천합니다.</small></div>
+        <button type="button" onClick={onRecommend} disabled={busy}>{busy?'분석 중...':'추천 단계 만들기'}</button>
+      </div>
+    </div>
+  }
+  return <div className={`development-stage-plan-card ${approved?'approved':'recommended'} ${editing?'editing':''}`}>
+    <div className="development-stage-plan-head">
+      <div>
+        <strong>개발 Stage 추천 · {stages.length}단계</strong>
+        <small>{value.reason||'기능 의존성과 테스트 경계를 기준으로 개발 단계를 추천했습니다.'}</small>
+      </div>
+      <span className={`development-stage-status ${approved?'approved':'pending'}`}>{approved?'✓ 승인됨':'승인 필요'}</span>
+    </div>
+    <div className="development-stage-summary">
+      <span>복잡도 <b>{value?.complexity?.level||'-'}</b></span>
+      <span>점수 <b>{value?.complexity?.score??'-'}</b></span>
+      <span>추천 <b>{stages.length} Stage</b></span>
+      {value?.source==='USER_EDITED_DEVELOPMENT_STAGE_PLAN'&&<span>사용자 수정 <b>적용</b></span>}
+    </div>
+
+    {!editing&&<div className="development-stage-list">
+      {stages.map((stage,index)=><div className="development-stage-row" key={stage.id||index}>
+        <div className="development-stage-order">{index+1}</div>
+        <div className="development-stage-copy">
+          <strong>{stage.title||`Stage ${index+1}`}</strong>
+          <small>{stage.goal||''}</small>
+          {Array.isArray(stage.deliverables)&&stage.deliverables.length>0&&<em>산출물: {stage.deliverables.slice(0,3).join(' · ')}</em>}
+          {Array.isArray(stage.validation)&&stage.validation.length>0&&<em>완료 조건: {stage.validation.slice(0,3).join(' · ')}</em>}
+        </div>
+      </div>)}
+    </div>}
+
+    {editing&&<div className="development-stage-editor">
+      <div className="development-stage-editor-help">단계 이름·목표·포함 기능·산출물·완료 조건을 수정하고 순서를 변경할 수 있습니다. 저장하면 기존 승인은 해제되며 Workflow를 다시 승인해야 합니다.</div>
+      {draftStages.map((stage,index)=><article className="development-stage-edit-card" key={stage.id||index}>
+        <div className="development-stage-edit-head">
+          <span>{index+1}</span>
+          <input value={stage.title||''} onChange={event=>patchDraft(index,{title:event.target.value})} aria-label={`Stage ${index+1} 이름`}/>
+          <button type="button" onClick={()=>moveDraft(index,-1)} disabled={index===0}>↑</button>
+          <button type="button" onClick={()=>moveDraft(index,1)} disabled={index===draftStages.length-1}>↓</button>
+          <button type="button" className="danger" onClick={()=>removeDraft(index)} disabled={draftStages.length<=1}>삭제</button>
+        </div>
+        <label><span>목표</span><textarea value={stage.goal||''} onChange={event=>patchDraft(index,{goal:event.target.value})} rows={2}/></label>
+        <label><span>포함 기능 · 한 줄에 하나</span><textarea value={(stage.requirement_topics||[]).join('\n')} onChange={event=>patchDraft(index,{requirement_topics:event.target.value.split(/\r?\n/).map(v=>v.trim()).filter(Boolean)})} rows={3}/></label>
+        <label><span>산출물 · 한 줄에 하나</span><textarea value={(stage.deliverables||[]).join('\n')} onChange={event=>patchDraft(index,{deliverables:event.target.value.split(/\r?\n/).map(v=>v.trim()).filter(Boolean)})} rows={3}/></label>
+        <label><span>완료 / 테스트 조건 · 한 줄에 하나</span><textarea value={(stage.validation||[]).join('\n')} onChange={event=>patchDraft(index,{validation:event.target.value.split(/\r?\n/).map(v=>v.trim()).filter(Boolean)})} rows={3}/></label>
+      </article>)}
+      <button type="button" className="development-stage-add" onClick={addDraft} disabled={draftStages.length>=8}>＋ Stage 추가</button>
+      <div className="development-stage-edit-actions">
+        <button type="button" onClick={()=>setEditing(false)}>취소</button>
+        <button type="button" className="primary" onClick={saveDraft}>변경 저장</button>
+      </div>
+    </div>}
+
+    {!editing&&<div className="development-stage-actions">
+      <button type="button" onClick={onRecommend} disabled={busy}>{busy?'다시 계산 중...':'다시 추천'}</button>
+      <button type="button" onClick={beginEdit} disabled={busy}>단계 수정</button>
+      <button type="button" className="primary" onClick={onApprove} disabled={busy||approved}>{approved?'승인 완료':'이 개발 계획 승인'}</button>
+    </div>}
+    <p className="development-stage-note">승인 전에는 대상 Workflow를 생성하지 않습니다. 승인 후 Stage 순서·완료 검증·Checkpoint 정책을 Workflow 설계와 Agent Factory 입력에 함께 반영합니다.</p>
+  </div>
+}
+
+const createDefaultAgentRuntimeSetup=()=>({
+  mode:'AUTO',
+  auto_allocate:true,
+  approved:false,
+  approved_at:'',
+  frontend:{technology:'React + Vite',host:'localhost',port:'5173',user_fixed:false},
+  backend:{technology:'FastAPI',host:'localhost',port:'8000',user_fixed:false},
+  api:{share_backend:true,host:'localhost',port:'8001',base_path:'/api/v1',user_fixed:false},
+})
+
+const normalizeAgentRuntimeSetup=(value=null)=>{
+  const base=createDefaultAgentRuntimeSetup()
+  const src=value&&typeof value==='object'?value:{}
+  return {
+    ...base,...src,
+    mode:String(src.mode||base.mode).toUpperCase(),
+    auto_allocate:src.auto_allocate!==false,
+    approved:Boolean(src.approved),
+    frontend:{...base.frontend,...(src.frontend||{})},
+    backend:{...base.backend,...(src.backend||{})},
+    api:{...base.api,...(src.api||{}),share_backend:src?.api?.share_backend!==false},
+  }
+}
+
+const safeAgentRuntimeSetup=(value=null)=>{
+  const setup=normalizeAgentRuntimeSetup(value)
+  return {
+    mode:setup.mode,
+    auto_allocate:Boolean(setup.auto_allocate),
+    approved:Boolean(setup.approved),
+    approved_at:setup.approved_at||'',
+    frontend:{technology:setup.frontend.technology,host:setup.frontend.host,port:Number(setup.frontend.port||5173),user_fixed:Boolean(setup.frontend.user_fixed)},
+    backend:{technology:setup.backend.technology,host:setup.backend.host,port:Number(setup.backend.port||8000),user_fixed:Boolean(setup.backend.user_fixed)},
+    api:{share_backend:Boolean(setup.api.share_backend),host:setup.api.host,port:Number(setup.api.share_backend?setup.backend.port:(setup.api.port||8001)),base_path:setup.api.base_path||'/api/v1',user_fixed:Boolean(setup.api.user_fixed)},
+  }
+}
+
+const runtimePortStateLabel=(state)=>({
+  available:'사용 가능',os_in_use:'OS Process 사용 중',agentstudio_project_in_use:'다른 AgentStudio 프로젝트 사용 중',agent_internal_conflict:'동일 Agent 서비스 충돌'
+}[String(state||'')]||'확인 필요')
+
+function AgentRuntimeSetupPanel({value,onChange,recommendation,onRecommend,busy=false,onApprove}){
+  const setup=normalizeAgentRuntimeSetup(value)
+  const patchRoot=(patch)=>onChange?.({...setup,...patch,approved:false,approved_at:''})
+  const patchService=(key,patch)=>onChange?.({...setup,approved:false,approved_at:'',[key]:{...setup[key],...patch}})
+  const rowFor=(key)=>recommendation?.[key]||null
+  const applyRecommended=(key)=>{
+    const row=rowFor(key)
+    if(!row) return
+    if(key==='api'&&setup.api.share_backend) return
+    patchService(key,{port:String(row.recommended),user_fixed:false})
+  }
+  const serviceCard=(key,label,technologyOptions=[])=>{
+    const cfg=setup[key]
+    const row=rowFor(key)
+    const port=key==='api'&&setup.api.share_backend?setup.backend.port:cfg.port
+    return <section className={`agent-runtime-service ${row?.state==='available'?'ok':row?'warn':''}`} key={key}>
+      <header><div><strong>{label}</strong><small>{key==='api'&&setup.api.share_backend?'Backend API PORT 공유':cfg.technology||''}</small></div>{cfg.user_fixed&&<span>USER_FIXED</span>}</header>
+      {key!=='api'&&<label><span>기술</span><select value={cfg.technology} onChange={e=>patchService(key,{technology:e.target.value,user_fixed:false})}>{technologyOptions.map(opt=><option key={opt}>{opt}</option>)}</select></label>}
+      {key==='api'&&<div className="agent-runtime-api-mode"><label><input type="radio" checked={Boolean(setup.api.share_backend)} onChange={()=>patchService('api',{share_backend:true,user_fixed:false})}/> Backend PORT 공유</label><label><input type="radio" checked={!setup.api.share_backend} onChange={()=>patchService('api',{share_backend:false})}/> 별도 API PORT</label></div>}
+      <div className="agent-runtime-port-row">
+        <label><span>Host</span><input value={cfg.host} onChange={e=>patchService(key,{host:e.target.value})}/></label>
+        <label><span>사용 PORT</span><input value={port} disabled={key==='api'&&setup.api.share_backend} onChange={e=>patchService(key,{port:e.target.value,user_fixed:true})}/></label>
+      </div>
+      {row&&<div className="agent-runtime-recommendation">
+        <div><span>추천 PORT</span><strong>{row.recommended}</strong></div>
+        <div><span>현재 상태</span><strong className={row.state==='available'?'ok':'warn'}>{runtimePortStateLabel(row.state)}</strong></div>
+        <small>{(row.reason||[]).slice(0,4).join(' · ')}</small>
+        <div className="agent-runtime-recommend-actions"><button type="button" onClick={()=>applyRecommended(key)} disabled={key==='api'&&setup.api.share_backend}>추천값 적용</button><button type="button" onClick={onRecommend} disabled={busy}>다른 PORT 찾기</button></div>
+      </div>}
+      {key==='api'&&<label><span>API Base Path</span><input value={cfg.base_path||'/api/v1'} onChange={e=>patchService('api',{base_path:e.target.value})}/></label>}
+    </section>
+  }
+  return <div className={`agent-runtime-setup-card ${setup.approved?'approved':''}`}>
+    <div className="agent-runtime-head"><div><strong>실행 환경 구성</strong><small>기술 스택과 현재 PC/AgentStudio 프로젝트의 PORT 사용 상태를 확인해 Frontend · Backend · API PORT를 추천합니다.</small></div><span>{setup.approved?'✓ 확정됨':'확정 필요'}</span></div>
+    <div className="agent-runtime-mode-row">
+      <button type="button" className={setup.mode==='AUTO'?'active':''} onClick={()=>patchRoot({mode:'AUTO',auto_allocate:true})}>자동 추천</button>
+      <button type="button" className={setup.mode==='CONFIGURE'?'active':''} onClick={()=>patchRoot({mode:'CONFIGURE'})}>직접 설정</button>
+      <button type="button" className={setup.mode==='SKIP'?'active':''} onClick={()=>patchRoot({mode:'SKIP',auto_allocate:true})}>입력 건너뛰기 · 자동 결정</button>
+    </div>
+    <label className="agent-runtime-auto"><input type="checkbox" checked={Boolean(setup.auto_allocate)} onChange={e=>patchRoot({auto_allocate:e.target.checked})}/><span>사용 가능한 PORT 자동 할당</span></label>
+    <div className="agent-runtime-service-list">
+      {serviceCard('frontend','Frontend',['React + Vite','Next.js','Streamlit'])}
+      {serviceCard('backend','Backend',['FastAPI','Node.js / Express','Spring Boot','ASP.NET Core'])}
+      {serviceCard('api','API')}
+    </div>
+    <div className="agent-runtime-actions"><button type="button" onClick={onRecommend} disabled={busy}>{busy?'PORT 확인 중...':'사용 가능 PORT 다시 검색'}</button><button type="button" className="primary" onClick={onApprove} disabled={busy||!recommendation}>{setup.approved?'✓ 실행 환경 확정됨':'이 실행 환경 확정'}</button></div>
+    <p>실행 직전 PORT를 다시 검사합니다. USER_FIXED 값이 충돌하면 자동 변경하지 않고 사용자에게 수정 요청을 표시합니다.</p>
+  </div>
+}
+
+function AgentGenerationFinalPreview({name,developmentPlan,runtimeSetup,databaseSetup,databaseResourcePlan,onOpenRuntime,onOpenDatabase,onOpenStages}){
+  const runtime=safeAgentRuntimeSetup(runtimeSetup)
+  const db=normalizeAgentDatabaseSetup(databaseSetup)
+  const providers=selectedAgentDatabaseProviders(db)
+  const runtimeReady=Boolean(runtime.approved)
+  const dbAuto=['postgresql','firestore','redis'].some(key=>db[key]?.enabled&&db[key]?.auto_provision&&db.mode==='CONFIGURE')
+  const dbReady=!dbAuto||Boolean(databaseResourcePlan?.approved)
+  return <div className="agent-final-preview">
+    <div className="agent-final-preview-head"><div><strong>Agent 생성 최종 확인</strong><small>개발 계획 · 실행 환경 · Database 구성을 한 번에 확인합니다. 실제 DB 변경과 Agent 생성은 승인된 설정만 사용합니다.</small></div><span className={runtimeReady&&dbReady&&developmentPlan?.approved?'ready':'pending'}>{runtimeReady&&dbReady&&developmentPlan?.approved?'생성 준비 완료':'확인 필요'}</span></div>
+    <section><header><strong>Agent</strong></header><div className="agent-final-kv"><span>이름</span><b>{name||'미입력'}</b></div></section>
+    <section><header><strong>개발 계획</strong><button type="button" onClick={onOpenStages}>수정</button></header><div className="agent-final-stage-list">{(developmentPlan?.stages||[]).map((stage,index)=><span key={stage.id||index}>{index+1}. {stage.title}</span>)}</div></section>
+    <section><header><strong>실행 환경</strong><button type="button" onClick={onOpenRuntime}>수정</button></header>
+      <div className="agent-final-runtime-grid"><div><span>Frontend</span><b>{runtime.frontend.technology}</b><code>http://{runtime.frontend.host}:{runtime.frontend.port}</code></div><div><span>Backend</span><b>{runtime.backend.technology}</b><code>http://{runtime.backend.host}:{runtime.backend.port}</code></div><div><span>API</span><b>{runtime.api.share_backend?'Backend 공유':'별도 API'}</b><code>http://{runtime.api.host}:{runtime.api.port}{runtime.api.base_path}</code></div></div>
+    </section>
+    <section><header><strong>Database</strong><button type="button" onClick={onOpenDatabase}>수정</button></header>
+      {providers.length?<div className="agent-final-db-list">{db.postgresql.enabled&&<div><span>PostgreSQL</span><b>{db.postgresql.host}:{db.postgresql.port}/{db.postgresql.database||'-'}</b><small>{db.postgresql.auto_provision?'실제 구조 구성 예정':'기존 연결 사용'}</small></div>}{db.firestore.enabled&&<div><span>Firestore</span><b>{db.firestore.project_id||'-'} / {db.firestore.database_id}</b><small>{db.firestore.auto_provision?'Collection/Index 구성 예정':'기존 연결 사용'}</small></div>}{db.redis.enabled&&<div><span>Redis</span><b>{db.redis.host}:{db.redis.port} / DB {db.redis.db}</b><small>{db.redis.auto_provision?'Key/TTL 정책 구성 예정':'기존 연결 사용'}</small></div>}</div>:<div className="agent-final-empty">{databaseModeLabel(db.mode)}</div>}
+    </section>
+    <div className="agent-final-gates"><span className={developmentPlan?.approved?'ok':'warn'}>{developmentPlan?.approved?'✓ 개발 계획 승인':'○ 개발 계획 승인 필요'}</span><span className={runtimeReady?'ok':'warn'}>{runtimeReady?'✓ 실행 환경 확정':'○ 실행 환경 확정 필요'}</span><span className={dbReady?'ok':'warn'}>{dbReady?'✓ DB 생성 계획 확인':'○ DB Resource Plan 승인 필요'}</span></div>
+  </div>
+}
+
+const createDefaultAgentDatabaseSetup=()=>({
+  mode:'PENDING',
+  postgresql:{
+    enabled:false,auto_provision:false,use_existing:false,analyze_existing:false,
+    host:'127.0.0.1',port:'5432',database:'',schema:'public',user:'postgres',password:'',
+    ssl:true,sslmode:'prefer',pgvector:false,role:'영구 데이터 · 관계형 데이터 · Agent Memory',
+  },
+  firestore:{
+    enabled:false,auto_provision:false,use_existing:false,analyze_existing:false,
+    project_id:'',database_id:'(default)',service_account_path:'',region:'',emulator:false,
+    collection_prefix:'',initial_collections:'',map_design_entities:true,
+    role:'Document 기반 데이터 · Agent Event · 사용자 설정 · 실시간 상태',
+  },
+  redis:{
+    enabled:false,auto_provision:false,use_existing:false,
+    host:'127.0.0.1',port:'6379',db:'0',username:'',password:'',tls:false,key_prefix:'',
+    role:'Session · Cache · TTL 데이터 · Queue · Lock · 작업 상태',
+  },
+})
+
+const normalizeAgentDatabaseSetup=(value=null)=>{
+  const base=createDefaultAgentDatabaseSetup()
+  const source=value&&typeof value==='object'?value:{}
+  return {
+    ...base,...source,mode:String(source.mode||base.mode).toUpperCase(),
+    postgresql:{...base.postgresql,...(source.postgresql||{}),enabled:Boolean(source?.postgresql?.use_in_agent??source?.postgresql?.enabled),password:String(source?.postgresql?.password||'')},
+    firestore:{...base.firestore,...(source.firestore||{}),enabled:Boolean(source?.firestore?.use_in_agent??source?.firestore?.enabled),service_account_path:String(source?.firestore?.service_account_path||'')},
+    redis:{...base.redis,...(source.redis||{}),enabled:Boolean(source?.redis?.use_in_agent??source?.redis?.enabled),password:String(source?.redis?.password||''),tls:Boolean(source?.redis?.tls??source?.redis?.ssl)},
+  }
+}
+
+const safeAgentDatabaseSetup=(value=null)=>{
+  const setup=normalizeAgentDatabaseSetup(value)
+  const collectionText=Array.isArray(setup.firestore.initial_collections)?setup.firestore.initial_collections.join(', '):String(setup.firestore.initial_collections||'')
+  return {
+    mode:setup.mode,
+    providers:['postgresql','firestore','redis'].filter(key=>setup[key]?.enabled),
+    postgresql:{
+      enabled:Boolean(setup.postgresql.enabled),use_in_agent:Boolean(setup.postgresql.enabled),auto_provision:Boolean(setup.postgresql.auto_provision),
+      use_existing:Boolean(setup.postgresql.use_existing),analyze_existing:Boolean(setup.postgresql.analyze_existing),
+      host:setup.postgresql.host,port:Number(setup.postgresql.port||5432),database:setup.postgresql.database,schema:setup.postgresql.schema||'public',user:setup.postgresql.user,
+      ssl:Boolean(setup.postgresql.ssl),sslmode:setup.postgresql.sslmode||'prefer',pgvector:Boolean(setup.postgresql.pgvector),role:setup.postgresql.role||'',password_env:'POSTGRES_PASSWORD',
+    },
+    firestore:{
+      enabled:Boolean(setup.firestore.enabled),use_in_agent:Boolean(setup.firestore.enabled),auto_provision:Boolean(setup.firestore.auto_provision),
+      use_existing:Boolean(setup.firestore.use_existing),analyze_existing:Boolean(setup.firestore.analyze_existing),project_id:setup.firestore.project_id,database_id:setup.firestore.database_id||'(default)',
+      region:setup.firestore.region||'',emulator:Boolean(setup.firestore.emulator),collection_prefix:setup.firestore.collection_prefix,
+      initial_collections:collectionText.split(/[,;\n]+/).map(v=>v.trim()).filter(Boolean),map_design_entities:setup.firestore.map_design_entities!==false,role:setup.firestore.role||'',credentials_env:'GOOGLE_APPLICATION_CREDENTIALS',
+    },
+    redis:{
+      enabled:Boolean(setup.redis.enabled),use_in_agent:Boolean(setup.redis.enabled),auto_provision:Boolean(setup.redis.auto_provision),use_existing:Boolean(setup.redis.use_existing),
+      host:setup.redis.host,port:Number(setup.redis.port||6379),db:Number(setup.redis.db||0),username:setup.redis.username,tls:Boolean(setup.redis.tls),ssl:Boolean(setup.redis.tls),
+      key_prefix:setup.redis.key_prefix,role:setup.redis.role||'',password_env:'REDIS_PASSWORD',
+    },
+  }
+}
+
+const selectedAgentDatabaseProviders=(value=null)=>{
+  const setup=normalizeAgentDatabaseSetup(value)
+  return [setup.postgresql.enabled?'PostgreSQL':'',setup.firestore.enabled?'Google Cloud Firestore':'',setup.redis.enabled?'Redis':''].filter(Boolean)
+}
+
+const databaseModeLabel=(mode)=>({
+  CONFIGURE:'지금 DB 설정',CONNECTION_ONLY:'연결 정보만 사용',NO_DB:'DB 없이 생성',SKIP:'이번 단계 건너뛰기',LATER_EDITOR:'Agent Editor에서 나중에 설정',PENDING:'선택 필요'
+}[String(mode||'PENDING').toUpperCase()]||mode)
+
+function AgentDatabaseResourcePlanPanel({plan,onChange,onApprove,onBack,onEditStructure,busy=false}){
+  if(!plan) return null
+  const providers=Array.isArray(plan.providers)?plan.providers:[]
+  const commitProviders=(nextProviders)=>onChange?.({...plan,approved:false,requires_approval:nextProviders.some(row=>Boolean(row.auto_provision&&row.include_in_provision!==false)),providers:nextProviders})
+  const patchProvider=(provider,patch)=>commitProviders(providers.map(row=>row.provider===provider?{...row,...patch}:row))
+  const patchResources=(provider,patch)=>commitProviders(providers.map(row=>row.provider===provider?{...row,resources:{...(row.resources||{}),...patch}}:row))
+  const patchTablePolicy=(provider,tableName,key,checked)=>{
+    const row=providers.find(item=>item.provider===provider)
+    const resources=row?.resources||{}
+    const overrides={...(resources.table_policy_overrides||{})}
+    overrides[tableName]={...(overrides[tableName]||{}),[key]:Boolean(checked)}
+    patchResources(provider,{table_policy_overrides:overrides})
+  }
+  return <div className={`agent-db-resource-plan ${plan.approved?'approved':''}`}>
+    <div className="agent-db-resource-plan-head"><div><strong>DB Resource Plan / DB 생성 계획 Preview</strong><small>실제 DB는 아직 변경되지 않았습니다. 생성할 구조를 확인·수정한 뒤 승인하세요.</small></div><span>{plan.approved?'승인 완료':plan.requires_approval?'승인 필요':'자동 생성 없음'}</span></div>
+    {providers.map(row=>{
+      const r=row.resources||{}
+      return <section className="agent-db-resource-provider" key={row.provider}>
+        <header><div><strong>{row.provider==='postgresql'?'PostgreSQL':row.provider==='firestore'?'Google Cloud Firestore':'Redis'}</strong><small>{row.role||''}</small></div><label><input type="checkbox" checked={row.include_in_provision!==false&&Boolean(row.auto_provision)} disabled={!row.auto_provision||plan.approved} onChange={e=>patchProvider(row.provider,{include_in_provision:e.target.checked})}/><span>실제 구조 생성 포함</span></label></header>
+        {r.existing_structure&&<div className="agent-db-existing-summary">기존 구조 분석: {r.existing_structure.message||'분석 결과 반영됨'}</div>}
+        {row.provider==='postgresql'&&<>
+          <div className="agent-db-resource-grid">
+            <label><span>Schema</span><input value={r.schema||''} disabled={plan.approved} onChange={e=>patchResources(row.provider,{schema:e.target.value})}/></label>
+            <div><span>Tables</span><code>{(r.tables||[]).join(', ')||'없음'}</code></div>
+            <div><span>Indexes</span><code>{(r.indexes||[]).join(', ')||'설계에 따라 생성'}</code></div>
+            <div><span>pgvector</span><code>{r.pgvector_extension?'Extension / Vector Column / Vector Index':'사용 안 함'}</code></div>
+          </div>
+          {(r.table_details||[]).length>0&&<div className="agent-table-policy-preview">
+            <div className="agent-table-policy-head"><strong>테이블 자동 생성 공통 정책</strong><small>CRUD 성격을 분석해 ID / Audit / Soft Delete를 추천합니다. 테이블별로 수정할 수 있습니다.</small></div>
+            {(r.table_details||[]).map((table,index)=>{
+              const policy=table.common_policy||{}
+              const recommended=policy.recommendations||{}
+              const override=(r.table_policy_overrides||{})[table.name]||{}
+              const enabled=(key)=>Object.prototype.hasOwnProperty.call(override,key)?Boolean(override[key]):Boolean(recommended[key])
+              const policyColumnTypes={created_at:'TIMESTAMPTZ',updated_at:'TIMESTAMPTZ',is_deleted:'BOOLEAN',created_by:'BIGINT',updated_by:'BIGINT'}
+              const policyKeys=Object.keys(policyColumnTypes)
+              const displayColumns=(table.columns||[]).filter(col=>!policyKeys.includes(col.name)||enabled(col.name)).map(col=>({...col}))
+              for(const key of policyKeys) if(enabled(key)&&!displayColumns.some(col=>col.name===key)) displayColumns.push({name:key,type:policyColumnTypes[key],primary_key:false,unique:false})
+              return <details className="agent-table-policy-row" key={table.name||index} open={index===0}>
+                <summary><div><strong>{table.name}</strong><small>CRUD {(table.crud||[]).join(' / ')||'-'} · {Object.keys(override).length?'USER_FIXED':(policy.status||'RECOMMENDED')}</small></div><span>{(table.columns||[]).length} Columns</span></summary>
+                <div className="agent-table-policy-body">
+                  <div className="agent-table-policy-checks">{[['id','ID'],['created_at','등록일'],['updated_at','수정일'],['is_deleted','삭제 여부'],['created_by','등록자 ID'],['updated_by','수정자 ID']].map(([key,label])=><label key={key}><input type="checkbox" checked={enabled(key)} disabled={plan.approved||key==='id'} onChange={e=>patchTablePolicy(row.provider,table.name,key,e.target.checked)}/><span>{label}</span></label>)}</div>
+                  <div className="agent-table-policy-columns">{displayColumns.map(col=><code key={col.name}>{col.name} {col.type}{col.primary_key?' · PK':''}{col.unique?' · UNIQUE':''}</code>)}</div>
+                  <small className="agent-table-policy-reason">{(policy.reason||[]).join(' · ')}</small>
+                  {enabled('is_deleted')&&(table.columns||[]).some(col=>col.unique)&&<small className="agent-table-policy-note">Soft Delete + UNIQUE는 활성 데이터만 대상으로 Partial Unique Index를 생성합니다.</small>}
+                </div>
+              </details>
+            })}
+          </div>}
+        </>}
+        {row.provider==='firestore'&&<div className="agent-db-resource-grid">
+          <label className="span-2"><span>Collections · 쉼표 구분</span><textarea rows={2} disabled={plan.approved} value={(r.collections||[]).join(', ')} onChange={e=>patchResources(row.provider,{collections:e.target.value.split(/[,;\n]+/).map(v=>v.trim()).filter(Boolean)})}/></label>
+          <div><span>Document / Field</span><code>Collection별 Document Schema / Field 구조</code></div>
+          <div><span>Index / Rules</span><code>Composite Index · Security Rules · Initial Document</code></div>
+        </div>}
+        {row.provider==='redis'&&<div className="agent-db-resource-grid">
+          <label><span>Prefix</span><input value={r.prefix||''} disabled={plan.approved} onChange={e=>patchResources(row.provider,{prefix:e.target.value})}/></label>
+          <label className="span-2"><span>Key Patterns · 한 줄에 하나</span><textarea rows={4} disabled={plan.approved} value={(r.key_patterns||[]).map(x=>typeof x==='string'?x:(x.pattern||x.key||'')).filter(Boolean).join('\n')} onChange={e=>patchResources(row.provider,{key_patterns:e.target.value.split(/\r?\n/).map(v=>v.trim()).filter(Boolean).map(pattern=>({pattern,type:'STRING',ttl:'',purpose:''}))})}/></label>
+          <div><span>Data Structure</span><code>Hash · List · Set · Sorted Set · Stream · TTL</code></div>
+        </div>}
+      </section>
+    })}
+    <div className="agent-db-resource-plan-actions">
+      <button type="button" onClick={onBack} disabled={busy}>← 이전 단계 / DB 설정</button>
+      <button type="button" onClick={onEditStructure} disabled={busy}>구조 수정</button>
+      <button type="button" onClick={()=>commitProviders(providers.map(row=>({...row,include_in_provision:false})))} disabled={busy||plan.approved}>전체 DB 생성 제외</button>
+      <button type="button" className="primary" onClick={onApprove} disabled={busy||plan.approved||!plan.requires_approval}>{plan.approved?'승인 완료':'전체 DB 생성 계획 승인'}</button>
+    </div>
+  </div>
+}
+
+function AgentDatabaseSetupPanel({value,onChange,onTest,onAnalyze,onCreateResource,testBusy=false,testResult=null,analyzeBusy='',analyzeResult=null,createBusy='',createResult=null,databaseNeeded=false,onBuildPlan,planBusy=false,resourcePlan=null,onResourcePlanChange,onApprovePlan,onBackFromPlan,editorMode=false,onOpenDatabaseDesign}){
+  const setup=normalizeAgentDatabaseSetup(value)
+  const [activeProvider,setActiveProvider]=useState('postgresql')
+  const configure=['CONFIGURE','CONNECTION_ONLY'].includes(setup.mode)
+  const selectedProviders=selectedAgentDatabaseProviders(setup)
+  const patchProvider=(provider,patch)=>onChange?.({...setup,mode:setup.mode==='PENDING'?'CONFIGURE':setup.mode,[provider]:{...setup[provider],...patch}})
+  const setMode=(mode)=>{
+    const next={...setup,mode}
+    if(mode==='CONNECTION_ONLY') for(const key of ['postgresql','firestore','redis']) next[key]={...next[key],auto_provision:false}
+    if(['NO_DB','SKIP','LATER_EDITOR'].includes(mode)) for(const key of ['postgresql','firestore','redis']) next[key]={...next[key],enabled:false,auto_provision:false}
+    onChange?.(next)
+  }
+  const renderTestState=(provider)=>{
+    const row=(testResult?.providers||[]).find(item=>item?.provider===provider)
+    if(!row) return null
+    return <small className={row.ok?'agent-db-test-result ok':'agent-db-test-result failed'}>{row.ok?'✓':'✕'} {row.message||provider}</small>
+  }
+  const renderAnalyzeState=(provider)=>{const row=analyzeResult?.[provider]||(analyzeResult?.provider===provider?analyzeResult:null);return row?<small className={row.ok?'agent-db-test-result ok':'agent-db-test-result failed'}>{row.ok?'✓':'✕'} {row.message}</small>:null}
+  const renderCreateState=(provider)=>{const row=createResult?.[provider]||(createResult?.provider===provider?createResult:null);return row?<small className={row.ok?'agent-db-test-result ok':'agent-db-test-result failed'}>{row.ok?'✓':'✕'} {row.message}</small>:null}
+  const providerActions=(provider,cfg)=><div className="agent-db-provider-actions">
+    <button type="button" onClick={()=>onTest?.(provider)} disabled={testBusy||Boolean(createBusy)}>{testBusy?'확인 중...':'연결 테스트'}</button>
+    {provider==='postgresql'&&<button type="button" className="resource-create" onClick={()=>onCreateResource?.('postgresql')} title={setup.mode==='CONNECTION_ONLY'?'연결 정보만 사용 모드에서는 실제 DB 리소스를 생성하지 않습니다.':'입력한 Database에 Schema만 생성합니다.'} disabled={createBusy==='postgresql'||testBusy||setup.mode==='CONNECTION_ONLY'}>{createBusy==='postgresql'?'스키마 생성 중...':'PostgreSQL 스키마 생성'}</button>}
+    {provider==='firestore'&&!cfg.emulator&&<button type="button" className="resource-create" onClick={()=>onCreateResource?.('firestore')} title={setup.mode==='CONNECTION_ONLY'?'연결 정보만 사용 모드에서는 실제 DB 리소스를 생성하지 않습니다.':'입력한 Project / Database ID / Region으로 Firestore Database를 생성합니다.'} disabled={createBusy==='firestore'||testBusy||setup.mode==='CONNECTION_ONLY'}>{createBusy==='firestore'?'Database 생성 중...':'Firestore Database 생성'}</button>}
+    {cfg.use_existing&&<button type="button" onClick={()=>onAnalyze?.(provider)} disabled={analyzeBusy===provider||Boolean(createBusy)}>{analyzeBusy===provider?'분석 중...':'기존 구조 분석'}</button>}
+    {renderTestState(provider)}{renderAnalyzeState(provider)}{renderCreateState(provider)}
+  </div>
+
+  if(resourcePlan) return <AgentDatabaseResourcePlanPanel plan={resourcePlan} onChange={onResourcePlanChange} onApprove={onApprovePlan} onBack={onBackFromPlan} onEditStructure={onOpenDatabaseDesign} busy={planBusy}/>
+
+  return <div className={`agent-db-setup-card ${setup.mode.toLowerCase()} ${databaseNeeded?'database-needed':''}`}>
+    <div className="agent-db-setup-head"><div><strong>{editorMode?'Agent Editor · Database 구성':'Database 구성'}</strong><small>DB 사용 여부와 실제 DB 구조 생성 여부는 서로 독립적으로 설정합니다. PostgreSQL + Firestore + Redis를 동시에 사용할 수 있습니다.</small></div><span>{databaseModeLabel(setup.mode)}</span></div>
+    <div className="agent-db-mode-actions multi">
+      <button type="button" className={setup.mode==='CONFIGURE'?'active':''} onClick={()=>setMode('CONFIGURE')}>지금 DB 설정</button>
+      <button type="button" className={setup.mode==='CONNECTION_ONLY'?'active':''} onClick={()=>setMode('CONNECTION_ONLY')}>연결 정보만 사용</button>
+      <button type="button" className={setup.mode==='NO_DB'?'active skip':''} onClick={()=>setMode('NO_DB')}>DB 없이 Agent 생성</button>
+      <button type="button" className={setup.mode==='SKIP'?'active skip':''} onClick={()=>setMode('SKIP')}>DB 설정 건너뛰기</button>
+      <button type="button" className={setup.mode==='LATER_EDITOR'?'active':''} onClick={()=>setMode('LATER_EDITOR')}>Agent Editor에서 나중에 설정</button>
+    </div>
+    {setup.mode==='PENDING'&&<div className="agent-db-decision-note">{databaseNeeded?'요구사항에서 DB 필요성이 확인되었습니다. DB 설정 방법을 선택하세요.':'DB가 필요하면 설정하고, 필요하지 않으면 DB 없이 생성하거나 건너뛸 수 있습니다.'}</div>}
+
+    {configure&&<div className="agent-db-provider-tabs">
+      {[['postgresql','PostgreSQL'],['firestore','Firestore'],['redis','Redis']].map(([key,label])=><button type="button" key={key} className={`${activeProvider===key?'active':''} ${setup[key]?.enabled?'enabled':''}`} onClick={()=>setActiveProvider(key)}>{setup[key]?.enabled?'✓ ':''}{label}</button>)}
+    </div>}
+    {configure&&<div className="agent-db-provider-list">
+      <section className={`agent-db-provider ${setup.postgresql.enabled?'enabled':''} ${activeProvider==='postgresql'?'active-provider':''}`}>
+        <header><label><input type="checkbox" checked={Boolean(setup.postgresql.enabled)} onChange={e=>patchProvider('postgresql',{enabled:e.target.checked})}/><b>PostgreSQL 사용</b></label><small>Schema / Table / PK / FK / Index / Constraint / pgvector / Trigger / Seed</small></header>
+        {setup.postgresql.enabled&&<div className="agent-db-field-grid">
+          <label><span>Host</span><input value={setup.postgresql.host} onChange={e=>patchProvider('postgresql',{host:e.target.value})}/></label><label><span>Port</span><input value={setup.postgresql.port} onChange={e=>patchProvider('postgresql',{port:e.target.value})}/></label>
+          <label><span>Database Name</span><input value={setup.postgresql.database} onChange={e=>patchProvider('postgresql',{database:e.target.value})}/></label><label><span>Schema</span><input value={setup.postgresql.schema} onChange={e=>patchProvider('postgresql',{schema:e.target.value})}/></label>
+          <label><span>Username</span><input value={setup.postgresql.user} onChange={e=>patchProvider('postgresql',{user:e.target.value})}/></label><label><span>Password</span><input type="password" value={setup.postgresql.password} onChange={e=>patchProvider('postgresql',{password:e.target.value})} autoComplete="new-password"/></label>
+          <label className="agent-db-check"><input type="checkbox" checked={Boolean(setup.postgresql.ssl)} onChange={e=>patchProvider('postgresql',{ssl:e.target.checked,sslmode:e.target.checked?'prefer':'disable'})}/><span>SSL 사용</span></label>
+          <label className="agent-db-check"><input type="checkbox" checked={Boolean(setup.postgresql.pgvector)} onChange={e=>patchProvider('postgresql',{pgvector:e.target.checked})}/><span>pgvector 사용</span></label>
+          <label className="agent-db-check"><input type="checkbox" checked={Boolean(setup.postgresql.auto_provision)} disabled={setup.mode==='CONNECTION_ONLY'} onChange={e=>patchProvider('postgresql',{auto_provision:e.target.checked})}/><span>Agent 생성 시 DB 구조 자동 생성</span></label>
+          <label className="agent-db-check"><input type="checkbox" checked={Boolean(setup.postgresql.use_existing)} onChange={e=>patchProvider('postgresql',{use_existing:e.target.checked})}/><span>기존 DB / Schema 사용</span></label>
+          <label className="span-2"><span>추천 역할 · 수정 가능</span><input value={setup.postgresql.role} onChange={e=>patchProvider('postgresql',{role:e.target.value})}/></label>
+          {providerActions('postgresql',setup.postgresql)}
+        </div>}
+      </section>
+
+      <section className={`agent-db-provider ${setup.firestore.enabled?'enabled':''} ${activeProvider==='firestore'?'active-provider':''}`}>
+        <header><label><input type="checkbox" checked={Boolean(setup.firestore.enabled)} onChange={e=>patchProvider('firestore',{enabled:e.target.checked})}/><b>Google Cloud Firestore 사용</b></label><small>Database / Collection / Document / Field / Composite Index / Security Rules</small></header>
+        {setup.firestore.enabled&&<div className="agent-db-field-grid">
+          <label><span>Google Cloud Project ID</span><input value={setup.firestore.project_id} onChange={e=>patchProvider('firestore',{project_id:e.target.value})}/></label><label><span>Firestore Database ID</span><input value={setup.firestore.database_id} onChange={e=>patchProvider('firestore',{database_id:e.target.value})}/></label>
+          <label className="span-2"><span>Credential / Service Account JSON</span><input value={setup.firestore.service_account_path} onChange={e=>patchProvider('firestore',{service_account_path:e.target.value})} placeholder="파일 경로 또는 ADC"/></label>
+          <label><span>Region / Location</span><input value={setup.firestore.region} onChange={e=>patchProvider('firestore',{region:e.target.value})}/></label><label><span>Collection Prefix</span><input value={setup.firestore.collection_prefix} onChange={e=>patchProvider('firestore',{collection_prefix:e.target.value})}/></label>
+          <label className="agent-db-check"><input type="checkbox" checked={Boolean(setup.firestore.emulator)} onChange={e=>patchProvider('firestore',{emulator:e.target.checked})}/><span>Emulator 사용</span></label>
+          <label className="agent-db-check"><input type="checkbox" checked={Boolean(setup.firestore.auto_provision)} disabled={setup.mode==='CONNECTION_ONLY'} onChange={e=>patchProvider('firestore',{auto_provision:e.target.checked})}/><span>Agent 생성 시 Firestore 구조 자동 구성</span></label>
+          <label className="agent-db-check"><input type="checkbox" checked={Boolean(setup.firestore.use_existing)} onChange={e=>patchProvider('firestore',{use_existing:e.target.checked})}/><span>기존 Firestore Database 사용</span></label>
+          <label className="span-2"><span>추천 역할 · 수정 가능</span><input value={setup.firestore.role} onChange={e=>patchProvider('firestore',{role:e.target.value})}/></label>
+          {providerActions('firestore',setup.firestore)}
+        </div>}
+      </section>
+
+      <section className={`agent-db-provider ${setup.redis.enabled?'enabled':''} ${activeProvider==='redis'?'active-provider':''}`}>
+        <header><label><input type="checkbox" checked={Boolean(setup.redis.enabled)} onChange={e=>patchProvider('redis',{enabled:e.target.checked})}/><b>Redis 사용</b></label><small>Prefix / Key Pattern / Hash / List / Set / Sorted Set / Stream / TTL / Session / Cache / Lock / Queue</small></header>
+        {setup.redis.enabled&&<div className="agent-db-field-grid">
+          <label><span>Host</span><input value={setup.redis.host} onChange={e=>patchProvider('redis',{host:e.target.value})}/></label><label><span>Port</span><input value={setup.redis.port} onChange={e=>patchProvider('redis',{port:e.target.value})}/></label>
+          <label><span>Database Number</span><input value={setup.redis.db} onChange={e=>patchProvider('redis',{db:e.target.value})}/></label><label><span>Username</span><input value={setup.redis.username} onChange={e=>patchProvider('redis',{username:e.target.value})}/></label>
+          <label><span>Password</span><input type="password" value={setup.redis.password} onChange={e=>patchProvider('redis',{password:e.target.value})} autoComplete="new-password"/></label><label><span>Key Prefix</span><input value={setup.redis.key_prefix} onChange={e=>patchProvider('redis',{key_prefix:e.target.value})} placeholder="예: SJ_"/></label>
+          <label className="agent-db-check"><input type="checkbox" checked={Boolean(setup.redis.tls)} onChange={e=>patchProvider('redis',{tls:e.target.checked})}/><span>TLS 사용</span></label>
+          <label className="agent-db-check"><input type="checkbox" checked={Boolean(setup.redis.auto_provision)} disabled={setup.mode==='CONNECTION_ONLY'} onChange={e=>patchProvider('redis',{auto_provision:e.target.checked})}/><span>Agent 생성 시 Redis 초기 구조 구성</span></label>
+          <label className="agent-db-check"><input type="checkbox" checked={Boolean(setup.redis.use_existing)} onChange={e=>patchProvider('redis',{use_existing:e.target.checked})}/><span>기존 Redis 사용</span></label>
+          <label className="span-2"><span>추천 역할 · 수정 가능</span><input value={setup.redis.role} onChange={e=>patchProvider('redis',{role:e.target.value})}/></label>
+          {providerActions('redis',setup.redis)}
+        </div>}
+      </section>
+    </div>}
+
+    {configure&&<div className="agent-db-setup-actions"><div><strong>DB 사용과 DB 구조 자동 생성은 별도 설정</strong><small>연결 정보 입력만으로 실제 DB를 변경하지 않습니다. 자동 생성 ON인 DB가 있으면 먼저 Resource Plan Preview를 생성하고 사용자 승인을 받습니다.</small></div><button type="button" className="primary" onClick={onBuildPlan} disabled={planBusy||selectedProviders.length===0}>{planBusy?'생성 계획 만드는 중...':'DB Resource Plan Preview'}</button></div>}
+    {testResult?.validation?.errors?.length>0&&<div className="agent-db-validation-errors">{testResult.validation.errors.map((item,index)=><span key={index}>• {item}</span>)}</div>}
+    {editorMode&&<div className="agent-db-editor-note"><div><strong>기존 Agent DB 변경</strong><small>DB 신규 추가/제거, 연결 정보 변경, Schema/Table/Collection/Redis Key 정책 변경은 Preview와 사용자 승인 후 적용합니다. 기존 기능/데이터 보존을 우선하고 Migration/영향 범위를 먼저 확인합니다.</small></div><button type="button" onClick={onOpenDatabaseDesign}>DB 변경 영향 / Migration Plan</button></div>}
+    <p className="agent-db-secret-note">보안: PostgreSQL/Redis Password와 Google Cloud Credential은 Agent Source에 저장하지 않습니다. 환경변수/Secret으로 분리하고 UI 마스킹 및 로그 Redaction을 적용합니다.</p>
+  </div>
+}
+
+
+function AgentDatabaseProvisionResultPanel({result,onRetry,onSkip,busyProvider=''}){
+  const provision=result?.database_provision
+  const rows=Array.isArray(provision?.providers)?provision.providers:[]
+  if(!provision||!rows.length) return null
+  return <div className={`agent-db-provision-result ${provision.ok?'ok':'failed'}`}>
+    <div className="agent-db-provision-result-head"><div><strong>Database 구성 결과</strong><small>DB별 연결/구조 생성 결과를 확인하고 실패한 DB만 다시 처리할 수 있습니다.</small></div><span>{provision.ok?'PASS':'일부 실패'}</span></div>
+    {rows.map((row,index)=><div className={`agent-db-provision-row ${row.ok?'ok':'failed'}`} key={`${row.provider}-${index}`}>
+      <div><strong>{row.provider}</strong><small>{row.message||''}</small>{row.steps&&<code>{Object.entries(row.steps).map(([k,v])=>`${k}: ${v}`).join(' · ')}</code>}{row.rollback&&<em>Rollback 가능 여부: {row.rollback}</em>}</div>
+      {!row.ok&&row.provider!=='runtime_config'&&<div className="agent-db-provision-actions"><button type="button" onClick={()=>onRetry?.(row.provider)} disabled={busyProvider===row.provider}>{busyProvider===row.provider?'재시도 중...':'재시도'}</button><button type="button" onClick={()=>onSkip?.(row.provider)}>해당 DB만 Skip</button></div>}
+    </div>)}
+  </div>
+}
+
+function AgentDesignSummaryPanel({summary,plan,requirements=[],uiLayoutConfig=null,agentSpecialization='GENERAL'}){
+  const rows=Array.isArray(requirements)?requirements:[]
+  const byId=Object.fromEntries(rows.map(item=>[item.id,item]))
+  const stageCount=Array.isArray(plan?.stages)?plan.stages.length:0
+  const stageState=plan?.approved?'승인 완료':stageCount?`${stageCount}단계 승인 대기`:'추천 전'
+  const uiValue=byId.ui?.value||summary?.uiLayout||'확인 중'
+  const backendValue=byId.backend?.value||'FastAPI / Backend 확인 중'
+  const llmValue=byId.llm?.value||'LLM 확인 중'
+  const dbValue=summary?.database||byId.database?.value||'DB 구성 확인 중'
+  const featureValue=summary?.features||'핵심 기능 확인 중'
+  return <div className="agent-design-summary-card">
+    <div className="agent-design-summary-head">
+      <div><strong>Agent 설계 요약</strong><small>현재 인터뷰와 사용자 선택을 기준으로 정리한 생성 전 설계 상태입니다.</small></div>
+      <span>{plan?.approved?'개발 계획 승인됨':'설계 중'}</span>
+    </div>
+    <div className="agent-design-summary-grid">
+      <div><span>목적</span><strong>{summary?.purpose||'확인 중'}</strong></div>
+      <div><span>주요 기능</span><strong>{featureValue}</strong></div>
+      <div><span>Frontend / UI</span><strong>{uiValue}</strong></div>
+      <div><span>Backend</span><strong>{backendValue}</strong></div>
+      <div><span>LLM</span><strong>{llmValue}</strong></div>
+      <div><span>DB / Cache / Vector</span><strong>{dbValue}</strong></div>
+      <div><span>MCP / Tool</span><strong>{summary?.mcpTools||'확인 중'}</strong></div>
+      <div><span>실행 환경</span><strong>{summary?.runtime||'확인 중'}</strong></div>
+      <div><span>개발 Stage</span><strong>{stageState}</strong></div>
+      <div><span>Agent 유형</span><strong>{agentSpecialization==='GENERAL'?'일반 Agent':agentSpecialization}</strong></div>
+    </div>
+    {uiLayoutConfig?.template_id&&<div className="agent-design-summary-foot">UI Layout 선택 완료 · {uiLayoutConfig.name||uiLayoutConfig.template_name||uiLayoutConfig.template_id}</div>}
+  </div>
+}
 
 const DebouncedProjectSearchInput=memo(function DebouncedProjectSearchInput({value,onCommit,placeholder='프로젝트 검색...'}){
   const [localValue,setLocalValue]=useState(value||'')
@@ -327,7 +1013,7 @@ const parseAttachmentSummarySections=(value='')=>{
   return sections
 }
 
-function AttachmentAnalysisSummaryCard({summary='',files=[],requirements=[],coverage={},compact=false,restored=false,onClear=null}){
+function AttachmentAnalysisSummaryCard({summary='',files=[],requirements=[],coverage={},compact=false,restored=false,onClear=null,onOpenFile=null}){
   const cardRef=useRef(null)
   const resizeRef=useRef({active:false,pointerId:null,startY:0,startHeight:0,currentHeight:0})
   const defaultPanelHeight=()=>{
@@ -409,7 +1095,7 @@ function AttachmentAnalysisSummaryCard({summary='',files=[],requirements=[],cove
   if(!safeSummary&&!safeRequirements.length) return null
   const sections=parseAttachmentSummarySections(safeSummary)
   const safeFiles=(Array.isArray(files)?files:[])
-    .map(item=>({name:String(item?.name||''),path:String(item?.path||'')}))
+    .map(item=>({name:String(item?.name||''),path:String(item?.path||''),project_relative_path:String(item?.project_relative_path||item?.relative_path||'')}))
     .filter(item=>item.name||item.path)
   const requirementCount=Number(coverage?.requirement_count||safeRequirements.length||0)
   const categoryCounts=coverage?.categories&&typeof coverage.categories==='object'?coverage.categories:{}
@@ -430,7 +1116,11 @@ function AttachmentAnalysisSummaryCard({summary='',files=[],requirements=[],cove
     </div>
     <div className="attachment-ai-summary-scroll" tabIndex={compact?-1:0}>
       {safeFiles.length>0&&<div className="attachment-ai-summary-files">
-        {safeFiles.slice(0,compact?4:12).map((item,index)=><span key={`${item.path||item.name}-${index}`} title={item.path||item.name}>{item.name||item.path}</span>)}
+        {safeFiles.slice(0,compact?4:12).map((item,index)=>
+          typeof onOpenFile==='function'
+            ? <button type="button" key={`${item.path||item.name}-${index}`} title={`${item.path||item.name} · 클릭하여 파일 열기`} onClick={()=>onOpenFile(item)}>{item.name||item.path}</button>
+            : <span key={`${item.path||item.name}-${index}`} title={item.path||item.name}>{item.name||item.path}</span>
+        )}
         {compact&&safeFiles.length>4&&<span>+{safeFiles.length-4}개</span>}
       </div>}
       {safeSummary&&<div className="attachment-ai-summary-sections">
@@ -542,6 +1232,11 @@ const normalizeUILayoutConfig=(template,value={})=>({
   ...template,
   ...uiLayoutRuntimeDefaults(template),
   ...(value&&typeof value==='object'?value:{}),
+  // v5.436: Sidebar/Header icon options are explicit layout choices. They are kept
+  // independent from imported Theme icon detection so the user can force icons
+  // even when the reference site does not expose an icon-text navigation pattern.
+  sidebar_menu_icons:Boolean(value?.sidebar_menu_icons??template?.sidebar_menu_icons??false),
+  header_icons:Boolean(value?.header_icons??template?.header_icons??false),
   // 플랫폼 고정 정책: 메뉴/탭 이동은 실행 중 Agent를 중단시키지 않습니다.
   agent_runtime_persistent:true,
   event_stream_auto_reconnect:true,
@@ -739,9 +1434,9 @@ const uiThemePreviewStyleVars=(config={})=>{
     '--tp-primary':p.colors.primary,'--tp-secondary':p.colors.secondary,'--tp-bg':p.colors.background,
     '--tp-surface':p.colors.surface,'--tp-text':p.colors.text,'--tp-muted':p.colors.muted,'--tp-border':p.colors.border,
     '--tp-card-radius':`${p.radius.card}px`,'--tp-button-radius':`${p.radius.button}px`,'--tp-input-radius':`${p.radius.input}px`,'--tp-card-shadow':p.shadow,
-    '--tp-menu-normal-bg':p.menu.normal.background,'--tp-menu-normal-color':p.menu.normal.color,'--tp-menu-normal-border':p.menu.normal.border,'--tp-menu-normal-radius':`${p.menu.normal.radius??p.radius.button}px`,
-    '--tp-menu-hover-bg':p.menu.hover.background,'--tp-menu-hover-color':p.menu.hover.color,'--tp-menu-hover-border':p.menu.hover.border,'--tp-menu-hover-radius':`${p.menu.hover.radius??p.radius.button}px`,'--tp-menu-hover-shadow':cssValue(p.menu.hover.boxShadow,'none'),'--tp-menu-hover-transform':cssValue(p.menu.hover.transform,'none'),'--tp-menu-transition':cssValue(p.menu.hover.transition||p.menu.normal.transition,'all .18s ease'),
-    '--tp-menu-active-bg':p.menu.active.background,'--tp-menu-active-color':p.menu.active.color,'--tp-menu-active-border':p.menu.active.border,'--tp-menu-active-radius':`${p.menu.active.radius??p.radius.button}px`,'--tp-menu-active-shadow':cssValue(p.menu.active.boxShadow,'none'),'--tp-menu-active-transform':cssValue(p.menu.active.transform,'none'),
+    '--tp-menu-normal-bg':p.menu.normal.background,'--tp-menu-normal-color':p.menu.normal.color,'--tp-menu-normal-border':p.menu.normal.border,'--tp-menu-normal-radius':`${p.menu.normal.radius??p.radius.button}px`,'--tp-menu-normal-padding':cssValue(p.menu.normal.padding,'7px 9px'),'--tp-menu-normal-border-bottom':cssValue(p.menu.normal.borderBottom,`1px solid ${p.menu.normal.border||p.colors.border}`),
+    '--tp-menu-hover-bg':p.menu.hover.background,'--tp-menu-hover-color':p.menu.hover.color,'--tp-menu-hover-border':p.menu.hover.border,'--tp-menu-hover-radius':`${p.menu.hover.radius??p.radius.button}px`,'--tp-menu-hover-padding':cssValue(p.menu.hover.padding,p.menu.normal.padding||'7px 9px'),'--tp-menu-hover-border-bottom':cssValue(p.menu.hover.borderBottom,p.menu.normal.borderBottom||`1px solid ${p.menu.hover.border||p.colors.primary}`),'--tp-menu-hover-shadow':cssValue(p.menu.hover.boxShadow,'none'),'--tp-menu-hover-transform':cssValue(p.menu.hover.transform,'none'),'--tp-menu-hover-opacity':cssValue(p.menu.hover.opacity,'1'),'--tp-menu-hover-font-weight':cssValue(p.menu.hover.fontWeight,p.menu.normal.fontWeight||'700'),'--tp-menu-hover-decoration':cssValue(p.menu.hover.textDecoration,'none'),'--tp-menu-hover-filter':cssValue(p.menu.hover.filter,'none'),'--tp-menu-transition':cssValue(p.menu.hover.transition||p.menu.normal.transition||p.menu.hover.motionTransition,'all .18s ease'),
+    '--tp-menu-active-bg':p.menu.active.background,'--tp-menu-active-color':p.menu.active.color,'--tp-menu-active-border':p.menu.active.border,'--tp-menu-active-radius':`${p.menu.active.radius??p.radius.button}px`,'--tp-menu-active-padding':cssValue(p.menu.active.padding,p.menu.normal.padding||'7px 9px'),'--tp-menu-active-border-bottom':cssValue(p.menu.active.borderBottom,p.menu.normal.borderBottom||`1px solid ${p.menu.active.border||p.colors.primary}`),'--tp-menu-active-shadow':cssValue(p.menu.active.boxShadow,'none'),'--tp-menu-active-transform':cssValue(p.menu.active.transform,'none'),'--tp-menu-active-opacity':cssValue(p.menu.active.opacity,'1'),'--tp-menu-active-font-weight':cssValue(p.menu.active.fontWeight,p.menu.normal.fontWeight||'700'),'--tp-menu-active-decoration':cssValue(p.menu.active.textDecoration,'none'),'--tp-menu-active-filter':cssValue(p.menu.active.filter,'none'),
     '--tp-submenu-bg':p.submenu.normal.background,'--tp-submenu-color':p.submenu.normal.color,'--tp-submenu-border':p.submenu.normal.border,'--tp-submenu-radius':`${p.submenu.normal.radius??p.radius.card}px`,'--tp-submenu-shadow':cssValue(p.submenu.normal.boxShadow,p.shadow),'--tp-submenu-hover-bg':p.submenu.hover.background,'--tp-submenu-hover-color':p.submenu.hover.color,
     '--tp-user-menu-bg':p.userMenu.normal.background,'--tp-user-menu-color':p.userMenu.normal.color,'--tp-user-menu-border':p.userMenu.normal.border,'--tp-user-menu-radius':`${p.userMenu.normal.radius??p.radius.card}px`,'--tp-user-menu-shadow':cssValue(p.userMenu.normal.boxShadow,p.shadow),'--tp-user-menu-hover-bg':p.userMenu.hover.background,'--tp-user-menu-hover-color':p.userMenu.hover.color,
     '--tp-button-bg':p.button.normal.background,'--tp-button-color':p.button.normal.color,'--tp-button-border':p.button.normal.border,'--tp-button-hover-bg':p.button.hover.background,'--tp-button-hover-color':p.button.hover.color,'--tp-button-hover-transform':cssValue(p.button.hover.transform,'none'),'--tp-button-pressed-transform':cssValue(p.button.pressed.transform,'scale(.98)'),'--tp-button-transition':cssValue(p.button.hover.transition||p.button.normal.transition,'all .18s ease'),
@@ -764,8 +1459,42 @@ const uiThemeEvidenceRows=(config={})=>{
     return {key,label,status,source,confidence,selector:item.selector||'',fileName:item.file_name||'',referenceRole:item.reference_role||''}
   })
 }
+const uiThemeSourceNavigation=(config={})=>{
+  const layout=config?.theme_layout_rules||{}
+  const contract=layout?.layoutContract||layout?.layout_contract||{}
+  const navigation=contract?.navigation||{}
+  const labels=Array.isArray(navigation?.items)?navigation.items:(Array.isArray(layout?.sourceNavigationItems)?layout.sourceNavigationItems:[])
+  const details=Array.isArray(navigation?.item_details)?navigation.item_details:(Array.isArray(layout?.sourceNavigationItemDetails)?layout.sourceNavigationItemDetails:[])
+  const presentation=navigation?.presentation||layout?.sourceNavigationPresentation||{}
+  const items=labels.map((label,index)=>({label:String(label||'').trim(),...(details[index]||{})})).filter(item=>item.label).slice(0,10)
+  return {items,presentation,useSourceItems:navigation?.use_source_items_in_preview!==false}
+}
+const uiThemeMenuGlyph=(label='',index=0)=>{
+  const value=String(label||'').toLowerCase()
+  if(/home|홈/.test(value)) return '⌂'
+  if(/issue|문제/.test(value)) return '◉'
+  if(/pull|request|요청/.test(value)) return '⇄'
+  if(/repo|저장소/.test(value)) return '▣'
+  if(/project|프로젝트/.test(value)) return '▦'
+  if(/discussion|대화|토론/.test(value)) return '◌'
+  if(/code|코드/.test(value)) return '⌘'
+  if(/market|상품|catalog/.test(value)) return '◇'
+  if(/order|주문/.test(value)) return '▤'
+  if(/report|리포트/.test(value)) return '▥'
+  return ['◆','○','□','◇','△','◎'][index%6]
+}
+const uiThemePreviewPageModel=(label='',index=0)=>{
+  const title=String(label||'Dashboard').trim()||'Dashboard'
+  const key=title.toLowerCase()
+  if(/dashboard|home|홈/.test(key)) return {kind:'dashboard',title,description:'선택한 메뉴의 Dashboard/Home 화면입니다.',kpis:[['Users','1,248'],['Orders','326'],['Status','Active']],placeholder:'검색어를 입력하세요'}
+  if(/activity|issue|pull|discussion|활동|문제|요청|토론/.test(key)) return {kind:'activity',title,description:'최근 활동과 상태 변화가 표시되는 화면입니다.',kpis:[['Events','48'],['Open','12'],['Today','9']],rows:['새 작업이 등록되었습니다.','검토 상태가 업데이트되었습니다.','사용자 활동 기록이 추가되었습니다.']}
+  if(/setting|설정/.test(key)) return {kind:'settings',title,description:'환경과 사용자 옵션을 변경하는 설정 화면입니다.',kpis:[['Profile','Ready'],['Alerts','On'],['Theme','Auto']],rows:['프로필 및 계정','알림 및 자동화','화면 및 테마']}
+  if(/repo|project|catalog|product|order|market|저장소|프로젝트|상품|주문/.test(key)) return {kind:'collection',title,description:'목록·검색·상태를 확인하는 컬렉션 화면입니다.',kpis:[['Items',String(24+index*7)],['Updated','Today'],['Status','Ready']],placeholder:`${title} 검색`}
+  return {kind:'generic',title,description:'선택한 메뉴에 맞춰 페이지가 전환됩니다.',kpis:[['Overview','12'],['Updates','5'],['Status','Ready']],placeholder:`${title} 검색`}
+}
 function UILayoutThemePreview({config={},compact=false,viewport='desktop'}){
   const [activeMenu,setActiveMenu]=useState('dashboard')
+  const [activePage,setActivePage]=useState(0)
   const [submenuOpen,setSubmenuOpen]=useState(false)
   const [userMenuOpen,setUserMenuOpen]=useState(false)
   const [mobileMenuOpen,setMobileMenuOpen]=useState(false)
@@ -775,10 +1504,26 @@ function UILayoutThemePreview({config={},compact=false,viewport='desktop'}){
   const hasSidebar=Boolean(merged.sidebar)
   const hasHeader=Boolean(merged.header)
   const hasFooter=Boolean(merged.footer)
+  const sidebarMenuIcons=Boolean(merged.sidebar_menu_icons)
+  const headerIcons=Boolean(hasHeader&&merged.header_icons)
   const isMobile=viewport==='mobile'
   const showHeader=hasHeader||(isMobile&&hasSidebar)
   const vars=uiThemePreviewStyleVars(config)
   const label=config?.theme==='custom'?(config?.theme_name||'Custom Theme'):(config?.theme==='dark'?'Dark':config?.theme==='auto'?'Auto':'Light')
+  const sourceNavigation=uiThemeSourceNavigation(config)
+  const sourceMenuItems=(config?.theme==='custom'&&sourceNavigation.useSourceItems&&sourceNavigation.items.length>=2)?sourceNavigation.items:[]
+  const iconTextMenu=String(sourceNavigation?.presentation?.mode||'').toLowerCase()==='icon_text'
+    ||sourceMenuItems.filter(item=>item?.has_icon||item?.icon?.detected).length>=Math.max(2,Math.ceil(sourceMenuItems.length*.35))
+  const previewPageItems=sourceMenuItems.length?sourceMenuItems.slice(0,5):[{label:'Dashboard'},{label:'Activity'},{label:'Settings'}]
+  const previewPageSignature=previewPageItems.map(item=>String(item?.label||item||'')).join('|')
+  const selectedPageIndex=Math.min(activePage,Math.max(0,previewPageItems.length-1))
+  const selectedPageItem=previewPageItems[selectedPageIndex]||{label:'Dashboard'}
+  const pageModel=uiThemePreviewPageModel(selectedPageItem?.label||selectedPageItem,selectedPageIndex)
+  const renderMenuLabel=(item,index,forceIcon=false)=>{
+    const labelText=String(item?.label||item||'')
+    const hasIcon=Boolean(forceIcon)||iconTextMenu||Boolean(item?.has_icon||item?.icon?.detected)
+    return <span className={`ui-theme-preview-menu-label ${hasIcon?'with-icon':''}`}>{hasIcon&&<span className="ui-theme-preview-menu-icon" aria-hidden="true">{uiThemeMenuGlyph(labelText,index)}</span>}<em>{labelText}</em></span>
+  }
   const menuClick=(id,hasSubmenu=false)=>{setActiveMenu(id);if(hasSubmenu)setSubmenuOpen(value=>!value);else setSubmenuOpen(false)}
   const evidenceRows=uiThemeEvidenceRows(config)
   const reproduction=Math.round(evidenceRows.reduce((sum,row)=>sum+row.confidence,0)/Math.max(1,evidenceRows.length)*100)
@@ -787,42 +1532,51 @@ function UILayoutThemePreview({config={},compact=false,viewport='desktop'}){
     setUserMenuOpen(false)
     setMobileMenuOpen(false)
   },[viewport])
-  const mobileItem=(id,labelText,hasSubmenu=false,children=[])=><div className="ui-theme-preview-mobile-menu-item" key={id}>
-    <button className={activeMenu===id?'active':''} onClick={()=>menuClick(id,hasSubmenu)}>{labelText}{hasSubmenu?<span>{submenuOpen&&activeMenu===id?'⌃':'⌄'}</span>:null}</button>
-    {hasSubmenu&&submenuOpen&&activeMenu===id&&<div className="ui-theme-preview-mobile-submenu">{children.map(item=><button key={item}>{item}</button>)}</div>}
+  useEffect(()=>{
+    setActivePage(0)
+  },[previewPageSignature])
+  const mobileItem=(id,item,index=0,hasSubmenu=false,children=[])=><div className="ui-theme-preview-mobile-menu-item" key={id}>
+    <button className={activeMenu===id?'active':''} onClick={()=>menuClick(id,hasSubmenu)}>{renderMenuLabel(item,index,sidebarMenuIcons||headerIcons)}{hasSubmenu?<span>{submenuOpen&&activeMenu===id?'⌃':'⌄'}</span>:null}</button>
+    {hasSubmenu&&submenuOpen&&activeMenu===id&&<div className="ui-theme-preview-mobile-submenu">{children.map(child=><button key={child}>{child}</button>)}</div>}
   </div>
   return <div className={`ui-theme-preview ${compact?'compact':''} ${viewport}`} style={vars}>
     <div className="ui-theme-preview-browser">
       {showHeader&&<header><b>{label}</b>{isMobile?<button type="button" className={`ui-theme-preview-mobile-menu-trigger ${mobileMenuOpen?'open':''}`} aria-label="모바일 메뉴 열기" aria-expanded={mobileMenuOpen} onClick={()=>{setMobileMenuOpen(value=>!value);setSubmenuOpen(false)}}><span>☰</span><em>{mobileMenuOpen?'닫기':'메뉴'}</em></button>:<nav>
-        <button className={activeMenu==='home'?'active':''} onClick={()=>menuClick('home')}>Home</button>
-        <div className="ui-theme-preview-nav-dropdown"><button className={activeMenu==='products'?'active':''} onClick={()=>menuClick('products',true)}>Products <span>⌄</span></button>{submenuOpen&&activeMenu==='products'&&<div className="ui-theme-preview-submenu"><button>상품 조회</button><button>카테고리</button><button>재고 관리</button></div>}</div>
-        <button className={activeMenu==='reports'?'active':''} onClick={()=>menuClick('reports')}>Reports</button>
-      </nav>}<div className="ui-theme-preview-user-wrap"><button className="ui-theme-preview-user-trigger" aria-label="사용자 메뉴" onClick={()=>{setUserMenuOpen(value=>!value);if(isMobile)setMobileMenuOpen(false)}}><i></i><span>Admin</span></button>{userMenuOpen&&<div className="ui-theme-preview-user-menu"><strong>사용자 메뉴</strong><button>프로필</button><button>설정</button><hr/><button>로그아웃</button></div>}</div></header>}
+        {(sourceMenuItems.length?sourceMenuItems.slice(0,3):[{label:'Home'},{label:'Products'},{label:'Reports'}]).map((item,index)=>{const id=`source-top-${index}`;return <button key={id} className={activeMenu===id?'active':''} onClick={()=>menuClick(id)}>{renderMenuLabel(item,index,headerIcons)}</button>})}
+      </nav>}<div className="ui-theme-preview-header-end">{headerIcons&&<div className="ui-theme-preview-header-icons" aria-label="Header 아이콘 미리보기"><button type="button" title="검색" aria-label="검색">⌕</button><button type="button" title="알림" aria-label="알림">◉</button></div>}<div className="ui-theme-preview-user-wrap"><button className="ui-theme-preview-user-trigger" aria-label="사용자 메뉴" onClick={()=>{setUserMenuOpen(value=>!value);if(isMobile)setMobileMenuOpen(false)}}><i></i><span>Admin</span></button>{userMenuOpen&&<div className="ui-theme-preview-user-menu"><strong>사용자 메뉴</strong><button>프로필</button><button>설정</button><hr/><button>로그아웃</button></div>}</div></div></header>}
       {isMobile&&mobileMenuOpen&&<div className="ui-theme-preview-mobile-menu-layer">
         <button type="button" className="ui-theme-preview-mobile-menu-backdrop" aria-label="모바일 메뉴 닫기" onClick={()=>setMobileMenuOpen(false)}></button>
         <div className="ui-theme-preview-mobile-menu-panel">
           <div className="ui-theme-preview-mobile-menu-head"><strong>MENU</strong><button type="button" onClick={()=>setMobileMenuOpen(false)}>×</button></div>
           <div className="ui-theme-preview-mobile-menu-list">
-            {hasHeader&&mobileItem('home','Home')}
-            {hasHeader&&mobileItem('products','Products',true,['상품 조회','카테고리','재고 관리'])}
-            {hasHeader&&mobileItem('reports','Reports')}
-            {hasSidebar&&mobileItem('dashboard','Dashboard')}
-            {hasSidebar&&mobileItem('catalog','Catalog',true,['상품','카테고리'])}
-            {hasSidebar&&mobileItem('orders','Orders')}
+            {sourceMenuItems.length
+              ? sourceMenuItems.slice(0,8).map((item,index)=>mobileItem(`source-mobile-${index}`,item,index))
+              : <>
+                {hasHeader&&mobileItem('home',{label:'Home'},0)}
+                {hasHeader&&mobileItem('products',{label:'Products'},1,true,['상품 조회','카테고리','재고 관리'])}
+                {hasHeader&&mobileItem('reports',{label:'Reports'},2)}
+                {hasSidebar&&mobileItem('dashboard',{label:'Dashboard'},3)}
+                {hasSidebar&&mobileItem('catalog',{label:'Catalog'},4,true,['상품','카테고리'])}
+                {hasSidebar&&mobileItem('orders',{label:'Orders'},5)}
+              </>}
           </div>
         </div>
       </div>}
       <div className="ui-theme-preview-body">
         {hasSidebar&&<aside><strong>MENU</strong>
-          <button className={activeMenu==='dashboard'?'active':''} onClick={()=>menuClick('dashboard')}>Dashboard</button>
-          <div className="ui-theme-preview-side-dropdown"><button className={activeMenu==='catalog'?'active':''} onClick={()=>menuClick('catalog',true)}>Catalog <span>⌄</span></button>{submenuOpen&&activeMenu==='catalog'&&<div className="ui-theme-preview-side-submenu"><button>상품</button><button>카테고리</button></div>}</div>
-          <button className={activeMenu==='orders'?'active':''} onClick={()=>menuClick('orders')}>Orders</button>
+          {(sourceMenuItems.length?sourceMenuItems.slice(0,6):[{label:'Dashboard'},{label:'Catalog'},{label:'Orders'}]).map((item,index)=>{const id=`source-side-${index}`;return <button key={id} className={activeMenu===id?'active':''} onClick={()=>menuClick(id)}>{renderMenuLabel(item,index,sidebarMenuIcons)}</button>})}
         </aside>}
         <main>
-          <div className="ui-theme-preview-tabs"><button className="active">Dashboard</button><button>Activity</button><button>Settings</button></div>
-          <div className="ui-theme-preview-title"><div><b>Dashboard</b><small>직접 Hover/Click하여 외부 Theme의 상태 스타일을 확인하세요.</small></div><button className="ui-theme-preview-primary">Primary</button></div>
-          <div className="ui-theme-preview-kpis"><article><small>Users</small><b>1,248</b></article><article><small>Orders</small><b>326</b></article><article><small>Status</small><b>Active</b></article></div>
-          <section className="ui-theme-preview-card"><div className="ui-theme-preview-form"><input placeholder="클릭하여 Focus 스타일 확인"/><button>검색</button></div><div className="ui-theme-preview-table"><i></i><i></i><i></i></div></section>
+          <div className={`ui-theme-preview-tabs ${config?.theme==='custom'?'imported-navigation':''}`}>
+            {previewPageItems.map((item,index)=><button key={`${String(item?.label||item)}-${index}`} className={selectedPageIndex===index?'active':''} onClick={()=>setActivePage(index)}>{sourceMenuItems.length?renderMenuLabel(item,index):String(item?.label||item)}</button>)}
+          </div>
+          <div key={`${pageModel.kind}-${pageModel.title}`} className={`ui-theme-preview-page ui-theme-preview-page-${pageModel.kind}`}>
+            <div className="ui-theme-preview-title"><div><b>{pageModel.title}</b><small>{pageModel.description} · 메뉴 클릭과 Hover로 가져온 상태/동작 스타일을 확인하세요.</small></div><button className="ui-theme-preview-primary">Primary</button></div>
+            <div className="ui-theme-preview-kpis">{pageModel.kpis.map(([name,value])=><article key={name}><small>{name}</small><b>{value}</b></article>)}</div>
+            {pageModel.kind==='activity'?<section className="ui-theme-preview-card ui-theme-preview-activity">{pageModel.rows.map((row,index)=><div key={row}><span>{index+1}</span><p>{row}</p><small>{index===0?'방금 전':`${index*7+3}분 전`}</small></div>)}</section>
+              :pageModel.kind==='settings'?<section className="ui-theme-preview-card ui-theme-preview-settings">{pageModel.rows.map((row,index)=><label key={row}><span><b>{row}</b><small>{index===0?'계정 기본값을 관리합니다.':index===1?'알림과 자동 실행을 설정합니다.':'가져온 Theme 동작을 확인합니다.'}</small></span><input type="checkbox" defaultChecked={index!==1}/></label>)}</section>
+              :<section className="ui-theme-preview-card"><div className="ui-theme-preview-form"><input placeholder={pageModel.placeholder||'클릭하여 Focus 스타일 확인'}/><button>검색</button></div><div className="ui-theme-preview-table"><i></i><i></i><i></i></div></section>}
+          </div>
         </main>
       </div>
       {hasFooter&&<footer><span></span><span></span><span></span></footer>}
@@ -841,7 +1595,7 @@ const uiLayoutSummary=(value)=>{
   if(value?.enabled===false||value?.template_id==='headless_agent') return 'UI 없음 · Headless Agent · Agent Runtime 유지'
   const nav={header_sidebar:'상단+좌측 메뉴',left:'좌측 메뉴',top:'상단 메뉴',none:'메뉴 없음'}[value.navigation]||value.navigation||''
   const themeLabel=value.theme==='custom'?(value.theme_name||'Custom Theme'):(value.theme==='dark'?'Dark':value.theme==='auto'?'Auto':'Light')
-  const parts=[template?.name||value.template_id,nav,value.footer?'Footer':'',value.user_menu?'사용자 메뉴':'',themeLabel,value.agent_runtime_persistent!==false?'Agent 실행 유지':''].filter(Boolean)
+  const parts=[template?.name||value.template_id,nav,value.sidebar&&value.sidebar_menu_icons?'좌측 메뉴 아이콘':'',value.header&&value.header_icons?'Header 아이콘':'',value.footer?'Footer':'',value.user_menu?'사용자 메뉴':'',themeLabel,value.agent_runtime_persistent!==false?'Agent 실행 유지':''].filter(Boolean)
   return parts.join(' · ')
 }
 
@@ -853,13 +1607,15 @@ function UILayoutWireframe({config={},compact=false}){
   const hasHeader=Boolean(merged.header)
   const hasFooter=Boolean(merged.footer)
   const userMenu=Boolean(merged.user_menu)
+  const sidebarMenuIcons=Boolean(merged.sidebar_menu_icons)
+  const headerIcons=Boolean(hasHeader&&merged.header_icons)
   const layout=merged.main_layout||'one_column'
   const cards=Math.min(compact?4:6,Math.max(3,components.length||4))
   const customTheme=merged.theme==='custom'
   return <div style={uiThemeWireframeStyle(merged)} className={`ui-layout-wireframe ${customTheme?'custom':uiThemeIsDark(merged)?'dark':'light'} ${compact?'compact':''}`}>
-    {hasHeader&&<div className="ui-layout-wf-header"><i></i><div className="ui-layout-wf-nav"><span></span><span></span><span></span></div>{userMenu&&<b></b>}</div>}
+    {hasHeader&&<div className="ui-layout-wf-header"><i></i><div className={`ui-layout-wf-nav ${headerIcons?'with-icons':''}`}><span></span><span></span><span></span></div><div className="ui-layout-wf-header-end">{headerIcons&&<span className="ui-layout-wf-header-actions"><i></i><i></i></span>}{userMenu&&<b></b>}</div></div>}
     <div className="ui-layout-wf-body">
-      {hasSidebar&&<div className="ui-layout-wf-sidebar"><i></i><i></i><i></i><i></i><i></i></div>}
+      {hasSidebar&&<div className={`ui-layout-wf-sidebar ${sidebarMenuIcons?'with-icons':''}`}><i></i><i></i><i></i><i></i><i></i></div>}
       <div className={`ui-layout-wf-main ${layout}`}>
         <div className="ui-layout-wf-search"></div>
         <div className="ui-layout-wf-kpis"><span></span><span></span><span></span></div>
@@ -1103,13 +1859,16 @@ function UILayoutTemplateGallery({open,value,onClose,onApply,purposeText=''}){
           <section className="ui-layout-config-section">
             <div className="ui-layout-config-section-head"><strong>UI 구성</strong><small>화면에 표시할 공통 영역</small></div>
             <div className="ui-layout-toggle-grid">
-              <label><input type="checkbox" checked={Boolean(draft.header)} onChange={e=>patch({header:e.target.checked})}/>상단 Header</label>
-              <label><input type="checkbox" checked={Boolean(draft.sidebar)} onChange={e=>patch({sidebar:e.target.checked,navigation:e.target.checked?(draft.header?'header_sidebar':'left'):(draft.header?'top':'none')})}/>좌측 메뉴</label>
+              <label><input type="checkbox" checked={Boolean(draft.header)} onChange={e=>patch({header:e.target.checked,header_icons:e.target.checked?Boolean(draft.header_icons):false})}/>상단 Header</label>
+              <label><input type="checkbox" checked={Boolean(draft.sidebar)} onChange={e=>patch({sidebar:e.target.checked,sidebar_menu_icons:e.target.checked?Boolean(draft.sidebar_menu_icons):false,navigation:e.target.checked?(draft.header?'header_sidebar':'left'):(draft.header?'top':'none')})}/>좌측 메뉴</label>
+              <label><input type="checkbox" checked={Boolean(draft.sidebar_menu_icons)} disabled={!draft.sidebar} onChange={e=>patch({sidebar_menu_icons:e.target.checked})}/>좌측 메뉴 아이콘</label>
+              <label><input type="checkbox" checked={Boolean(draft.header_icons)} disabled={!draft.header} onChange={e=>patch({header_icons:e.target.checked})}/>상단 Header 아이콘</label>
               <label><input type="checkbox" checked={Boolean(draft.sidebar_collapsible)} disabled={!draft.sidebar} onChange={e=>patch({sidebar_collapsible:e.target.checked})}/>Sidebar 접기</label>
               <label><input type="checkbox" checked={Boolean(draft.footer)} onChange={e=>patch({footer:e.target.checked})}/>Footer</label>
               <label><input type="checkbox" checked={Boolean(draft.user_menu)} onChange={e=>patch({user_menu:e.target.checked})}/>사용자 메뉴</label>
               <label><input type="checkbox" checked={draft.responsive!==false} onChange={e=>patch({responsive:e.target.checked})}/>반응형</label>
             </div>
+            <div className="ui-layout-icon-option-note"><span>아이콘 옵션</span><small>선택하면 미리보기와 생성 Agent의 Sidebar/Header에 의미에 맞는 표준 아이콘을 함께 적용합니다.</small></div>
           </section>
 
           <section className="ui-layout-config-section">
@@ -2668,6 +3427,32 @@ function FactoryWorkflowDiagram({definition}){
   </div>
 }
 
+function DevelopmentStageWorkflowDiagram({workflow}){
+  const stages=Array.isArray(workflow?.stages)?workflow.stages:[]
+  if(!stages.length) return null
+  return <div className="development-stage-workflow">
+    <div className="development-stage-workflow-head">
+      <div><small>APPROVED DEVELOPMENT WORKFLOW</small><strong>Agent 개발 Stage Workflow</strong></div>
+      <span>{stages.length} Stage · 단계별 완료 조건 / 검증</span>
+    </div>
+    <div className="development-stage-workflow-track">
+      {stages.map((stage,index)=><React.Fragment key={stage.id||index}>
+        <article className="development-stage-workflow-card">
+          <span className="development-stage-workflow-number">{index+1}</span>
+          <div>
+            <div className="development-stage-workflow-title"><strong>{stage.title||`Stage ${index+1}`}</strong><span>{stage.status||'APPROVED'}</span></div>
+            <small>{stage.goal||''}</small>
+            {Array.isArray(stage.validation)&&stage.validation.length>0&&<div className="development-stage-workflow-checks">{stage.validation.slice(0,2).map((item,checkIndex)=><span key={checkIndex}>✓ {item}</span>)}</div>}
+            <em>계획 파일 {Number(stage.planned_file_count||0)}개 · Checkpoint {stage.checkpoint_after_stage===false?'OFF':'ON'} · Stage Test {stage.test_after_stage===false?'OFF':'ON'}</em>
+          </div>
+        </article>
+        {index<stages.length-1&&<div className="development-stage-workflow-arrow">→</div>}
+      </React.Fragment>)}
+    </div>
+    <div className="development-stage-workflow-policy">순차 개발 정책 · Stage 실패 시 중단 · 완료 Stage 보존 · 실패 Stage부터 재개하도록 Workflow 계약 구성</div>
+  </div>
+}
+
 function TargetWorkflowDiagram({workflow}){
   const [selectedGroup,setSelectedGroup]=useState(null)
 
@@ -2720,6 +3505,27 @@ function TargetWorkflowDiagram({workflow}){
     ) return 'COMPLETE'
 
     if(
+      text.includes('viewport')
+      || text.includes('vision')
+      || text.includes('qa')
+      || text.includes('repair')
+      || text.includes('품질')
+      || text.includes('수정 필요')
+    ) return 'QA'
+
+    if(
+      text.includes('blender')
+      || text.includes('3d')
+      || text.includes('scene')
+      || text.includes('mesh')
+      || text.includes('material')
+      || text.includes('camera')
+      || text.includes('lighting')
+      || text.includes('render')
+      || text.includes('export')
+    ) return 'BLENDER'
+
+    if(
       text.includes('save')
       || text.includes('저장')
       || text.includes('output')
@@ -2770,9 +3576,21 @@ function TargetWorkflowDiagram({workflow}){
     },
     {
       id:'MCP',
-      title:'MCP 파일 처리',
+      title:'MCP / Tool 실행',
       subtitle:'Client · Transport · Server · Tool',
       icon:'⚙'
+    },
+    {
+      id:'BLENDER',
+      title:'3D Scene 제작',
+      subtitle:'Blender · Scene · Material · Render',
+      icon:'◈'
+    },
+    {
+      id:'QA',
+      title:'Viewport QA / 수정',
+      subtitle:'Capture · Vision QA · Repair Loop',
+      icon:'◎'
     },
     {
       id:'LLM',
@@ -2952,11 +3770,86 @@ function redevelopmentResumeNodeForFailure(stage='',status=''){
 }
 
 
+function CodeDocumentationToggle({ enabled=false, busy=false, stage='', onChange }){
+  return <label
+    className={`agent-build-title-doc-option ${enabled?'enabled':''}`}
+    title="체크하면 생성·수정되는 소스의 클래스/함수/메소드와 주요 변수·필드·상수에 언어별 표준 설명 주석을 추가합니다. 단순 지역 변수에는 불필요한 주석을 만들지 않습니다."
+  >
+    <input
+      type="checkbox"
+      checked={Boolean(enabled)}
+      disabled={busy||stage==='BUILDING'}
+      onChange={event=>onChange?.(event.target.checked)}
+    />
+    <span>변수·메소드 설명 추가</span>
+  </label>
+}
+
+function CodingStyleSettingsMenu({ value, busy=false, stage='', codeDocumentationEnabled=false, onChange }){
+  const normalized=normalizeAgentCodingStyle(value)
+  const disabled=busy||stage==='BUILDING'
+  const options=[
+    ['meaningful_names','의미 있는 변수명','역할이 드러나는 이름을 사용하고 모호한 축약어를 최소화합니다.','이름 · 타입'],
+    ['uppercase_constants','상수 UPPER_SNAKE_CASE','Python 등 해당 언어 관례에 맞춰 상수 이름을 구분합니다.','이름 · 타입'],
+    ['snake_case_functions','함수 snake_case','Python 함수/메소드는 snake_case를 기본으로 사용합니다.','이름 · 타입'],
+    ['pascal_case_classes','클래스 PascalCase','클래스/타입 이름은 PascalCase를 기본으로 사용합니다.','이름 · 타입'],
+    ['type_hints','함수 Type Hint','입력/반환 타입을 표현할 수 있는 언어에서는 타입 정보를 명확히 작성합니다.','이름 · 타입'],
+    ['function_docstrings','함수 Docstring','설명 주석 옵션이 ON이면 공개 함수/메소드 Docstring/JSDoc/XML 문서를 작성합니다.','이름 · 타입'],
+    ['notebook_single_responsibility','Notebook 한 셀 한 역할','Notebook 생성 시 로딩·분할·검색·LLM 호출 등 단계를 가능한 한 셀별로 분리합니다.','구조 · Notebook'],
+    ['refactor_repetition','반복 로직 함수화','반복되는 처리 로직은 재사용 가능한 함수/메소드로 분리합니다.','구조 · Notebook'],
+    ['labeled_outputs','실행 결과 단계 Label','Notebook/CLI 출력에 [PDF 로딩], [검색], [LLM]처럼 단계 Label을 사용합니다.','구조 · Notebook'],
+    ['avoid_magic_numbers','Magic Number 최소화','반복되는 모델명·수치·경로·옵션은 상수나 설정으로 분리합니다.','구조 · Notebook'],
+  ]
+  const groups=[
+    ['이름 · 타입','이름 · 타입','읽기 쉬운 이름과 타입 안정성을 유지합니다.'],
+    ['구조 · Notebook','구조 · Notebook','Notebook과 반복 로직의 구조를 일관되게 정리합니다.'],
+  ]
+  const update=(key,checked)=>onChange?.({...normalized,[key]:Boolean(checked)})
+  return <details className="agent-coding-style-menu">
+    <summary title="Agent Factory가 생성·수정하는 코드에 적용할 기본 코딩 스타일을 설정합니다.">
+      <span>코딩 스타일</span><b>{countEnabledAgentCodingStyle(normalized)}/{options.length}</b>
+    </summary>
+    <div className="agent-coding-style-popover">
+      <header>
+        <div><strong>기본 코딩 스타일</strong><small>생성·재개발·수정 코드에 동일한 규칙을 적용합니다.</small></div>
+        <div className="agent-coding-style-head-actions">
+          <span>{countEnabledAgentCodingStyle(normalized)}개 적용</span>
+          <button type="button" disabled={disabled} onClick={()=>onChange?.(options.reduce((next,[key])=>({...next,[key]:true}),{}))}>전체 선택</button>
+          <button type="button" disabled={disabled} onClick={()=>onChange?.(normalizeAgentCodingStyle(DEFAULT_AGENT_CODING_STYLE))}>기본값</button>
+          <button type="button" className="close" onClick={event=>event.currentTarget.closest('details')?.removeAttribute('open')}>닫기</button>
+        </div>
+      </header>
+      <div className="agent-coding-style-groups">
+        {groups.map(([group,title,description])=><section key={group} className="agent-coding-style-group">
+          <div className="agent-coding-style-group-title"><strong>{title}</strong><small>{description}</small></div>
+          <div className="agent-coding-style-options">
+            {options.filter(item=>item[3]===group).map(([key,label,description])=><label key={key} className={normalized[key]?'enabled':''}>
+              <input type="checkbox" checked={Boolean(normalized[key])} disabled={disabled} onChange={event=>update(key,event.target.checked)}/>
+              <span><strong>{label}</strong><small>{description}</small></span>
+            </label>)}
+          </div>
+        </section>)}
+      </div>
+      {!codeDocumentationEnabled&&normalized.function_docstrings&&<p>함수 Docstring은 상단의 ‘변수·메소드 설명 추가’를 켰을 때 실제 설명 문서화까지 적용됩니다.</p>}
+    </div>
+  </details>
+}
+
+function AgentBuildStyleControls({ documentationEnabled=false, codingStyle, busy=false, stage='', onDocumentationChange, onCodingStyleChange }){
+  return <div className="agent-build-title-style-controls">
+    <CodeDocumentationToggle enabled={documentationEnabled} busy={busy} stage={stage} onChange={onDocumentationChange}/>
+    <CodingStyleSettingsMenu value={codingStyle} busy={busy} stage={stage} codeDocumentationEnabled={documentationEnabled} onChange={onCodingStyleChange}/>
+  </div>
+}
+
 function AgentBuildActionBar({
   stage='REQUIREMENTS',
   busy=false,
   message='',
   workflowEnabled=true,
+  developmentPlanApproved=true,
+  runtimeSetupApproved=true,
+  databasePlanApproved=true,
   onWorkflow,
   onCreateProject,
   onStartDevelopment,
@@ -3008,11 +3901,11 @@ function AgentBuildActionBar({
       <button
         type="button"
         className={stage==='WORKFLOW_READY'||(stage==='REQUIREMENTS'&&workflowEnabled)?'primary':''}
-        disabled={busy||stage==='BUILDING'||stage==='PROJECT_CREATED'||(stage==='REQUIREMENTS'&&!workflowEnabled)}
+        disabled={busy||!developmentPlanApproved||!runtimeSetupApproved||!databasePlanApproved||stage==='BUILDING'||stage==='PROJECT_CREATED'||(stage==='REQUIREMENTS'&&!workflowEnabled)}
         onClick={onCreateProject}
-        title={stage==='REQUIREMENTS'?'Workflow/DB 설계를 준비합니다. DB가 필요하면 설계 확인 후 프로젝트를 생성합니다.':'확정된 설계를 기준으로 프로젝트를 생성합니다.'}
+        title={!developmentPlanApproved?'추천 개발 Stage를 확인·수정하고 개발 계획을 승인한 뒤 프로젝트를 생성할 수 있습니다.':!runtimeSetupApproved?'실행 환경 추천 PORT를 확인하고 실행 환경을 확정하세요.':!databasePlanApproved?'DB Resource Plan Preview를 확인하고 실제 구성 계획을 승인하세요.':stage==='REQUIREMENTS'?'Workflow/DB 설계를 준비합니다. DB가 필요하면 설계 확인 후 프로젝트를 생성합니다.':'확정된 설계를 기준으로 프로젝트를 생성합니다.'}
       >
-        ＋ 프로젝트 생성
+        {!developmentPlanApproved?'○ 개발 계획 승인 필요':!runtimeSetupApproved?'○ 실행 환경 확정 필요':!databasePlanApproved?'○ DB 생성 계획 승인 필요':'＋ 프로젝트 생성'}
       </button>
 
       <button
@@ -3050,6 +3943,7 @@ function AgentBuildActionBar({
 }
 
 function IDE() {
+  const mediaSession=useMediaSession()
   const [root,setRoot]=useState('')
   // Keep the last authoritative project root that successfully populated the
   // file tree. React project/root state can briefly be empty while project
@@ -3069,6 +3963,19 @@ function IDE() {
   const [newAgentVenvPath,setNewAgentVenvPath]=useState('')
   const [newAgentModelsPath,setNewAgentModelsPath]=useState('')
   const [newAgentCreateResult,setNewAgentCreateResult]=useState(null)
+  const [agentRuntimeSetup,setAgentRuntimeSetup]=useState(()=>createDefaultAgentRuntimeSetup())
+  const [agentRuntimePortInfo,setAgentRuntimePortInfo]=useState(null)
+  const [agentRuntimePortBusy,setAgentRuntimePortBusy]=useState(false)
+  const [agentDatabaseSetup,setAgentDatabaseSetup]=useState(()=>createDefaultAgentDatabaseSetup())
+  const [agentDatabaseTestBusy,setAgentDatabaseTestBusy]=useState(false)
+  const [agentDatabaseTestResult,setAgentDatabaseTestResult]=useState(null)
+  const [agentDatabaseAnalyzeBusy,setAgentDatabaseAnalyzeBusy]=useState('')
+  const [agentDatabaseAnalyzeResult,setAgentDatabaseAnalyzeResult]=useState({})
+  const [agentDatabaseCreateBusy,setAgentDatabaseCreateBusy]=useState('')
+  const [agentDatabaseCreateResult,setAgentDatabaseCreateResult]=useState({})
+  const [agentDatabaseResourcePlan,setAgentDatabaseResourcePlan]=useState(null)
+  const [agentDatabasePlanBusy,setAgentDatabasePlanBusy]=useState(false)
+  const [agentDatabaseProvisionBusy,setAgentDatabaseProvisionBusy]=useState('')
   const [projectListOpen,setProjectListOpen]=useState(false)
   const [projectSwitcherOpen,setProjectSwitcherOpen]=useState(false)
   const [projectList,setProjectList]=useState([])
@@ -3201,6 +4108,8 @@ function IDE() {
   const [projectDirs,setProjectDirs]=useState([])
   const [selected,setSelected]=useState('')
   const [openEditorFiles,setOpenEditorFiles]=useState([])
+  const [temporaryMedia,setTemporaryMedia]=useState(null)
+  const [temporaryMediaActive,setTemporaryMediaActive]=useState(false)
   const codeToolbarShellRef=useRef(null)
   const codeToolbarResizeCleanupRef=useRef(null)
   const [codeToolbarResizing,setCodeToolbarResizing]=useState(false)
@@ -3273,6 +4182,8 @@ function IDE() {
   const [focusOwner,setFocusOwner]=useState('editor')
   const focusOwnerRef=useRef('editor')
   const editorInstanceRef=useRef(null)
+  const [codeDefinitionPreview,setCodeDefinitionPreview]=useState(null)
+  const codeNavigationHistoryRef=useRef({back:[],forward:[]})
   const editorBookmarkDecorationIdsRef=useRef([])
   const editorDebugDecorationIdsRef=useRef([])
   const [editorBookmarkRevision,setEditorBookmarkRevision]=useState(0)
@@ -3492,6 +4403,9 @@ function IDE() {
   const [command,setCommand]=useState('git status')
   const [jobs,setJobs]=useState({})
   const [workflowReq,setWorkflowReq]=useState('')
+  const [agentSpecialization,setAgentSpecialization]=useState('GENERAL')
+  const [blenderMcpReadiness,setBlenderMcpReadiness]=useState(null)
+  const [blenderMcpReadinessBusy,setBlenderMcpReadinessBusy]=useState(false)
   const [uiLayoutConfig,setUiLayoutConfig]=useState(null)
   const [uiLayoutGalleryOpen,setUiLayoutGalleryOpen]=useState(false)
   const [confirmedInterviewRequirements,setConfirmedInterviewRequirements]=useState({})
@@ -3499,12 +4413,20 @@ function IDE() {
   const [designProjectSavedAt,setDesignProjectSavedAt]=useState('')
   const [designProjectVersion,setDesignProjectVersion]=useState(1)
   const [designFeatureRegistry,setDesignFeatureRegistry]=useState([])
+  const [requirementRecommendations,setRequirementRecommendations]=useState(null)
+  const [requirementRecommendationSettings,setRequirementRecommendationSettings]=useState(()=>normalizeRequirementRecommendationSettings(EMPTY_REQUIREMENT_RECOMMENDATION_SETTINGS))
+  const [developmentStagePlan,setDevelopmentStagePlan]=useState(null)
+  const [developmentStagePlanBusy,setDevelopmentStagePlanBusy]=useState(false)
+  const [codeDocumentationEnabled,setCodeDocumentationEnabled]=useState(false)
+  const [agentCodingStyle,setAgentCodingStyle]=useState(()=>normalizeAgentCodingStyle(DEFAULT_AGENT_CODING_STYLE))
+  const [builderSummaryTab,setBuilderSummaryTab]=useState('REQUIREMENTS')
   const [designProjectSaving,setDesignProjectSaving]=useState(false)
   const [requirementDraftRestored,setRequirementDraftRestored]=useState(false)
   const [requirementDraftSavedAt,setRequirementDraftSavedAt]=useState('')
   const [requirementDraftCandidate,setRequirementDraftCandidate]=useState(null)
   const [requirementDraftDecisionPending,setRequirementDraftDecisionPending]=useState(false)
   const requirementDraftDecisionPendingRef=useRef(false)
+  const projectAutoRestoreRootRef=useRef('')
   const [restoredBuildResume,setRestoredBuildResume]=useState(null)
   const [redevelopmentInfo,setRedevelopmentInfo]=useState(null)
   const requirementCheckpointSignatureRef=useRef('')
@@ -3561,6 +4483,12 @@ function IDE() {
   const [dbErdReport,setDbErdReport]=useState(null)
   const [dbErdBusy,setDbErdBusy]=useState(false)
   const [dbErdError,setDbErdError]=useState('')
+  const [schedulerReport,setSchedulerReport]=useState(null)
+  const [schedulerBusy,setSchedulerBusy]=useState(false)
+  const [schedulerError,setSchedulerError]=useState('')
+  const [schedulerIncludeTerminal,setSchedulerIncludeTerminal]=useState(false)
+  const [schedulerCancelBusy,setSchedulerCancelBusy]=useState('')
+  const schedulerRefreshInFlightRef=useRef(false)
   const [analysis,setAnalysis]=useState(null)
   const [mcpName,setMcpName]=useState('Local MCP')
   const [mcpEndpoint,setMcpEndpoint]=useState('http://127.0.0.1:8001/mcp')
@@ -3571,7 +4499,10 @@ function IDE() {
   const [mcpAddError,setMcpAddError]=useState('')
   const [mcpAddForm,setMcpAddForm]=useState({
     name:'',
+    transport:'streamable_http',
     endpoint:'',
+    command:'',
+    args_text:'',
     trust_level:'UNTRUSTED',
     allow_read_without_prompt:false,
     allow_write_without_prompt:false,
@@ -3643,20 +4574,34 @@ function IDE() {
     }catch{return 300}
   })
   const [codeEditPrompt,setCodeEditPrompt]=useState('')
+  const codeEditPromptRef=useRef(null)
+  const [codeEditReferences,setCodeEditReferences]=useState([])
+  const [documentTextReferenceMenu,setDocumentTextReferenceMenu]=useState(null)
   const [codeEditAttachments,setCodeEditAttachments]=useState([])
   const [codeEditAttachmentAnalysis,setCodeEditAttachmentAnalysis]=useState({busy:false,ready:true,overallProgress:100,failedFiles:0,successfulFiles:0,files:[]})
   const [codeEditScope,setCodeEditScope]=useState('FILE')
-  const [codeEditChat,setCodeEditChat]=useState([
-    {
-      role:'assistant',
-      content:'수정할 파일을 선택한 뒤 원하는 변경 내용을 입력하세요. 현재 파일 코드를 기준으로 수정안을 만들고 적용할 수 있습니다.'
-    }
-  ])
+  const [codeEditChat,setCodeEditChat]=useState([])
   const codeEditChatRef=useRef(null)
   const [codeEditBusy,setCodeEditBusy]=useState(false)
   const [codeEditProposal,setCodeEditProposal]=useState(null)
   const [codeDiffReview,setCodeDiffReview]=useState(null)
   const [codeRightPanelTab,setCodeRightPanelTab]=useState('FILES')
+  const registerCodexCodeProposal=React.useCallback((proposal)=>{
+    if(!proposal?.codeBlockCount||!Array.isArray(proposal?.blocks)) return
+    setCodeDiffReview(null)
+    setCodeEditProposal({
+      source:'codex',
+      proposalType:'codex_blocks',
+      path:proposal.activeFile||'',
+      instruction:proposal.question||'',
+      responseText:proposal.responseText||'',
+      blocks:proposal.blocks,
+      codeBlockCount:Number(proposal.codeBlockCount||0),
+      createdAt:proposal.createdAt||new Date().toISOString()
+    })
+    setWorkspaceRightCollapsed(false)
+    setCodeRightPanelTab('PROPOSAL')
+  },[])
   const [sqlProfile,setSqlProfile]=useState({
     connection_id:'',
     name:'PostgreSQL 연결',
@@ -3929,6 +4874,12 @@ function IDE() {
     scrollCodeEditChatToBottom(codeEditBusy?'auto':'smooth')
   },[codeEditChat.length,codeEditBusy,codeEditProposal,workspaceTab])
 
+  useEffect(()=>{
+    // 다른 프로젝트의 선택 텍스트가 새 프로젝트 프롬프트에 섞이지 않도록
+    // workspace root가 바뀌면 명시적 LLM 참조 문구를 초기화합니다.
+    setCodeEditReferences([])
+  },[root])
+
   const [terminalSessions,setTerminalSessions]=useState([
     {
       id:'terminal-1',
@@ -4121,6 +5072,7 @@ function IDE() {
     return()=>clearTimeout(timer)
   },[
     chat,
+    input,
     workflowReq,
     confirmedInterviewRequirements,
     targetWorkflowPreview,
@@ -4132,6 +5084,10 @@ function IDE() {
     interviewAttachmentMemory,
     requirementManualOverrides,
     designFeatureRegistry,
+    requirementRecommendations,
+    requirementRecommendationSettings,
+    codeDocumentationEnabled,
+    agentCodingStyle,
     uiLayoutConfig,
     restoredBuildResume
   ])
@@ -4141,6 +5097,12 @@ function IDE() {
     // project folder. A failed build must be recoverable after a browser restart,
     // another PC session, or localStorage cleanup.
     const projectPath=String(newAgentProjectRoot||'').trim()
+    if(projectPath&&String(projectAutoRestoreRootRef.current||'').trim()===projectPath){
+      // loadProject() performs an authoritative server/local checkpoint restore itself.
+      // Suppress the generic "restore previous draft?" prompt so a normal project open
+      // immediately shows the persisted Workflow/DB state instead of asking twice.
+      return undefined
+    }
     if(!projectPath){
       setRequirementDraftCandidate(null)
       setRequirementDraftDecisionPending(false)
@@ -4270,7 +5232,8 @@ function IDE() {
     const signature=attachmentIds.join('|')
     const selectedFiles=interviewAttachments.map(item=>({
       name:String(item?.name||''),
-      path:String(item?.path||'')
+      path:String(item?.path||''),
+      project_relative_path:String(item?.project_relative_path||'')
     }))
 
     interviewAttachmentSummaryRunRef.current=signature
@@ -4306,6 +5269,9 @@ function IDE() {
       setInterviewAttachmentSummary(summary)
       setInterviewAttachmentRequirements(Array.isArray(result?.attachment_requirements)?result.attachment_requirements:[])
       setInterviewAttachmentRequirementCoverage(result?.attachment_requirement_coverage&&typeof result.attachment_requirement_coverage==='object'?result.attachment_requirement_coverage:{})
+      if(result?.development_stage_plan&&typeof result.development_stage_plan==='object'){
+        setDevelopmentStagePlan(prev=>prev?.approved?prev:result.development_stage_plan)
+      }
       setInterviewAttachmentSummaryFiles(prev=>{
         const merged=[...prev,...selectedFiles]
         const seen=new Set()
@@ -8106,8 +9072,92 @@ function IDE() {
     return null
   }
 
+  const restoreExistingProjectDesignState=async(projectRoot,projectName='',expectedContextEpoch=null)=>{
+    const targetRoot=String(projectRoot||'').trim()
+    if(!targetRoot) return {restored:false,source:'',hasDatabaseSql:false}
+    const key=requirementDraftKeyFor(targetRoot,projectName||newAgentName)
+    let localSnapshot=null
+    try{
+      const raw=localStorage.getItem(key)
+      localSnapshot=raw?JSON.parse(raw):null
+    }catch{}
+
+    let serverResult=null
+    try{
+      serverResult=await api(`/workflow/design-checkpoint?project_root=${encodeURIComponent(targetRoot)}`)
+    }catch(error){
+      console.warn('프로젝트 설계 Checkpoint 자동 복원 조회 실패',error)
+    }
+
+    if(Number.isInteger(expectedContextEpoch)&&projectContextEpochRef.current!==expectedContextEpoch){
+      return {restored:false,source:'STALE_PROJECT_LOAD',hasDatabaseSql:false}
+    }
+    const serverSnapshot=(serverResult?.checkpoint&&typeof serverResult.checkpoint==='object')
+      ? serverResult.checkpoint
+      : null
+    // Existing project load is authoritative from the project-local server checkpoint.
+    // The backend also hydrates persisted DB SQL from the generated migration file, so
+    // prefer it over a browser-local draft even when localStorage has a newer timestamp.
+    const snapshot=serverSnapshot||localSnapshot
+    const runtime=(serverResult?.runtime&&typeof serverResult.runtime==='object')?serverResult.runtime:{}
+    if(!snapshot){
+      requirementDraftDecisionPendingRef.current=false
+      setRequirementDraftCandidate(null)
+      setRequirementDraftDecisionPending(false)
+      return {restored:false,source:'',hasDatabaseSql:false}
+    }
+
+    const buildResume={
+      ...(snapshot?.build_resume&&typeof snapshot.build_resume==='object'?snapshot.build_resume:{}),
+      source:String(serverResult?.checkpoint_source||snapshot?.build_resume?.source||(serverSnapshot?'PROJECT_CHECKPOINT':'LOCAL_DRAFT')),
+      run_id:String(
+        runtime?.current_run?.run_id
+        ||runtime?.workflow_state?.diagnostic_run_id
+        ||runtime?.workflow_state?.thread_id
+        ||snapshot?.build_resume?.run_id
+        ||''
+      ),
+      status:String(
+        runtime?.current_run?.status
+        ||runtime?.workflow_state?.diagnostic_status
+        ||runtime?.workflow_state?.status
+        ||snapshot?.build_resume?.status
+        ||''
+      ),
+      failure_stage:String(runtime?.workflow_state?.diagnostic_failure_stage||snapshot?.build_resume?.failure_stage||''),
+      failure_reason:String(runtime?.workflow_state?.diagnostic_failure_reason||runtime?.workflow_state?.error||snapshot?.build_resume?.failure_reason||''),
+      project_root:targetRoot,
+      workflow_state:runtime?.workflow_state||snapshot?.build_resume?.workflow_state||{},
+      requirements_snapshot:runtime?.requirements_snapshot||{}
+    }
+
+    const redevelopment=(serverResult?.redevelopment&&typeof serverResult.redevelopment==='object')
+      ? serverResult.redevelopment
+      : null
+    setRedevelopmentInfo(redevelopment?.available?redevelopment:null)
+    const restored=await restoreRequirementDraft(key,snapshot,buildResume)
+    requirementDraftDecisionPendingRef.current=false
+    setRequirementDraftDecisionPending(false)
+    setRequirementDraftCandidate(null)
+
+    const plan=snapshot?.workflow_preview?.database_plan
+      ||buildResume?.workflow_state?.database_plan
+      ||{}
+    const hasDatabaseSql=Boolean(String(plan?.ddl||plan?.ddl_preview||'').trim())
+    return {
+      restored:Boolean(restored),
+      source:String(serverResult?.checkpoint_source||(serverSnapshot?'PROJECT_CHECKPOINT':'LOCAL_DRAFT')),
+      hasDatabaseSql
+    }
+  }
+
   const loadProject=async(projectId)=>{
     const loadContextEpoch=++projectContextEpochRef.current
+    // Block autosave immediately while the target project's persisted design state is
+    // being restored. Otherwise a transient empty/new-project render can overwrite the
+    // existing checkpoint before the restore query finishes.
+    requirementDraftDecisionPendingRef.current=true
+    setRequirementDraftDecisionPending(true)
     // Do not let the previous project's tree root leak into file operations
     // while the new project metadata is loading.
     fileTreeRootRef.current=''
@@ -8124,6 +9174,9 @@ function IDE() {
       if(projectContextEpochRef.current!==loadContextEpoch) return
 
       if(!p.ok){
+        requirementDraftDecisionPendingRef.current=false
+        setRequirementDraftDecisionPending(false)
+        projectAutoRestoreRootRef.current=''
         const msg=p.message||'프로젝트를 불러오지 못했습니다.'
         setProjectLoadMessage(msg)
         setProjectLoadProgress({
@@ -8143,6 +9196,7 @@ function IDE() {
       })
 
       const projectRoot=p.project_root||root||''
+      projectAutoRestoreRootRef.current=projectRoot
 
       // v5.356: 다른 프로젝트의 Agent Factory/Workflow Snapshot이 새 프로젝트에
       // 우선 적용되지 않도록 프로젝트 전환 시 실행/설계 상태를 먼저 비웁니다.
@@ -8170,8 +9224,20 @@ function IDE() {
 
       setProjectLoadProgress({
         active:true,
+        percent:32,
+        message:'이전 설계 검토 · Workflow · DB SQL 상태를 복원하는 중...',
+        failed:false
+      })
+      const restoredDesign=await restoreExistingProjectDesignState(projectRoot,p.name||'',loadContextEpoch)
+      projectAutoRestoreRootRef.current=''
+      if(projectContextEpochRef.current!==loadContextEpoch) return
+
+      setProjectLoadProgress({
+        active:true,
         percent:40,
-        message:'프로젝트 파일과 폴더를 불러오는 중...',
+        message:restoredDesign.restored
+          ? `이전 설계 상태 복원 완료${restoredDesign.hasDatabaseSql?' · DB SQL 포함':''} · 프로젝트 파일을 불러오는 중...`
+          : '프로젝트 파일과 폴더를 불러오는 중...',
         failed:false
       })
 
@@ -8217,9 +9283,13 @@ function IDE() {
         failed:false
       })
 
-      setProjectLoadMessage(`프로젝트 #${p.id} ${p.name} 불러오기 완료`)
+      setProjectLoadMessage(
+        restoredDesign.restored
+          ? `프로젝트 #${p.id} ${p.name} 불러오기 완료 · 이전 설계/Workflow${restoredDesign.hasDatabaseSql?' · DB SQL':''} 복원됨`
+          : `프로젝트 #${p.id} ${p.name} 불러오기 완료`
+      )
       setProjectListOpen(false)
-      setWorkspaceTab('CODE')
+      setWorkspaceTab(restoredDesign.restored?'WORKFLOW':'CODE')
       setWorkflowView('TARGET')
       setScreen('WORKSPACE')
 
@@ -8239,6 +9309,9 @@ function IDE() {
         })
       },800)
     }catch(e){
+      requirementDraftDecisionPendingRef.current=false
+      setRequirementDraftDecisionPending(false)
+      projectAutoRestoreRootRef.current=''
       const msg='프로젝트 불러오기 실패: '+String(e)
       setProjectLoadMessage(msg)
       setProjectLoadProgress({
@@ -8258,12 +9331,19 @@ function IDE() {
     // v5.363: this is a hard project-context boundary, not just a navigation action.
     // Invalidate every pending load/adaptive-analysis request before clearing state.
     projectContextEpochRef.current+=1
+    projectAutoRestoreRootRef.current=''
     setAgentBuildMessage('')
     setWorkspaceTab('DESIGN')
     setWorkflowView('TARGET')
     setScreen('WORKSPACE')
     setInput('')
     setNewAgentCreateResult(null)
+    setAgentRuntimeSetup(createDefaultAgentRuntimeSetup())
+    setAgentRuntimePortInfo(null)
+    setAgentRuntimePortBusy(false)
+    setAgentDatabaseSetup(createDefaultAgentDatabaseSetup())
+    setAgentDatabaseTestBusy(false)
+    setAgentDatabaseTestResult(null)
     setSelectedProjectId(null)
     setGitInfo(null)
 
@@ -8285,6 +9365,8 @@ function IDE() {
     setWorkflowProgress({active:false,percent:0,stage:'대기',detail:'',startedAt:null})
     setTargetWorkflowError('')
     setWorkflowReq('')
+    setAgentSpecialization('GENERAL')
+    setBlenderMcpReadiness(null)
     setUiLayoutConfig(null)
     setUiLayoutGalleryOpen(false)
     setConfirmedInterviewRequirements({})
@@ -8292,6 +9374,13 @@ function IDE() {
     setDesignProjectSavedAt('')
     setDesignProjectVersion(1)
     setDesignFeatureRegistry([])
+    setRequirementRecommendations(null)
+    setRequirementRecommendationSettings(normalizeRequirementRecommendationSettings(EMPTY_REQUIREMENT_RECOMMENDATION_SETTINGS))
+    setDevelopmentStagePlan(null)
+    setDevelopmentStagePlanBusy(false)
+    setCodeDocumentationEnabled(false)
+    setAgentCodingStyle(normalizeAgentCodingStyle(DEFAULT_AGENT_CODING_STYLE))
+    setBuilderSummaryTab('REQUIREMENTS')
 
     // '신규 Agent 만들기'는 기존 프로젝트/설계에서 사용하던 경로를 이어받지 않습니다.
     // 프로젝트 경로 input은 항상 빈 value로 시작하고 사용자가 직접 입력하거나 선택합니다.
@@ -8320,6 +9409,11 @@ function IDE() {
     setInterviewAttachmentSummaryError('')
     interviewAttachmentSummaryRunRef.current=''
     setRequirementManualOverrides({})
+    setRequirementRecommendations(null)
+    setRequirementRecommendationSettings(normalizeRequirementRecommendationSettings(EMPTY_REQUIREMENT_RECOMMENDATION_SETTINGS))
+    setDevelopmentStagePlan(null)
+    setDevelopmentStagePlanBusy(false)
+    setBuilderSummaryTab('REQUIREMENTS')
     setUiLayoutConfig(null)
     setUiLayoutGalleryOpen(false)
     setRequirementRedefineId('')
@@ -8444,11 +9538,14 @@ function IDE() {
     }
   }
 
-  const saveFile=async(pathOverride='')=>{
-    // v5.372: Ctrl+S saves the actual active editor file even when the top
-    // project selector is empty. Notebook/file-tree tabs retain their own root.
+  const saveFile=async(pathOverride='',triggerLabel='Ctrl+S')=>{
+    // v5.476: React onClick passes a SyntheticEvent as the first argument when
+    // a handler is bound directly.  Never treat that event object as a file path.
+    // Ctrl+S may still pass an explicit path so split editors/notebooks save the
+    // exact active editor file.
+    const explicitPath=typeof pathOverride==='string'?pathOverride:''
     const selectedPath=normalizeProjectRelativePath(
-      pathOverride||activeEditorPathRef.current||selectedEditorFileRef.current||selected||''
+      explicitPath||activeEditorPathRef.current||selectedEditorFileRef.current||selected||''
     )
 
     const hasKnownContent=
@@ -8502,7 +9599,7 @@ function IDE() {
 
       setTerminal(prev=>
         (prev||'')
-        + `\n[저장 완료 · Ctrl+S] ${result?.path||result.fullPath}`
+        + `\n[저장 완료 · ${triggerLabel}] ${result?.path||result.fullPath}`
         + (result?.bytes!=null?` (${result.bytes} bytes)`:'')
         + '\n'
       )
@@ -8831,6 +9928,25 @@ function IDE() {
     }
   }
 
+  const refreshBlenderMcpReadiness=async()=>{
+    setBlenderMcpReadinessBusy(true)
+    try{
+      const result=await api('/mcp/blender/readiness')
+      setBlenderMcpReadiness(result||null)
+      return result||null
+    }catch(e){
+      setBlenderMcpReadiness({ok:false,ready:false,message:`Blender MCP 상태 확인 실패: ${String(e)}`})
+      return null
+    }finally{
+      setBlenderMcpReadinessBusy(false)
+    }
+  }
+
+  useEffect(()=>{
+    if(agentSpecialization!=='BLENDER_3D') return
+    void refreshBlenderMcpReadiness()
+  },[agentSpecialization])
+
   const openMcpAddDialog=()=>{
     setMcpAddError('')
     setMcpAddOpen(true)
@@ -8846,14 +9962,21 @@ function IDE() {
 
   const submitMcpServer=async()=>{
     const name=String(mcpAddForm.name||'').trim()
+    const transport=String(mcpAddForm.transport||'streamable_http').trim()
     const endpoint=String(mcpAddForm.endpoint||'').trim()
+    const command=String(mcpAddForm.command||'').trim()
+    const args=String(mcpAddForm.args_text||'').split(/\r?\n/).map(v=>v.trim()).filter(Boolean)
 
     if(!name){
       setMcpAddError('MCP 서버 이름을 입력하세요.')
       return
     }
-    if(!endpoint){
+    if(transport==='streamable_http'&&!endpoint){
       setMcpAddError('MCP Endpoint를 입력하세요.')
+      return
+    }
+    if(transport==='stdio'&&!command){
+      setMcpAddError('stdio MCP Command를 입력하세요.')
       return
     }
 
@@ -8864,7 +9987,10 @@ function IDE() {
         method:'POST',
         body:JSON.stringify({
           name,
-          endpoint,
+          transport,
+          endpoint:transport==='streamable_http'?endpoint:'',
+          command:transport==='stdio'?command:'',
+          args:transport==='stdio'?args:[],
           trust_level:mcpAddForm.trust_level||'UNTRUSTED',
           allow_read_without_prompt:!!mcpAddForm.allow_read_without_prompt,
           allow_write_without_prompt:!!mcpAddForm.allow_write_without_prompt,
@@ -8883,7 +10009,10 @@ function IDE() {
       await refreshMcp()
       setMcpAddForm({
         name:'',
+        transport:'streamable_http',
         endpoint:'',
+        command:'',
+        args_text:'',
         trust_level:'UNTRUSTED',
         allow_read_without_prompt:false,
         allow_write_without_prompt:false,
@@ -8996,16 +10125,11 @@ function IDE() {
       editorFileRootRef.current?.[relativePath]||fileTreeRootRef.current||''
     )
     if(!workspaceRoot) throw new Error('프로젝트가 선택되지 않았습니다.')
-    const info=runtimeInfo()
     const params=new URLSearchParams({
       root:String(workspaceRoot),
       relative_path:String(relativePath)
     })
-    const response=await fetch(`${info.apiBase}/files/raw?${params.toString()}`)
-    if(!response.ok){
-      const body=await response.text().catch(()=>'')
-      throw new Error(`원본 파일 읽기 실패 (${response.status})${body?`: ${body}`:''}`)
-    }
+    const response=await apiFetch(`/files/raw?${params.toString()}`)
     return response.blob()
   }
 
@@ -9049,8 +10173,33 @@ function IDE() {
   }
 
 
+  const openTemporaryExternalMedia=(rawUrl)=>{
+    const url=String(rawUrl||'').trim()
+    if(!url) return
+    let title='외부 영상'
+    try{
+      const parsed=new URL(url)
+      const host=parsed.hostname.replace(/^www\./,'')
+      if(/youtube\.com$|youtu\.be$/i.test(host)){
+        const videoId=host.toLowerCase()==='youtu.be'?parsed.pathname.split('/').filter(Boolean)[0]:(parsed.searchParams.get('v')||parsed.pathname.split('/').filter(Boolean).pop()||'')
+        title=`YouTube · ${videoId||'영상'}`
+      }else{
+        title=parsed.pathname.split('/').filter(Boolean).pop()||host||'외부 영상'
+      }
+    }catch{}
+    setTemporaryMedia({id:`media-${Date.now()}`,url,title})
+    setTemporaryMediaActive(true)
+    setWorkspaceTab('CODE')
+  }
+
+  const closeTemporaryExternalMedia=()=>{
+    setTemporaryMediaActive(false)
+    setTemporaryMedia(null)
+  }
+
   const activateEditorFile=(relativePath)=>{
     if(!relativePath) return
+    setTemporaryMediaActive(false)
     activeEditorPathRef.current=relativePath
 
     const hasCachedContent=Object.prototype.hasOwnProperty.call(editorFileContents,relativePath)
@@ -9075,6 +10224,118 @@ function IDE() {
     if(editorExternalState[normalizeProjectRelativePath(relativePath)]==='modified_conflict'){
       openExternalChangePrompt(relativePath)
     }
+  }
+
+  const currentCodeNavigationLocation=()=>{
+    const path=selectedEditorFileRef.current||selected||''
+    const position=editorInstanceRef.current?.getPosition?.()||{lineNumber:1,column:1}
+    return {
+      path,
+      line:Math.max(1,Number(position.lineNumber||1)),
+      column:Math.max(1,Number(position.column||1)),
+      cellIndex:isNotebookFile(path)?notebookEditorControllerRef.current?.getActiveCellIndex?.():null
+    }
+  }
+
+  const revealCodeNavigationLocation=async(location,{recordSource=false}={})=>{
+    const targetPath=String(location?.path||'').trim()
+    if(!targetPath) return
+    if(recordSource){
+      const current=currentCodeNavigationLocation()
+      if(current.path){
+        const history=codeNavigationHistoryRef.current
+        history.back=[...(history.back||[]),current].slice(-80)
+        history.forward=[]
+      }
+    }
+    const workspaceRoot=resolveWorkspaceRoot(
+      editorFileRootRef.current?.[targetPath]||fileTreeRootRef.current||root||''
+    )
+    if(normalizeProjectRelativePath(selectedEditorFileRef.current||selected||'')!==normalizeProjectRelativePath(targetPath)){
+      await openFile(targetPath,workspaceRoot)
+    }
+    if(isNotebookFile(targetPath)&&location?.cellIndex!=null){
+      let notebookAttempts=0
+      const focusNotebookTarget=()=>{
+        notebookAttempts+=1
+        const activePath=normalizeProjectRelativePath(selectedEditorFileRef.current||selected||'')
+        const controller=notebookEditorControllerRef.current
+        if(activePath!==normalizeProjectRelativePath(targetPath)||!controller?.revealSearchMatch){
+          if(notebookAttempts<16) window.setTimeout(focusNotebookTarget,40)
+          return
+        }
+        controller.revealSearchMatch(
+          Math.max(0,Number(location.cellIndex||0)),
+          Math.max(1,Number(location?.line||1)),
+          Math.max(1,Number(location?.column||1)),
+          1
+        )
+      }
+      window.setTimeout(focusNotebookTarget,25)
+      return
+    }
+    let attempts=0
+    const focusTarget=()=>{
+      attempts+=1
+      const activePath=normalizeProjectRelativePath(selectedEditorFileRef.current||selected||'')
+      if(activePath!==normalizeProjectRelativePath(targetPath)||!editorInstanceRef.current){
+        if(attempts<14) window.setTimeout(focusTarget,35)
+        return
+      }
+      const editor=editorInstanceRef.current
+      const line=Math.max(1,Number(location?.line||1))
+      const column=Math.max(1,Number(location?.column||1))
+      editor.revealLineInCenter?.(line)
+      editor.setPosition?.({lineNumber:line,column})
+      editor.focus?.()
+    }
+    window.setTimeout(focusTarget,20)
+  }
+
+  const navigateToCodeDefinition=async(definition,sourceLocation=null)=>{
+    if(!definition) return
+    if(definition.external||(!definition.relative_path&&definition.absolute_path)){
+      setCodeDefinitionPreview({
+        ...definition,
+        title:definition.symbol||'외부 라이브러리 정의',
+        language:getEditorLanguage(definition.relative_path||definition.absolute_path||'definition.py')
+      })
+      return
+    }
+    const targetPath=String(definition.relative_path||selectedEditorFileRef.current||selected||'').trim()
+    if(!targetPath) return
+    const history=codeNavigationHistoryRef.current
+    const current={
+      path:selectedEditorFileRef.current||selected||'',
+      line:Math.max(1,Number(sourceLocation?.line||editorInstanceRef.current?.getPosition?.()?.lineNumber||1)),
+      column:Math.max(1,Number(sourceLocation?.column||editorInstanceRef.current?.getPosition?.()?.column||1)),
+      cellIndex:sourceLocation?.cellIndex??(isNotebookFile(selectedEditorFileRef.current||selected||'')?notebookEditorControllerRef.current?.getActiveCellIndex?.():null)
+    }
+    if(current.path){
+      history.back=[...(history.back||[]),current].slice(-80)
+      history.forward=[]
+    }
+    await revealCodeNavigationLocation({
+      path:targetPath,
+      line:Math.max(1,Number(definition.line||1)),
+      column:Math.max(1,Number(definition.column||1))
+    })
+  }
+
+  const navigateCodeHistory=async(direction)=>{
+    const history=codeNavigationHistoryRef.current
+    const from=direction<0?history.back:history.forward
+    if(!from?.length) return
+    const target=from[from.length-1]
+    const current=currentCodeNavigationLocation()
+    if(direction<0){
+      history.back=from.slice(0,-1)
+      if(current.path) history.forward=[...(history.forward||[]),current].slice(-80)
+    }else{
+      history.forward=from.slice(0,-1)
+      if(current.path) history.back=[...(history.back||[]),current].slice(-80)
+    }
+    await revealCodeNavigationLocation(target)
   }
 
   const openEditorInSplit=(relativePath,side='RIGHT')=>{
@@ -9499,6 +10760,28 @@ function IDE() {
     }
   }
 
+  const openAttachmentSummaryFile=async(file)=>{
+    const item=file&&typeof file==='object'?file:{}
+    const workspaceRoot=resolveWorkspaceRoot(newAgentProjectRoot||root||fileTreeRootRef.current||'')
+    let relativePath=String(item.project_relative_path||item.relative_path||'').trim().replace(/\\/g,'/')
+    const sourcePath=String(item.path||'').trim().replace(/\\/g,'/')
+    if(!relativePath&&workspaceRoot&&sourcePath){
+      const normalizedRoot=String(workspaceRoot).replace(/\\/g,'/').replace(/\/+$/,'')
+      if(sourcePath.toLowerCase().startsWith(`${normalizedRoot.toLowerCase()}/`)){
+        relativePath=sourcePath.slice(normalizedRoot.length+1)
+      }
+    }
+    if(!relativePath){
+      window.alert('이 첨부 파일은 현재 프로젝트 외부 파일이어서 코드 편집 탭에서 직접 열 수 없습니다. 프로젝트 내부 파일을 첨부한 경우 다시 분석하면 파일 열기가 활성화됩니다.')
+      return
+    }
+    try{
+      await openFile(relativePath,workspaceRoot)
+    }catch(error){
+      window.alert(`첨부 파일 열기 실패: ${String(error?.message||error)}`)
+    }
+  }
+
   const loadWorkflowDefinition=async()=>{
     try{
       const result=await api('/workflow/definition')
@@ -9680,7 +10963,7 @@ function IDE() {
         }
 
         case 'ui':{
-          if(uiLayoutConfig?.template_id){
+              if(uiLayoutConfig?.template_id){
             const framework=String(confirmed?.ui||'').trim()
             return [framework,uiLayoutSummary(uiLayoutConfig)].filter(Boolean).join(' · ')
           }
@@ -9749,9 +11032,13 @@ function IDE() {
           }
 
           const values=[]
+          const configuredProviders=selectedAgentDatabaseProviders(agentDatabaseSetup)
+          values.push(...configuredProviders)
           if(text.includes('postgresql')) values.push('PostgreSQL')
+          if(text.includes('firestore')) values.push('Google Cloud Firestore')
           if(text.includes('redis')) values.push('Redis')
           if(text.includes('pgvector')||text.includes('vector search')||text.includes('벡터 검색')) values.push('pgvector')
+          if(agentDatabaseSetup?.mode==='SKIP'&&values.length) values.push('연결 설정 SKIP')
           return unique(values).join(' · ')
         }
 
@@ -10124,6 +11411,7 @@ function IDE() {
       design_project_version:designProjectVersion||1,
       project_root:newAgentProjectRoot||root||'',
       workflow_request:workflowReq||'',
+      interview_input_draft:input||'',
       chat:Array.isArray(chat)?chat:[],
       confirmed_requirements:confirmedInterviewRequirements||{},
       workflow_preview:targetWorkflowPreview||null,
@@ -10136,6 +11424,20 @@ function IDE() {
       attachment_requirement_coverage:interviewAttachmentRequirementCoverage||{},
       manual_requirement_overrides:requirementManualOverrides||{},
       feature_registry:designFeatureRegistry||[],
+      requirement_recommendations:requirementRecommendations||null,
+      requirement_recommendation_settings:normalizeRequirementRecommendationSettings(requirementRecommendationSettings||{}),
+      development_stage_plan:developmentStagePlan||null,
+      code_documentation:{
+        enabled:Boolean(codeDocumentationEnabled),
+        level:'standard',
+        preserve_existing_comments:true,
+        skip_trivial_locals:true
+      },
+      user_coding_style:normalizeAgentCodingStyle(agentCodingStyle),
+      runtime_setup:safeAgentRuntimeSetup(agentRuntimeSetup),
+      database_setup:safeAgentDatabaseSetup(agentDatabaseSetup),
+      database_resource_plan:agentDatabaseResourcePlan?{...agentDatabaseResourcePlan,approved:Boolean(agentDatabaseResourcePlan.approved)}:null,
+      agent_specialization:agentSpecialization||'GENERAL',
       ui_layout:uiLayoutConfig||null,
       build_resume:resumeOverride||(restoredBuildResume&&typeof restoredBuildResume==='object'?restoredBuildResume:null)
     }
@@ -10171,6 +11473,7 @@ function IDE() {
       const snapshot=buildRequirementDraftSnapshot(resumeOverride)
       const hasUsefulData=
         snapshot.chat.some(item=>item?.role==='user')
+        || Boolean(String(snapshot.interview_input_draft||'').trim())
         || Boolean(snapshot.workflow_request)
         || Object.keys(snapshot.confirmed_requirements||{}).length>0
         || Boolean(snapshot.workflow_preview)
@@ -10179,6 +11482,7 @@ function IDE() {
         || Object.keys(snapshot.manual_requirement_overrides||{}).length>0
         || (Array.isArray(snapshot.feature_registry)&&snapshot.feature_registry.length>0)
         || Boolean(snapshot.ui_layout?.template_id)
+        || snapshot.agent_specialization==='BLENDER_3D'
 
       if(!hasUsefulData) return false
 
@@ -10195,17 +11499,21 @@ function IDE() {
     }
   }
 
-  const restoreRequirementDraft=async(keyOverride='')=>{
+  const restoreRequirementDraft=async(keyOverride='',snapshotOverride=null,resumeOverride=null)=>{
     try{
       const key=keyOverride||requirementDraftKey()
-      let snapshot=(requirementDraftCandidate?.snapshot&&typeof requirementDraftCandidate.snapshot==='object')
-        ? requirementDraftCandidate.snapshot
-        : null
+      let snapshot=(snapshotOverride&&typeof snapshotOverride==='object')
+        ? snapshotOverride
+        : (requirementDraftCandidate?.snapshot&&typeof requirementDraftCandidate.snapshot==='object')
+          ? requirementDraftCandidate.snapshot
+          : null
       if(!snapshot){
         const raw=localStorage.getItem(key)
         snapshot=raw?JSON.parse(raw):null
       }
       if(!snapshot) return false
+
+      setInput(String(snapshot?.interview_input_draft||''))
 
       if(Array.isArray(snapshot?.chat) && snapshot.chat.length){
         const restoredChat=snapshot.chat.map(item=>({
@@ -10237,26 +11545,69 @@ function IDE() {
       setInterviewAttachmentRequirementCoverage(snapshot?.attachment_requirement_coverage&&typeof snapshot.attachment_requirement_coverage==='object'?snapshot.attachment_requirement_coverage:{})
       setRequirementManualOverrides(snapshot?.manual_requirement_overrides&&typeof snapshot.manual_requirement_overrides==='object'?snapshot.manual_requirement_overrides:{})
       setDesignFeatureRegistry(Array.isArray(snapshot?.feature_registry)?snapshot.feature_registry:[])
+      setRequirementRecommendations(snapshot?.requirement_recommendations&&typeof snapshot.requirement_recommendations==='object'?snapshot.requirement_recommendations:null)
+      setRequirementRecommendationSettings(normalizeRequirementRecommendationSettings(snapshot?.requirement_recommendation_settings||snapshot?.requirement_recommendations?.default_settings||EMPTY_REQUIREMENT_RECOMMENDATION_SETTINGS))
+      setDevelopmentStagePlan(snapshot?.development_stage_plan&&typeof snapshot.development_stage_plan==='object'?snapshot.development_stage_plan:null)
+      setCodeDocumentationEnabled(Boolean(snapshot?.code_documentation?.enabled))
+      setAgentCodingStyle(normalizeAgentCodingStyle(snapshot?.user_coding_style||DEFAULT_AGENT_CODING_STYLE))
+      setAgentRuntimeSetup(snapshot?.runtime_setup&&typeof snapshot.runtime_setup==='object'?normalizeAgentRuntimeSetup(snapshot.runtime_setup):createDefaultAgentRuntimeSetup())
+      setAgentRuntimePortInfo(null)
+      if(snapshot?.database_setup&&typeof snapshot.database_setup==='object'){
+        // Secret은 Draft에 저장하지 않으므로 복원 시 Password/Service Account 경로는 비어 있습니다.
+        setAgentDatabaseSetup(normalizeAgentDatabaseSetup(snapshot.database_setup))
+      }else{
+        setAgentDatabaseSetup(createDefaultAgentDatabaseSetup())
+      }
+      setAgentDatabaseResourcePlan(snapshot?.database_resource_plan&&typeof snapshot.database_resource_plan==='object'?snapshot.database_resource_plan:null)
+      setAgentDatabaseTestResult(null)
       if(snapshot?.design_project_id) setDesignProjectId(snapshot.design_project_id)
       if(snapshot?.design_project_version) setDesignProjectVersion(snapshot.design_project_version)
       setUiLayoutConfig(snapshot?.ui_layout&&typeof snapshot.ui_layout==='object'?snapshot.ui_layout:null)
+      setAgentSpecialization(String(snapshot?.agent_specialization||snapshot?.confirmed_requirements?.agent_specialization?.type||'GENERAL'))
 
-      if(snapshot?.workflow_request) setWorkflowReq(snapshot.workflow_request)
-      if(snapshot?.confirmed_requirements) setConfirmedInterviewRequirements(snapshot.confirmed_requirements)
-      if(snapshot?.workflow_preview){
-        setTargetWorkflowPreview(snapshot.workflow_preview)
-        setPreviousTargetWorkflowPreview(snapshot.workflow_preview)
-        setTargetWorkflowQuality(snapshot.workflow_quality||null)
+      const resumeCandidate=(resumeOverride&&typeof resumeOverride==='object')
+        ? resumeOverride
+        : (requirementDraftCandidate?.build_resume&&typeof requirementDraftCandidate.build_resume==='object')
+          ? requirementDraftCandidate.build_resume
+          : (snapshot?.build_resume&&typeof snapshot.build_resume==='object'?snapshot.build_resume:null)
+      const restoredRuntimeState=resumeCandidate?.workflow_state&&typeof resumeCandidate.workflow_state==='object'
+        ? resumeCandidate.workflow_state
+        : {}
+      const restoredPreview=(snapshot?.workflow_preview&&typeof snapshot.workflow_preview==='object')
+        ? snapshot.workflow_preview
+        : (Object.keys(restoredRuntimeState).length
+          ? {
+              target_agent_workflow:restoredRuntimeState.target_agent_workflow||{},
+              agent_architecture:restoredRuntimeState.agent_architecture||{},
+              database_plan:restoredRuntimeState.database_plan||{},
+              file_plan:restoredRuntimeState.file_plan||{}
+            }
+          : null)
+
+      if(restoredPreview?.three_d_agent_plan?.type==='BLENDER_3D'||restoredRuntimeState?.three_d_agent_plan?.type==='BLENDER_3D'){
+        setAgentSpecialization('BLENDER_3D')
       }
-
-      const resumeCandidate=(requirementDraftCandidate?.build_resume&&typeof requirementDraftCandidate.build_resume==='object')
-        ? requirementDraftCandidate.build_resume
-        : (snapshot?.build_resume&&typeof snapshot.build_resume==='object'?snapshot.build_resume:null)
+      const restoredRequest=String(snapshot?.workflow_request||restoredRuntimeState?.request||'').trim()
+      if(restoredRequest) setWorkflowReq(restoredRequest)
+      if(snapshot?.confirmed_requirements) setConfirmedInterviewRequirements(snapshot.confirmed_requirements)
+      if(restoredPreview&&Object.keys(restoredPreview).some(key=>Boolean(restoredPreview?.[key])&&Object.keys(restoredPreview?.[key]||{}).length)){
+        setTargetWorkflowPreview(restoredPreview)
+        setPreviousTargetWorkflowPreview(restoredPreview)
+        setTargetWorkflowQuality(snapshot.workflow_quality||null)
+        const restoredDatabasePlan=restoredPreview?.database_plan&&typeof restoredPreview.database_plan==='object'
+          ? restoredPreview.database_plan
+          : null
+        if(restoredDatabasePlan&&Object.keys(restoredDatabasePlan).length){
+          setLiveDatabasePreview({
+            ...restoredDatabasePlan,
+            ddl_preview:String(restoredDatabasePlan.ddl_preview||restoredDatabasePlan.ddl||'')
+          })
+          setLiveDatabasePreviewError('')
+        }
+      }
       if(resumeCandidate){
         setRestoredBuildResume(resumeCandidate)
-        const restoredState=resumeCandidate?.workflow_state&&typeof resumeCandidate.workflow_state==='object'
-          ? resumeCandidate.workflow_state
-          : null
+        const restoredState=Object.keys(restoredRuntimeState).length?restoredRuntimeState:null
         if(restoredState&&Object.keys(restoredState).length){
           setWorkflow({state:restoredState,failure_diagnostics:{
             project_root:resumeCandidate.project_root||snapshot.project_root||'',
@@ -10271,10 +11622,10 @@ function IDE() {
         if(failed){
           setAgentBuildStage('PROJECT_CREATED')
           setAgentBuildMessage(`이전 개발 실패 기록 복원됨${status?` · ${status}`:''}. 기존 생성 파일과 진단 기록을 사용해 다시 개발할 수 있습니다.`)
-        }else if(snapshot?.workflow_preview){
+        }else if(restoredPreview){
           setAgentBuildStage(snapshot?.agent_build_stage==='PROJECT_CREATED'?'PROJECT_CREATED':'WORKFLOW_READY')
         }
-      }else if(snapshot?.workflow_preview){
+      }else if(restoredPreview){
         setAgentBuildStage(snapshot?.agent_build_stage==='PROJECT_CREATED'?'PROJECT_CREATED':'WORKFLOW_READY')
       }else if(snapshot?.agent_build_stage){
         setAgentBuildStage(snapshot.agent_build_stage==='BUILDING'?'PROJECT_CREATED':snapshot.agent_build_stage)
@@ -10290,6 +11641,7 @@ function IDE() {
       setRequirementDraftSavedAt(snapshot?.saved_at||'')
       setRequirementDraftRestored(true)
       setRequirementDraftCandidate(null)
+      requirementDraftDecisionPendingRef.current=false
       setRequirementDraftDecisionPending(false)
       return true
     }catch(e){
@@ -10310,6 +11662,7 @@ function IDE() {
       const snapshot=buildRequirementDraftSnapshot()
       const hasUsefulData=
         snapshot.chat.some(item=>item?.role==='user')
+        ||Boolean(String(snapshot.interview_input_draft||'').trim())
         ||Boolean(snapshot.workflow_request)
         ||Object.keys(snapshot.confirmed_requirements||{}).length>0
         ||Boolean(snapshot.workflow_preview)
@@ -10317,6 +11670,7 @@ function IDE() {
         ||Object.keys(snapshot.manual_requirement_overrides||{}).length>0
         ||(Array.isArray(snapshot.feature_registry)&&snapshot.feature_registry.length>0)
         ||Boolean(snapshot.ui_layout?.template_id)
+        ||snapshot.agent_specialization==='BLENDER_3D'
       if(hasUsefulData){
         localStorage.setItem(requirementDraftKey(),JSON.stringify(snapshot))
         setRequirementDraftSavedAt(snapshot.saved_at)
@@ -10343,6 +11697,11 @@ function IDE() {
     setInterviewAttachmentRequirements([])
     setInterviewAttachmentRequirementCoverage({})
     setRequirementManualOverrides({})
+    setRequirementRecommendations(null)
+    setRequirementRecommendationSettings(normalizeRequirementRecommendationSettings(EMPTY_REQUIREMENT_RECOMMENDATION_SETTINGS))
+    setDevelopmentStagePlan(null)
+    setDevelopmentStagePlanBusy(false)
+    setBuilderSummaryTab('REQUIREMENTS')
   }
 
   const invalidateRequirementWorkflowAfterEdit=(message='요구사항이 변경되었습니다. Workflow를 다시 설계해 주세요.')=>{
@@ -10352,8 +11711,9 @@ function IDE() {
     }
     setTargetWorkflowPreview(null)
     setTargetWorkflowQuality(null)
+    setDevelopmentStagePlan(null)
     setAgentBuildStage('REQUIREMENTS')
-    setAgentBuildMessage(message)
+    setAgentBuildMessage(message+' 개발 Stage도 최신 요구사항으로 다시 추천합니다.')
   }
 
   const removeRequirementConversationTurn=(messageIndex)=>{
@@ -10392,7 +11752,14 @@ function IDE() {
     setBuilderStarted(false)
     setInput('')
     setConfirmedInterviewRequirements({})
+    setAgentSpecialization('GENERAL')
+    setBlenderMcpReadiness(null)
     setRequirementManualOverrides({})
+    setRequirementRecommendations(null)
+    setRequirementRecommendationSettings(normalizeRequirementRecommendationSettings(EMPTY_REQUIREMENT_RECOMMENDATION_SETTINGS))
+    setDevelopmentStagePlan(null)
+    setDevelopmentStagePlanBusy(false)
+    setBuilderSummaryTab('REQUIREMENTS')
     setRequirementRedefineId('')
     setRequirementRedefineText('')
     const attachmentIdsToRelease=(interviewAttachments||[]).map(item=>item?.attachment_id).filter(Boolean)
@@ -10475,6 +11842,9 @@ function IDE() {
     add('리포트','리포트','보고서')
     add('대화 / 상담','대화','상담','챗봇')
     add('관리자 화면','관리자','admin')
+    if(agentSpecialization==='BLENDER_3D'||text.includes('blender')||text.includes('블렌더')){
+      ;['3D SceneSpec','Blender MCP','Scene State','Viewport Vision QA','Render / Export'].forEach(label=>{if(!names.includes(label)) names.push(label)})
+    }
     return names
   }
 
@@ -10492,13 +11862,15 @@ function IDE() {
     return {status,progress:Math.max(0,Math.min(100,progress))}
   }
 
-  const saveAgentDesignProject=async({createVersion=false,versionLabel=''}={})=>{
+  const saveAgentDesignProject=async({createVersion=false,versionLabel='',silent=false}={})=>{
     if(designProjectSaving) return null
     const snapshot=buildRequirementDraftSnapshot()
     const hasUserContent=(snapshot.chat||[]).some(item=>item?.role==='user')
+      ||Boolean(String(snapshot.interview_input_draft||'').trim())
       ||Boolean(snapshot.workflow_request)
       ||Boolean(snapshot.agent_name)
       ||(Array.isArray(snapshot.feature_registry)&&snapshot.feature_registry.length>0)
+      ||snapshot.agent_specialization==='BLENDER_3D'
     if(!hasUserContent){
       setAgentBuildMessage('먼저 Agent 이름이나 설계 인터뷰 내용을 입력해 주세요.')
       return null
@@ -10530,13 +11902,16 @@ function IDE() {
         setDesignProjectSavedAt(project.updated_at||new Date().toISOString())
         setDesignProjectVersion(project.version_no||1)
         setRequirementDraftSavedAt(project.updated_at||snapshot.saved_at)
-        setAgentBuildMessage(createVersion
-          ? `설계 프로젝트 v${project.version_no||1} 저장 완료 · 변경 전 Snapshot을 보존했습니다.`
-          : 'Agent 설계 프로젝트를 저장했습니다. 다른 작업 후 프로젝트 목록에서 다시 열어 이어서 진행할 수 있습니다.')
+        if(!silent){
+          setAgentBuildMessage(createVersion
+            ? `설계 프로젝트 v${project.version_no||1} 저장 완료 · 변경 전 Snapshot을 보존했습니다.`
+            : 'Agent 설계 프로젝트를 저장했습니다. 다른 작업 후 프로젝트 목록에서 다시 열어 이어서 진행할 수 있습니다.')
+        }
       }
       return project||null
     }catch(e){
-      setAgentBuildMessage('설계 프로젝트 저장 실패: '+String(e?.message||e))
+      if(!silent) setAgentBuildMessage('설계 프로젝트 저장 실패: '+String(e?.message||e))
+      else console.warn('Agent 설계 프로젝트 자동 저장 실패',e)
       return null
     }finally{
       setDesignProjectSaving(false)
@@ -10550,9 +11925,20 @@ function IDE() {
     setDesignProjectSavedAt(project?.updated_at||snapshot?.saved_at||'')
     setDesignProjectVersion(project?.version_no||snapshot?.design_project_version||1)
     setDesignFeatureRegistry(Array.isArray(project?.feature_registry)?project.feature_registry:(Array.isArray(snapshot?.feature_registry)?snapshot.feature_registry:[]))
+    setRequirementRecommendations(snapshot?.requirement_recommendations&&typeof snapshot.requirement_recommendations==='object'?snapshot.requirement_recommendations:null)
+    setRequirementRecommendationSettings(normalizeRequirementRecommendationSettings(snapshot?.requirement_recommendation_settings||snapshot?.requirement_recommendations?.default_settings||EMPTY_REQUIREMENT_RECOMMENDATION_SETTINGS))
+    setDevelopmentStagePlan(snapshot?.development_stage_plan&&typeof snapshot.development_stage_plan==='object'?snapshot.development_stage_plan:null)
+    setCodeDocumentationEnabled(Boolean(snapshot?.code_documentation?.enabled))
+    setAgentCodingStyle(normalizeAgentCodingStyle(snapshot?.user_coding_style||DEFAULT_AGENT_CODING_STYLE))
+    setAgentRuntimeSetup(snapshot?.runtime_setup&&typeof snapshot.runtime_setup==='object'?normalizeAgentRuntimeSetup(snapshot.runtime_setup):createDefaultAgentRuntimeSetup())
+    setAgentRuntimePortInfo(null)
+    setAgentDatabaseSetup(snapshot?.database_setup&&typeof snapshot.database_setup==='object'?normalizeAgentDatabaseSetup(snapshot.database_setup):createDefaultAgentDatabaseSetup())
+    setAgentDatabaseResourcePlan(snapshot?.database_resource_plan&&typeof snapshot.database_resource_plan==='object'?snapshot.database_resource_plan:null)
+    setAgentDatabaseTestResult(null)
     setNewAgentName(String(snapshot?.agent_name||project?.name||''))
     setNewAgentProjectRoot(String(snapshot?.project_root||project?.project_root||''))
     setWorkflowReq(String(snapshot?.workflow_request||''))
+    setInput(String(snapshot?.interview_input_draft||''))
     const restoredChat=Array.isArray(snapshot?.chat)&&snapshot.chat.length?snapshot.chat:[{
       role:'assistant',
       content:'저장된 Agent 설계 프로젝트를 불러왔습니다. 마지막 설계 상태부터 이어서 진행해 주세요.'
@@ -10571,9 +11957,179 @@ function IDE() {
     setInterviewAttachmentRequirementCoverage(snapshot?.attachment_requirement_coverage&&typeof snapshot.attachment_requirement_coverage==='object'?snapshot.attachment_requirement_coverage:{})
     setRequirementManualOverrides(snapshot?.manual_requirement_overrides&&typeof snapshot.manual_requirement_overrides==='object'?snapshot.manual_requirement_overrides:{})
     setUiLayoutConfig(snapshot?.ui_layout&&typeof snapshot.ui_layout==='object'?snapshot.ui_layout:null)
+    setAgentSpecialization(String(snapshot?.agent_specialization||snapshot?.confirmed_requirements?.agent_specialization?.type||snapshot?.workflow_preview?.three_d_agent_plan?.type||'GENERAL'))
     setRequirementDraftRestored(true)
     setRequirementDraftSavedAt(project?.updated_at||snapshot?.saved_at||'')
     setAgentBuildMessage(`설계 프로젝트 #${project?.id||''}을 불러왔습니다. 이전 인터뷰와 기능 정의를 이어서 진행합니다.`)
+  }
+
+  const applyRequirementRecommendationBundle=(bundle,{forceDefaults=false}={})=>{
+    if(!bundle||typeof bundle!=='object') return
+    setRequirementRecommendations(bundle)
+    setRequirementRecommendationSettings(prev=>{
+      const current=normalizeRequirementRecommendationSettings(prev||{})
+      const defaults=normalizeRequirementRecommendationSettings(bundle?.default_settings||{})
+      if(forceDefaults||!current.customized){
+        return {...defaults,customized:false}
+      }
+      const allowed={
+        features:new Set((bundle.features||[]).map(item=>String(item?.id||''))),
+        menus:new Set((bundle.menus||[]).map(item=>String(item?.id||''))),
+        tools:new Set((bundle.tools||[]).map(item=>String(item?.id||''))),
+      }
+      return {
+        ...current,
+        features:current.features.filter(id=>allowed.features.has(id)),
+        menus:current.menus.filter(id=>allowed.menus.has(id)),
+        tools:current.tools.filter(id=>allowed.tools.has(id)),
+        customized:true,
+      }
+    })
+  }
+
+  const toggleRequirementRecommendation=(kind,id,checked)=>{
+    if(!['features','menus','tools'].includes(kind)||!id) return
+    setRequirementRecommendationSettings(prev=>{
+      const current=normalizeRequirementRecommendationSettings(prev||{})
+      const values=new Set(current[kind]||[])
+      if(checked) values.add(id)
+      else values.delete(id)
+      return {...current,[kind]:[...values],customized:true}
+    })
+    invalidateRequirementWorkflowAfterEdit('추천 구성 설정이 변경되었습니다. 적용된 기능·메뉴·Tool 기준으로 Workflow를 다시 설계할 수 있습니다.')
+  }
+
+  const changeRequirementToolRouting=(key,value)=>{
+    setRequirementRecommendationSettings(prev=>{
+      const current=normalizeRequirementRecommendationSettings(prev||{})
+      return {
+        ...current,
+        llm_tool_routing:{...current.llm_tool_routing,[key]:value},
+        customized:true,
+      }
+    })
+    invalidateRequirementWorkflowAfterEdit('LLM Tool 1차/2차 분류 설정이 변경되었습니다. 최신 Routing 정책으로 Workflow를 다시 설계할 수 있습니다.')
+  }
+
+  const resetRequirementRecommendationsToDefaults=()=>{
+    if(!requirementRecommendations?.default_settings) return
+    applyRequirementRecommendationBundle(requirementRecommendations,{forceDefaults:true})
+    invalidateRequirementWorkflowAfterEdit('AI 추천 기능·메뉴·Tool 및 2단계 Tool 분류 설정을 다시 적용했습니다.')
+    setTimeout(()=>saveRequirementDraft(),0)
+  }
+
+  const applyUserEditedDevelopmentStagePlan=(nextPlan)=>{
+    if(!nextPlan||!Array.isArray(nextPlan?.stages)||!nextPlan.stages.length) return
+    if(targetWorkflowPreview) setPreviousTargetWorkflowPreview(targetWorkflowPreview)
+    setWorkflowReq('')
+    setTargetWorkflowPreview(null)
+    setTargetWorkflowQuality(null)
+    setDevelopmentStagePlan(nextPlan)
+    setConfirmedInterviewRequirements(prev=>{
+      const next={...(prev||{})}
+      delete next.development_stage_plan
+      return next
+    })
+    setAgentBuildStage('REQUIREMENTS')
+    setAgentBuildMessage(`${nextPlan.stages.length}개 개발 Stage 수정안을 저장했습니다. 수정된 개발 계획을 승인하면 Workflow를 다시 구성합니다.`)
+    setBuilderSummaryTab('STAGES')
+    if(workspaceRightWidth<390) setWorkspaceRightWidth(390)
+    setTimeout(()=>saveRequirementDraft(),0)
+  }
+
+  const recommendDevelopmentStages=async({force=false}={})=>{
+    if(developmentStagePlanBusy) return null
+    if(developmentStagePlan?.approved&&!force) return developmentStagePlan
+    const request=(buildRequirementRequestFromCollectedInfo().trim()||workflowReq.trim())
+    if(!request){
+      setAgentBuildMessage('개발 Stage를 추천할 요구사항이 없습니다.')
+      return null
+    }
+    setDevelopmentStagePlanBusy(true)
+    try{
+      const result=await api('/workflow/development-stage-plan/recommend',{
+        method:'POST',
+        body:JSON.stringify({
+          request,
+          interview_messages:(chat||[]).map(item=>({role:item?.role||'',content:item?.content||''})),
+          confirmed_requirements:buildConfirmedRequirementsFromChat(),
+          attachment_memory:interviewAttachmentMemory||''
+        })
+      })
+      const plan=result?.development_stage_plan||null
+      if(plan){
+        if(force&&developmentStagePlan?.approved){
+          if(targetWorkflowPreview) setPreviousTargetWorkflowPreview(targetWorkflowPreview)
+          setWorkflowReq('')
+          setTargetWorkflowPreview(null)
+          setTargetWorkflowQuality(null)
+          setConfirmedInterviewRequirements(prev=>{
+            const next={...(prev||{})}
+            delete next.development_stage_plan
+            return next
+          })
+          setAgentBuildStage('REQUIREMENTS')
+        }
+        setDevelopmentStagePlan(plan)
+        setBuilderSummaryTab('STAGES')
+        if(workspaceRightWidth<390) setWorkspaceRightWidth(390)
+        setAgentBuildMessage(`요구사항 복잡도를 분석해 ${Number(plan?.recommended_stage_count||plan?.stages?.length||0)}개 개발 Stage를 추천했습니다. 승인 후 Workflow를 구성합니다.`)
+        setTimeout(()=>saveRequirementDraft(),0)
+      }
+      return plan
+    }catch(error){
+      setAgentBuildMessage(`개발 Stage 추천 실패: ${String(error?.message||error)}`)
+      return null
+    }finally{
+      setDevelopmentStagePlanBusy(false)
+    }
+  }
+
+  const approveDevelopmentStages=async()=>{
+    if(developmentStagePlanBusy||!developmentStagePlan?.stages?.length) return false
+    setDevelopmentStagePlanBusy(true)
+    try{
+      const result=await api('/workflow/development-stage-plan/approve',{
+        method:'POST',
+        body:JSON.stringify({plan:developmentStagePlan})
+      })
+      const approved=result?.development_stage_plan||null
+      if(!approved?.approved) throw new Error('승인된 개발 Stage 정보를 받지 못했습니다.')
+      setDevelopmentStagePlan(approved)
+      setBuilderSummaryTab('STAGES')
+      if(workspaceRightWidth<390) setWorkspaceRightWidth(390)
+      setConfirmedInterviewRequirements(prev=>({...prev,development_stage_plan:approved}))
+      setAgentBuildMessage(`${approved.stages.length}개 개발 Stage를 승인했습니다. 승인된 단계 순서로 Workflow를 구성합니다.`)
+      setScreen('WORKSPACE')
+      setWorkspaceTab('DESIGN')
+      setTimeout(()=>saveRequirementDraft(),0)
+      setTimeout(()=>previewTargetWorkflow('',{stageApprovalBypass:true,approvedStagePlan:approved}),20)
+      return true
+    }catch(error){
+      setAgentBuildMessage(`개발 Stage 승인 실패: ${String(error?.message||error)}`)
+      return false
+    }finally{
+      setDevelopmentStagePlanBusy(false)
+    }
+  }
+
+  const changeAgentSpecialization=(nextId)=>{
+    const next=agentSpecializationById(nextId).id
+    if(next===agentSpecialization) return
+    setAgentSpecialization(next)
+    setConfirmedInterviewRequirements(prev=>({
+      ...(prev||{}),
+      agent_specialization:next==='BLENDER_3D'
+        ? {type:'BLENDER_3D',label:'3D 제작 Agent · Blender MCP',mcp_required:true,structured_scene_spec:true,langgraph_scene_state:true,viewport_vision_qa:true,bounded_repair:true,render_export:true}
+        : {type:'GENERAL',label:'일반 Agent'}
+    }))
+    invalidateRequirementWorkflowAfterEdit(
+      next==='BLENDER_3D'
+        ? '3D 제작 Agent · Blender MCP 전문 유형을 적용했습니다. SceneSpec/Validator/LangGraph/Viewport QA/Render 구조로 Workflow를 다시 설계할 수 있습니다.'
+        : '일반 Agent 유형으로 변경했습니다. 최신 요구사항 기준으로 Workflow를 다시 설계할 수 있습니다.'
+    )
+    if(next==='BLENDER_3D') setTimeout(()=>void refreshBlenderMcpReadiness(),0)
+    setTimeout(()=>saveRequirementDraft(),0)
   }
 
   const handleDesignFeatureChange=async(action,item,payload={})=>{
@@ -10636,24 +12192,44 @@ function IDE() {
     invalidateRequirementWorkflowAfterEdit(`${nextName} ${actionLabel}이 반영되었습니다. 변경된 기능의 영향도를 기준으로 Workflow를 증분 재설계할 수 있습니다.`)
   }
 
+  // v5.434: project persistence is automatic from the first meaningful draft.
+  // This is the DB-backed project save (not only browser localStorage/checkpoint), so
+  // interview typing, design review, project generation and DB/DDL changes survive reloads.
   useEffect(()=>{
-    if(!designProjectId||designProjectSaving||requirementDraftDecisionPending) return undefined
+    if(designProjectSaving||requirementDraftDecisionPending) return undefined
+    const snapshot=buildRequirementDraftSnapshot()
+    const hasMeaningfulDraft=(snapshot.chat||[]).some(item=>item?.role==='user')
+      ||Boolean(String(snapshot.interview_input_draft||'').trim())
+      ||Boolean(snapshot.workflow_request)
+      ||Boolean(snapshot.agent_name)
+      ||Boolean(snapshot.workflow_preview)
+      ||Object.keys(snapshot.confirmed_requirements||{}).length>0
+      ||(Array.isArray(snapshot.feature_registry)&&snapshot.feature_registry.length>0)
+      ||snapshot.agent_specialization==='BLENDER_3D'
+    if(!hasMeaningfulDraft) return undefined
     const timer=setTimeout(()=>{
-      void saveAgentDesignProject()
-    },1200)
+      void saveAgentDesignProject({silent:true})
+    },900)
     return()=>clearTimeout(timer)
   },[
     designProjectId,
     chat,
+    input,
     designFeatureRegistry,
+    requirementRecommendations,
+    requirementRecommendationSettings,
     confirmedInterviewRequirements,
     targetWorkflowPreview,
     targetWorkflowQuality,
     agentBuildStage,
     newAgentName,
     newAgentProjectRoot,
+    agentSpecialization,
     uiLayoutConfig,
-    requirementManualOverrides
+    requirementManualOverrides,
+    interviewAttachmentSummary,
+    interviewAttachmentMemory,
+    restoredBuildResume
   ])
 
   const buildRequirementRequestFromCollectedInfo=()=>{
@@ -10701,6 +12277,30 @@ function IDE() {
       }
     }
 
+    const safeRuntime=safeAgentRuntimeSetup(agentRuntimeSetup)
+    rows.push(
+      '[사용자 확정 실행 환경 - 공통 Runtime Configuration]\n'
+      +`Mode: ${safeRuntime.mode} · Auto Allocate: ${safeRuntime.auto_allocate} · Approved: ${safeRuntime.approved}\n`
+      +`Frontend: ${safeRuntime.frontend.technology} http://${safeRuntime.frontend.host}:${safeRuntime.frontend.port}\n`
+      +`Backend: ${safeRuntime.backend.technology} http://${safeRuntime.backend.host}:${safeRuntime.backend.port}\n`
+      +`API: ${safeRuntime.api.share_backend?'Backend PORT 공유':'별도 API'} http://${safeRuntime.api.host}:${safeRuntime.api.port}${safeRuntime.api.base_path}\n`
+      +'Frontend / Backend / API / CORS / .env / 실행 스크립트 / Docker 설정은 동일 Runtime Configuration을 사용하고 실제 실행 직전에 PORT를 재검사합니다. USER_FIXED 값은 자동 변경하지 않습니다.'
+    )
+
+    const safeDatabaseRuntime=safeAgentDatabaseSetup(agentDatabaseSetup)
+    if(['CONFIGURE','CONNECTION_ONLY'].includes(safeDatabaseRuntime.mode)&&safeDatabaseRuntime.providers.length){
+      rows.push(
+        '[사용자 확정 Database 구성 - Secret 제외, 설계 및 코드 생성 시 반영]\n'
+        +`Mode: ${databaseModeLabel(safeDatabaseRuntime.mode)}\nProviders: ${safeDatabaseRuntime.providers.join(', ')}\n`
+        +`PostgreSQL: ${safeDatabaseRuntime.postgresql.enabled?`${safeDatabaseRuntime.postgresql.host}:${safeDatabaseRuntime.postgresql.port}/${safeDatabaseRuntime.postgresql.database} schema=${safeDatabaseRuntime.postgresql.schema} auto=${safeDatabaseRuntime.postgresql.auto_provision}`:'미사용'}\n`
+        +`Firestore: ${safeDatabaseRuntime.firestore.enabled?`project=${safeDatabaseRuntime.firestore.project_id} database=${safeDatabaseRuntime.firestore.database_id} auto=${safeDatabaseRuntime.firestore.auto_provision}`:'미사용'}\n`
+        +`Redis: ${safeDatabaseRuntime.redis.enabled?`${safeDatabaseRuntime.redis.host}:${safeDatabaseRuntime.redis.port} db=${safeDatabaseRuntime.redis.db} prefix=${safeDatabaseRuntime.redis.key_prefix||'-'} auto=${safeDatabaseRuntime.redis.auto_provision}`:'미사용'}\n`
+        +'DB 사용 여부와 실제 구조 자동 생성 여부는 Provider별로 분리합니다. 실제 DB 변경은 DB Resource Plan 사용자 승인 이후에만 실행합니다. Secret은 환경변수로만 사용합니다.'
+      )
+    }else if(['SKIP','NO_DB','LATER_EDITOR'].includes(safeDatabaseRuntime.mode)){
+      rows.push(safeDatabaseRuntime.mode==='NO_DB'?'[사용자 확정 DB 정책] DB 사용하지 않음. 생성 Agent는 데이터베이스를 사용하지 않으며 DB 관련 Source/Migration을 만들지 않습니다.':`[DB Runtime 설정] ${databaseModeLabel(safeDatabaseRuntime.mode)}. 이번 생성 과정에서는 실제 DB 구조를 생성하지 않습니다.`)
+    }
+
     if(interviewAttachmentSummary?.trim()){
       rows.push(
         '[첨부 파일에서 파악한 요구사항 요약]\n'+interviewAttachmentSummary.trim()
@@ -10712,6 +12312,48 @@ function IDE() {
         +interviewAttachmentRequirements.slice(0,80).map(item=>
           `${item?.id||'REQ'} [${item?.category||'FUNCTIONAL'}] ${String(item?.text||'').trim()}${item?.source?` (출처: ${item.source}${item?.location?` / ${item.location}`:''})`:''}`
         ).filter(Boolean).join('\n')
+      )
+    }
+
+    if(agentSpecialization==='BLENDER_3D'){
+      rows.push(
+        '[Agent 전문 유형 - 코드/Workflow 생성 시 반드시 반영]\n'
+        +'type=BLENDER_3D · 3D 제작 Agent · Blender MCP\n'
+        +'Blender MCP는 실행 Tool 계층이며 Agent는 Intent Router → 3D Schema Router → Structured Extraction(Pydantic) → Validator → LangGraph State → Blender MCP → Viewport/Render Vision QA → bounded repair → Render/Export를 책임집니다.\n'
+        +'SceneSpec 필드: object_type, style, dimensions, materials, colors, geometry_complexity, lighting, camera, animation, output_format, render_resolution.\n'
+        +'Scene State 필드: scene_objects, selected_objects, materials, textures, camera, lights, current_step, completed_steps, failed_steps, render_status, output_files.\n'
+        +'MCP success 응답만으로 완료 처리하지 말고 실제 Viewport 또는 Render 결과를 검증합니다. Blender MCP Tool은 Registry의 name/description/inputSchema/capability/risk를 분석해 선택합니다.'
+      )
+    }
+
+    if(requirementRecommendations&&typeof requirementRecommendations==='object'){
+      const recSettings=normalizeRequirementRecommendationSettings(requirementRecommendationSettings||{})
+      const selectedRows=(kind)=>{
+        const ids=new Set(recSettings[kind]||[])
+        return (Array.isArray(requirementRecommendations?.[kind])?requirementRecommendations[kind]:[])
+          .filter(item=>ids.has(String(item?.id||'')))
+          .map(item=>`${item?.label||item?.id}${kind==='tools'&&item?.registered===false?' (추천 Capability · Registry 미등록)':''}`)
+      }
+      const selectedFeatures=selectedRows('features')
+      const selectedMenus=selectedRows('menus')
+      const selectedTools=selectedRows('tools')
+      rows.push(
+        '[요구사항 분석 AI 추천 구성 - 사용자가 적용한 설정, Workflow/코드 생성 시 반영]\n'
+        +`추천 기능: ${selectedFeatures.length?selectedFeatures.join(' · '):'없음'}\n`
+        +`추천 메뉴: ${selectedMenus.length?selectedMenus.join(' · '):'없음'}\n`
+        +`추천 Tool: ${selectedTools.length?selectedTools.join(' · '):'없음'}\n`
+        +`LLM Tool 분류: ${recSettings.llm_tool_routing.enabled?'사용':'미사용'} · 1차=${recSettings.llm_tool_routing.first_stage_id} · 2차=${recSettings.llm_tool_routing.second_stage_id} · 애매한 경우만 LLM=${recSettings.llm_tool_routing.llm_only_when_ambiguous?'예':'아니오'}\n`
+        +'1차 분류는 사용자 Intent를 Tool Category/Capability로 좁히고, 2차 분류는 Tool Registry의 name/description/input_schema/capability/risk/permission을 검증해 실제 Tool을 선택합니다. 비활성 Tool이나 권한/승인 정책을 우회하지 않습니다.'
+      )
+    }
+
+    if(developmentStagePlan?.approved&&Array.isArray(developmentStagePlan?.stages)){
+      rows.push(
+        '[사용자 승인 개발 Stage Workflow - 구현 순서/Checkpoint/Test에 반드시 반영]\n'
+        +developmentStagePlan.stages.map((stage,index)=>
+          `${index+1}. ${stage?.title||stage?.id||`Stage ${index+1}`} - ${stage?.goal||''}`
+        ).join('\n')
+        +'\n각 Stage 완료 후 Checkpoint와 Stage Test를 수행하고, 실패 시 완료 Stage를 보존한 채 실패 Stage부터 재개합니다.'
       )
     }
 
@@ -10899,6 +12541,19 @@ function IDE() {
           }]
         : (confirmedInterviewRequirements?.superseded_requirements||[]),
 
+      agent_specialization:agentSpecialization==='BLENDER_3D'
+        ? {
+            type:'BLENDER_3D',
+            label:'3D 제작 Agent · Blender MCP',
+            mcp_required:true,
+            structured_scene_spec:true,
+            langgraph_scene_state:true,
+            viewport_vision_qa:true,
+            bounded_repair:true,
+            render_export:true
+          }
+        : {type:'GENERAL',label:'일반 Agent'},
+
       backend:has('fastapi')
         ? (has('uvicorn')?'FastAPI + Uvicorn':'FastAPI')
         : '',
@@ -10946,15 +12601,21 @@ function IDE() {
       },
 
       database:{
-        enabled:!(
-          has(
-            '데이터베이스를 사용하지',
-            'db 사용하지',
-            '이번 버전에서는 db',
-            '이번 버전에서는 데이터베이스'
-          )
-        ),
-        future_extension:has('postgresql')
+        enabled:selectedAgentDatabaseProviders(agentDatabaseSetup).length>0
+          ||(agentSpecialization==='BLENDER_3D'
+            ? has('postgresql','database','데이터베이스',' db ','redis','firestore','pgvector')
+            : !(
+                has(
+                  '데이터베이스를 사용하지',
+                  'db 사용하지',
+                  '이번 버전에서는 db',
+                  '이번 버전에서는 데이터베이스'
+                )
+              )),
+        future_extension:has('postgresql'),
+        runtime_setup:safeAgentDatabaseSetup(agentDatabaseSetup),
+        configured_providers:selectedAgentDatabaseProviders(agentDatabaseSetup),
+        connection_setup_mode:agentDatabaseSetup?.mode||'PENDING'
       },
 
       result:{
@@ -10983,7 +12644,8 @@ function IDE() {
           : '',
         python:has('python 3.12')?'3.12':'',
         virtual_env:has('.venv','가상환경')?'.venv':'',
-        deployment:has('온프레미스')?'on-premise':''
+        deployment:has('온프레미스')?'on-premise':'',
+        runtime_setup:safeAgentRuntimeSetup(agentRuntimeSetup),
       },
 
       auth:{
@@ -10996,6 +12658,34 @@ function IDE() {
         ),
         rbac:false
       },
+      recommendation_settings:(()=>{
+        const settings=normalizeRequirementRecommendationSettings(requirementRecommendationSettings||{})
+        const bundle=requirementRecommendations||{}
+        const selectRows=(kind)=>{
+          const ids=new Set(settings[kind]||[])
+          return (Array.isArray(bundle[kind])?bundle[kind]:[])
+            .filter(item=>ids.has(String(item?.id||'')))
+            .map(item=>({
+              id:String(item?.id||''),
+              label:String(item?.label||item?.id||''),
+              reason:String(item?.reason||''),
+              category:String(item?.category||''),
+              registered:item?.registered===true,
+              registry_tool_name:String(item?.registry_tool_name||''),
+              risk_level:Number(item?.risk_level||0),
+              requires_confirmation:item?.requires_confirmation===true,
+            }))
+        }
+        return {
+          selected_features:selectRows('features'),
+          selected_menus:selectRows('menus'),
+          selected_tools:selectRows('tools'),
+          llm_tool_routing:{...settings.llm_tool_routing},
+          source:'REQUIREMENT_ANALYSIS_RECOMMENDATION',
+          customized:settings.customized===true,
+        }
+      })(),
+      development_stage_plan:developmentStagePlan?.approved?developmentStagePlan:null,
       attachment_summary:interviewAttachmentSummary||'',
       attachment_requirements:(interviewAttachmentRequirements||[]).slice(0,120),
       attachment_requirement_coverage:interviewAttachmentRequirementCoverage||{},
@@ -11083,6 +12773,235 @@ function IDE() {
   }
 
 
+  const updateAgentRuntimeSetup=(nextValue)=>{
+    const next=normalizeAgentRuntimeSetup(nextValue)
+    const previousSafe=JSON.stringify(safeAgentRuntimeSetup(agentRuntimeSetup))
+    const nextSafe=JSON.stringify(safeAgentRuntimeSetup(next))
+    setAgentRuntimeSetup(next)
+    if(previousSafe!==nextSafe){
+      setAgentRuntimePortInfo(null)
+      setWorkflowReq('')
+      if(targetWorkflowPreview) setPreviousTargetWorkflowPreview(targetWorkflowPreview)
+      setTargetWorkflowPreview(null)
+      setTargetWorkflowQuality(null)
+      setAgentBuildStage('REQUIREMENTS')
+      setAgentBuildMessage('실행 환경 URL/PORT 설정을 변경했습니다. 추천 PORT를 다시 확인하고 실행 환경을 확정해 주세요.')
+      setTimeout(()=>saveRequirementDraft(),0)
+    }
+  }
+
+  const recommendAgentRuntimePorts=async()=>{
+    if(agentRuntimePortBusy) return null
+    setAgentRuntimePortBusy(true)
+    try{
+      const result=await api('/agent-runtime/ports/recommend',{
+        method:'POST',
+        body:JSON.stringify({project_root:newAgentProjectRoot||root||'',runtime_setup:agentRuntimeSetup})
+      })
+      setAgentRuntimePortInfo(result)
+      if(result?.ok){
+        const setup=normalizeAgentRuntimeSetup(agentRuntimeSetup)
+        if(setup.auto_allocate||['AUTO','SKIP'].includes(setup.mode)){
+          const next={...setup,approved:false,approved_at:'',
+            frontend:{...setup.frontend,port:String(result.frontend?.recommended||setup.frontend.port),user_fixed:setup.frontend.user_fixed&&result.frontend?.state==='available'},
+            backend:{...setup.backend,port:String(result.backend?.recommended||setup.backend.port),user_fixed:setup.backend.user_fixed&&result.backend?.state==='available'},
+            api:{...setup.api,port:String(result.api?.recommended||setup.api.port),user_fixed:setup.api.user_fixed&&result.api?.state==='available'},
+          }
+          setAgentRuntimeSetup(next)
+          result.resolved_setup=next
+          setWorkflowReq('')
+          if(targetWorkflowPreview) setPreviousTargetWorkflowPreview(targetWorkflowPreview)
+          setTargetWorkflowPreview(null)
+          setTargetWorkflowQuality(null)
+        }
+        setAgentBuildMessage('Frontend / Backend / API 사용 가능 PORT를 확인했습니다. 추천 이유와 상태를 검토한 뒤 실행 환경을 확정하세요.')
+      }
+      return result
+    }catch(error){
+      setAgentBuildMessage(`PORT 추천 실패: ${String(error)}`)
+      setAgentRuntimePortInfo({ok:false,error:String(error)})
+      return null
+    }finally{setAgentRuntimePortBusy(false)}
+  }
+
+  const approveAgentRuntimeSetup=async()=>{
+    let info=agentRuntimePortInfo
+    if(!info?.ok) info=await recommendAgentRuntimePorts()
+    if(!info?.ok) return
+    const current=normalizeAgentRuntimeSetup(info?.resolved_setup||agentRuntimeSetup)
+    const next={...current,approved:true,approved_at:new Date().toISOString()}
+    setAgentRuntimeSetup(next)
+    setAgentBuildMessage('실행 환경 확정 완료 · 최종 Agent 생성 시 동일 Runtime Configuration을 Frontend / Backend / API / CORS / 실행 스크립트에 반영합니다.')
+    setTimeout(()=>saveRequirementDraft(),0)
+  }
+
+  const updateAgentDatabaseSetup=(nextValue)=>{
+    const next=normalizeAgentDatabaseSetup(nextValue)
+    const previousSafe=JSON.stringify(safeAgentDatabaseSetup(agentDatabaseSetup))
+    const nextSafe=JSON.stringify(safeAgentDatabaseSetup(next))
+    setAgentDatabaseSetup(next)
+    setAgentDatabaseTestResult(null)
+    setAgentDatabaseAnalyzeResult({})
+    setAgentDatabaseResourcePlan(null)
+    if(previousSafe!==nextSafe){
+      setConfirmedInterviewRequirements(prev=>({
+        ...(prev||{}),
+        database:{
+          ...((prev||{}).database||{}),
+          runtime_setup:safeAgentDatabaseSetup(next),
+          configured_providers:selectedAgentDatabaseProviders(next),
+          connection_setup_mode:next.mode,
+        }
+      }))
+      // DB Provider/Host/Database 등 Runtime 계약은 생성 코드/환경 설정에 반영되어야 하지만,
+      // 사용자가 이미 승인한 Development Stage 자체는 보존합니다. Password는 safe snapshot에서 제외됩니다.
+      setWorkflowReq('')
+      if(targetWorkflowPreview) setPreviousTargetWorkflowPreview(targetWorkflowPreview)
+      setTargetWorkflowPreview(null)
+      setTargetWorkflowQuality(null)
+      setAgentBuildStage('REQUIREMENTS')
+      setAgentBuildMessage('DB 연결/생성 설정을 변경했습니다. 승인된 개발 Stage는 유지하고 DB Runtime 설정 기준으로 Workflow를 다시 확인합니다.')
+      setTimeout(()=>saveRequirementDraft(),0)
+    }
+  }
+
+  const testAgentDatabaseConnections=async(provider='')=>{
+    if(agentDatabaseTestBusy) return
+    setAgentDatabaseTestBusy(true)
+    setAgentDatabaseTestResult(null)
+    try{
+      const result=await api('/agent-database/test',{method:'POST',body:JSON.stringify({database_setup:agentDatabaseSetup,provider})})
+      setAgentDatabaseTestResult(result)
+    }catch(error){
+      setAgentDatabaseTestResult({ok:false,providers:[],validation:{errors:[String(error)]}})
+    }finally{setAgentDatabaseTestBusy(false)}
+  }
+
+  const analyzeExistingAgentDatabase=async(provider)=>{
+    if(!provider||agentDatabaseAnalyzeBusy) return
+    setAgentDatabaseAnalyzeBusy(provider)
+    try{
+      const result=await api('/agent-database/analyze-existing',{method:'POST',body:JSON.stringify({database_setup:agentDatabaseSetup,provider})})
+      setAgentDatabaseAnalyzeResult(prev=>({...prev,[provider]:result}))
+    }catch(error){setAgentDatabaseAnalyzeResult(prev=>({...prev,[provider]:{ok:false,provider,message:String(error)}}))}
+    finally{setAgentDatabaseAnalyzeBusy('')}
+  }
+
+  const createAgentDatabaseResource=async(provider)=>{
+    if(!provider||agentDatabaseCreateBusy) return
+    const setup=normalizeAgentDatabaseSetup(agentDatabaseSetup)
+    if(provider==='postgresql'){
+      const database=String(setup.postgresql.database||'').trim()
+      const schema=String(setup.postgresql.schema||'public').trim()
+      if(!database){
+        setAgentDatabaseCreateResult(prev=>({...prev,postgresql:{ok:false,provider:'postgresql',message:'PostgreSQL Database Name을 입력하세요.'}}))
+        return
+      }
+      if(!window.confirm(`PostgreSQL 스키마를 생성하시겠습니까?\n\nDatabase: ${database}\nSchema: ${schema}\n\nTable이나 데이터는 생성/수정하지 않습니다.`)) return
+    }else if(provider==='firestore'){
+      const projectId=String(setup.firestore.project_id||'').trim()
+      const databaseId=String(setup.firestore.database_id||'(default)').trim()
+      const region=String(setup.firestore.region||'').trim()
+      if(!projectId||!databaseId||!region){
+        setAgentDatabaseCreateResult(prev=>({...prev,firestore:{ok:false,provider:'firestore',message:'Firestore Project ID / Database ID / Region을 모두 입력하세요. Region은 생성 후 변경할 수 없습니다.'}}))
+        return
+      }
+      if(!window.confirm(`Google Cloud Firestore Database를 생성하시겠습니까?\n\nProject: ${projectId}\nDatabase: ${databaseId}\nLocation: ${region}\n\nGoogle Cloud 권한/과금 정책이 적용될 수 있습니다.`)) return
+    }else return
+
+    setAgentDatabaseCreateBusy(provider)
+    setAgentDatabaseCreateResult(prev=>{const next={...prev};delete next[provider];return next})
+    try{
+      const endpoint=provider==='postgresql'
+        ? '/agent-database/postgresql/create-schema'
+        : '/agent-database/firestore/create-database'
+      const result=await api(endpoint,{method:'POST',body:JSON.stringify({database_setup:setup,provider})})
+      setAgentDatabaseCreateResult(prev=>({...prev,[provider]:result}))
+      if(result?.ok){
+        updateAgentDatabaseSetup({...setup,[provider]:{...setup[provider],use_existing:true}})
+        setAgentBuildMessage(result.message||`${provider} 리소스 생성을 완료했습니다.`)
+      }else{
+        setAgentBuildMessage(result?.message||`${provider} 리소스 생성에 실패했습니다.`)
+      }
+    }catch(error){
+      const result={ok:false,provider,message:String(error?.message||error)}
+      setAgentDatabaseCreateResult(prev=>({...prev,[provider]:result}))
+      setAgentBuildMessage(`${provider} 리소스 생성 실패: ${result.message}`)
+    }finally{
+      setAgentDatabaseCreateBusy('')
+    }
+  }
+
+  const buildAgentDatabaseResourcePlan=async()=>{
+    if(agentDatabasePlanBusy) return null
+    setAgentDatabasePlanBusy(true)
+    try{
+      const result=await api('/agent-database/resource-plan',{method:'POST',body:JSON.stringify({database_setup:agentDatabaseSetup,database_plan:{...(targetWorkflowPreview?.database_plan||liveDatabasePreview||{}),existing_analysis:agentDatabaseAnalyzeResult||{}}})})
+      if(!result?.ok){setAgentBuildMessage(`DB Resource Plan 생성 실패: ${(result?.validation?.errors||[]).join(' / ')||result?.message||'설정을 확인하세요.'}`);return null}
+      setAgentDatabaseResourcePlan(result)
+      setAgentBuildMessage(result.message||'DB Resource Plan Preview를 생성했습니다. 실제 DB는 아직 변경되지 않았습니다.')
+      setBuilderSummaryTab('DATABASE')
+      return result
+    }catch(error){setAgentBuildMessage(`DB Resource Plan 생성 실패: ${String(error)}`);return null}
+    finally{setAgentDatabasePlanBusy(false)}
+  }
+
+  const approveAgentDatabaseResourcePlan=()=>{
+    if(!agentDatabaseResourcePlan) return
+    const approved={...agentDatabaseResourcePlan,approved:true,approved_at:new Date().toISOString()}
+    setAgentDatabaseResourcePlan(approved)
+    setAgentBuildMessage('DB Resource Plan 사용자 승인 완료 · 프로젝트 생성 전까지 실제 DB는 변경되지 않습니다.')
+    setTimeout(()=>saveRequirementDraft(),0)
+  }
+
+  const backToAgentDatabaseSetup=()=>{
+    if(agentDatabaseResourcePlan?.approved&&!window.confirm('승인된 DB 생성 계획을 다시 수정하시겠습니까? 수정 후 다시 승인해야 합니다.')) return
+    setAgentDatabaseResourcePlan(null)
+  }
+
+  const retryAgentDatabaseProvision=async(provider)=>{
+    if(!provider||agentDatabaseProvisionBusy||!newAgentProjectRoot.trim()) return
+    setAgentDatabaseProvisionBusy(provider)
+    try{
+      const basePlan=agentDatabaseResourcePlan||await buildAgentDatabaseResourcePlan()
+      if(!basePlan) return
+      const retryPlan={...basePlan,approved:true,providers:(basePlan.providers||[]).map(row=>({...row,include_in_provision:row.provider===provider}))}
+      const result=await api('/agent-database/provision',{method:'POST',body:JSON.stringify({project_root:newAgentProjectRoot,database_setup:agentDatabaseSetup,database_plan:targetWorkflowPreview?.database_plan||{},database_resource_plan:retryPlan})})
+      setNewAgentCreateResult(prev=>({...prev,database_provision:result,message:result?.message||prev?.message||''}))
+      setAgentBuildMessage(result?.message||`${provider} DB 구성 재시도를 완료했습니다.`)
+    }catch(error){setAgentBuildMessage(`${provider} DB 구성 재시도 실패: ${String(error)}`)}
+    finally{setAgentDatabaseProvisionBusy('')}
+  }
+
+  const skipAgentDatabaseProvision=(provider)=>{
+    if(!provider) return
+    const key=provider==='postgresql'||provider==='firestore'||provider==='redis'?provider:''
+    if(!key) return
+    updateAgentDatabaseSetup({...agentDatabaseSetup,[key]:{...agentDatabaseSetup[key],auto_provision:false}})
+    setAgentDatabaseResourcePlan(prev=>prev?{...prev,approved:false,providers:(prev.providers||[]).map(row=>row.provider===key?{...row,include_in_provision:false,auto_provision:false}:row)}:prev)
+    setAgentBuildMessage(`${provider} DB 구조 자동 생성을 Skip으로 변경했습니다. 필요하면 Resource Plan을 다시 승인하세요.`)
+  }
+
+  const validateAgentDatabaseSetupForCreate=(databasePlan={})=>{
+    const setup=normalizeAgentDatabaseSetup(agentDatabaseSetup)
+    if(!databasePlan?.enabled) return {ok:true,setup}
+    if(['SKIP','NO_DB','LATER_EDITOR'].includes(setup.mode)) return {ok:true,setup}
+    if(!['CONFIGURE','CONNECTION_ONLY'].includes(setup.mode)){
+      return {ok:false,setup,message:'DB가 필요한 Agent입니다. 지금 DB 설정 / 연결 정보만 사용 / DB 없이 생성 / 건너뛰기 / Agent Editor에서 나중에 설정 중 하나를 선택해 주세요.'}
+    }
+    const selected=selectedAgentDatabaseProviders(setup)
+    if(!selected.length) return {ok:false,setup,message:'PostgreSQL, Firestore, Redis 중 사용할 DB를 하나 이상 선택하거나 DB 없이 생성/Skip을 선택해 주세요.'}
+    if(setup.postgresql.enabled&&(!String(setup.postgresql.host||'').trim()||!String(setup.postgresql.database||'').trim()||!String(setup.postgresql.user||'').trim())) return {ok:false,setup,message:'PostgreSQL Host / Database / Username 정보를 확인해 주세요.'}
+    if(setup.firestore.enabled&&!String(setup.firestore.project_id||'').trim()) return {ok:false,setup,message:'Firestore Google Cloud Project ID를 입력해 주세요.'}
+    if(setup.redis.enabled&&!String(setup.redis.host||'').trim()) return {ok:false,setup,message:'Redis Host를 입력해 주세요.'}
+    const autoProviders=['postgresql','firestore','redis'].filter(key=>setup[key]?.enabled&&setup[key]?.auto_provision&&setup.mode==='CONFIGURE')
+    if(autoProviders.length){
+      if(!agentDatabaseResourcePlan) return {ok:false,setup,message:'DB 구조 자동 생성이 선택되어 있습니다. 먼저 DB Resource Plan Preview를 생성해 주세요.'}
+      if(!agentDatabaseResourcePlan.approved) return {ok:false,setup,message:'실제 DB 구조를 생성하기 전에 DB Resource Plan을 확인하고 사용자 승인을 완료해 주세요.'}
+    }
+    return {ok:true,setup}
+  }
+
   const createAgentProjectFromInterview=async()=>{
     const name=newAgentName.trim()
     const projectRoot=newAgentProjectRoot.trim()
@@ -11094,6 +13013,11 @@ function IDE() {
 
     if(!projectRoot){
       setAgentBuildMessage('프로젝트 경로를 먼저 입력하거나 경로 찾기로 선택하세요.')
+      return false
+    }
+    if(!agentRuntimeSetup?.approved){
+      setBuilderSummaryTab('RUNTIME')
+      setAgentBuildMessage('Agent 생성 전에 실행 환경의 추천 PORT를 확인하고 실행 환경을 확정해 주세요.')
       return false
     }
 
@@ -11109,7 +13033,10 @@ function IDE() {
           venv_path:newAgentVenvPath,
           models_path:newAgentModelsPath,
           force_recreate:forceRecreate,
-          database_plan:targetWorkflowPreview?.database_plan||{}
+          runtime_setup:agentRuntimeSetup,
+          database_plan:targetWorkflowPreview?.database_plan||{},
+          database_setup:agentDatabaseSetup,
+          database_resource_plan:agentDatabaseResourcePlan||{}
         })
       })
     }
@@ -11119,6 +13046,10 @@ function IDE() {
 
     try{
       let result=await requestCreate(false)
+      if(result?.runtime_setup){
+        setAgentRuntimeSetup(normalizeAgentRuntimeSetup({...result.runtime_setup,approved:true,approved_at:agentRuntimeSetup?.approved_at||new Date().toISOString()}))
+        if(result?.runtime_resolution?.recommendation) setAgentRuntimePortInfo(result.runtime_resolution.recommendation)
+      }
 
       if(
         result?.ok===false
@@ -11142,12 +13073,16 @@ function IDE() {
 
         setAgentBuildMessage('기존 프로젝트를 재사용하여 재생성 준비 중입니다...')
         result=await requestCreate(true)
+        if(result?.runtime_setup) setAgentRuntimeSetup(normalizeAgentRuntimeSetup({...result.runtime_setup,approved:true,approved_at:agentRuntimeSetup?.approved_at||new Date().toISOString()}))
       }
 
       setNewAgentCreateResult(result)
 
       if(!result?.ok){
-        throw new Error(result?.message||'프로젝트 생성에 실패했습니다.')
+        const dbFailures=(result?.database_provision?.providers||[])
+          .filter(item=>item?.ok===false)
+          .map(item=>`${item?.provider||'DB'}: ${item?.message||'생성 실패'}`)
+        throw new Error((result?.message||'프로젝트 생성에 실패했습니다.')+(dbFailures.length?` · ${dbFailures.join(' / ')}`:''))
       }
 
       const resolvedRoot=result.project_root||projectRoot
@@ -11156,11 +13091,16 @@ function IDE() {
       setRoot(resolvedRoot)
       setAgentBuildStage('PROJECT_CREATED')
       const databaseFileCount=Array.isArray(result?.database_files)?result.database_files.length:0
+      const provisionRows=Array.isArray(result?.database_provision?.providers)?result.database_provision.providers:[]
+      const provisionSummary=provisionRows.length
+        ? ` · DB 자동 생성 ${provisionRows.filter(item=>item?.ok).length}/${provisionRows.length} PASS`
+        : result?.database_provision?.skipped?' · DB 직접 생성 SKIP':''
       setAgentBuildMessage(
         (result?.recreated
           ? `프로젝트 재생성 준비 완료${result.project_id?` · Project #${result.project_id}`:''}`
           : `프로젝트 생성 완료${result.project_id?` · Project #${result.project_id}`:''}`)
-        +(databaseFileCount?` · DB Migration ${databaseFileCount}개 생성`:'')
+        +(databaseFileCount?` · DB 파일 ${databaseFileCount}개 생성`:'')
+        +provisionSummary
       )
 
       try{ await refreshProjectList() }catch(_){}
@@ -11192,7 +13132,16 @@ function IDE() {
     try{
       let workflowResult=null
       if(agentBuildStage==='REQUIREMENTS'){
-        setAgentBuildMessage('프로젝트 생성에 필요한 Workflow와 DB Module 설계를 먼저 자동 분석하고 있습니다...')
+        if(!developmentStagePlan?.approved){
+          const plan=developmentStagePlan?.stages?.length?developmentStagePlan:await recommendDevelopmentStages()
+          setAgentBuildMessage(plan
+            ? `프로젝트 생성 전에 추천 개발 Stage ${Number(plan?.stages?.length||0)}개를 확인하고 승인해 주세요.`
+            : '프로젝트 생성 전에 개발 Stage 추천을 완료해 주세요.')
+          setScreen('WORKSPACE')
+          setWorkspaceTab('DESIGN')
+          return false
+        }
+        setAgentBuildMessage('승인된 개발 Stage를 기준으로 Workflow와 DB Module 설계를 자동 분석하고 있습니다...')
         workflowResult=await previewTargetWorkflow()
         if(!workflowResult){
           setAgentBuildMessage('Workflow 설계가 완료되지 않아 프로젝트 생성을 중단했습니다. 위 오류를 확인한 뒤 다시 시도하세요.')
@@ -11201,11 +13150,20 @@ function IDE() {
       }
 
       const databasePlan=workflowResult?.database_plan||targetWorkflowPreview?.database_plan||{}
-      if(databasePlan?.enabled&&!databasePlan?.finalized){
+      if(databasePlan?.enabled&&!databasePlan?.finalized&&agentDatabaseSetup?.mode!=='NO_DB'){
         setAgentBuildMessage('DB 설계 확인이 필요합니다. Workflow 화면의 DB 자동 설계에서 Module/테이블을 확인한 뒤 "DB 설계 확정"을 눌러주세요.')
         setScreen('WORKSPACE')
         setWorkspaceTab('WORKFLOW')
         setWorkflowView('TARGET')
+        return false
+      }
+
+      const databaseSetupValidation=validateAgentDatabaseSetupForCreate(databasePlan)
+      if(!databaseSetupValidation.ok){
+        setAgentBuildMessage(databaseSetupValidation.message)
+        setScreen('WORKSPACE')
+        setWorkspaceTab('DESIGN')
+        setBuilderSummaryTab('DATABASE')
         return false
       }
 
@@ -11214,7 +13172,7 @@ function IDE() {
         return false
       }
 
-      setAgentBuildMessage('Workflow/DB 설계 준비 완료 · 프로젝트 폴더와 DB 정보를 생성합니다...')
+      setAgentBuildMessage(agentDatabaseResourcePlan?.approved?'DB 생성 계획 승인 완료 · 프로젝트 생성 과정에서 승인된 DB만 실제 구성합니다...':agentDatabaseSetup?.mode==='CONNECTION_ONLY'?'DB 연결 정보만 반영하여 프로젝트를 생성합니다...':'Workflow/DB 설계 준비 완료 · 프로젝트를 생성합니다...')
       return await createAgentProjectFromInterview()
     }finally{
       setProjectCreateFlowBusy(false)
@@ -11372,6 +13330,14 @@ function IDE() {
 
   const startAgentDevelopment=async(options={})=>{
     const redevelopment=options?.redevelopment===true
+    const codeDocumentation={
+      enabled:Boolean(codeDocumentationEnabled),
+      level:'standard',
+      targets:['class','function','method','important_variable','field','constant'],
+      preserve_existing_comments:true,
+      skip_trivial_locals:true
+    }
+    const userCodingStyle={enabled:true,...normalizeAgentCodingStyle(agentCodingStyle)}
     const request=(
       workflowReq
       || chat.find(x=>x?.role==='user')?.content
@@ -11400,7 +13366,7 @@ function IDE() {
       }
 
       const databasePlan=targetWorkflowPreview?.database_plan||{}
-      if(databasePlan?.enabled&&!databasePlan?.finalized){
+      if(databasePlan?.enabled&&!databasePlan?.finalized&&agentDatabaseSetup?.mode!=='NO_DB'){
         setAgentBuildMessage('DB 설계가 확정되지 않아 개발을 시작하지 않습니다. Workflow 화면에서 DB 설계를 확인/확정해 주세요.')
         setWorkspaceTab('WORKFLOW')
         setWorkflowView('TARGET')
@@ -11461,7 +13427,7 @@ function IDE() {
     setAgentBuildMessage(
       redevelopment
         ? `재개발 시작 · 이전 실패 ${redevelopmentInfo?.failure_stage||'-'} 직전 단계(${redevelopmentInfo?.resume_from_node||'-'})부터 이어서 검증합니다...`
-        : 'Agent Factory 개발 Workflow를 시작합니다...'
+        : `Agent Factory 개발 Workflow를 시작합니다...${codeDocumentation.enabled?' · 변수/메소드 설명 주석 ON':''} · 코딩 스타일 ${countEnabledAgentCodingStyle(userCodingStyle)}개 적용`
     )
 
     const startedAt=Date.now()
@@ -11548,7 +13514,9 @@ function IDE() {
               request,
               test_command:'python -m compileall .',
               provider,
-              agent_name:newAgentName||''
+              agent_name:newAgentName||'',
+              code_documentation:codeDocumentation,
+              user_coding_style:userCodingStyle
             })
           })
         : await api('/workflow/start-job',{
@@ -11562,6 +13530,8 @@ function IDE() {
               provider,
               design_bundle:{
                 ...(targetWorkflowPreview||{}),
+                code_documentation:codeDocumentation,
+                user_coding_style:userCodingStyle,
                 confirmed_requirements:buildConfirmedRequirementsFromChat(),
                 interview_messages:(chat||[]).map(item=>({
                   role:item?.role||'',
@@ -12011,8 +13981,27 @@ function IDE() {
       || ''
     ).trim()
 
+    const submittedAttachmentFiles=(interviewAttachments||[]).map(item=>({
+      name:String(item?.name||''),
+      path:String(item?.path||''),
+      project_relative_path:String(item?.project_relative_path||'')
+    })).filter(item=>item.name||item.path)
+
     if(!request){
       setTargetWorkflowError('에이전트 개발 요청 내용을 입력하세요.')
+      return false
+    }
+
+    const approvedStagePlan=(options?.approvedStagePlan&&options.approvedStagePlan.approved)
+      ? options.approvedStagePlan
+      : (developmentStagePlan?.approved?developmentStagePlan:null)
+    if(!approvedStagePlan&&!options?.stageApprovalBypass){
+      const plan=developmentStagePlan?.stages?.length?developmentStagePlan:await recommendDevelopmentStages()
+      if(plan){
+        setAgentBuildMessage(`Workflow 설계 전에 추천 개발 Stage ${Number(plan?.stages?.length||0)}개를 확인하고 승인해 주세요.`)
+        setScreen('WORKSPACE')
+        setWorkspaceTab('DESIGN')
+      }
       return false
     }
 
@@ -12072,7 +14061,11 @@ function IDE() {
             role:item?.role||'',
             content:item?.content||''
           })),
-          confirmed_requirements:buildConfirmedRequirementsFromChat(),
+          confirmed_requirements:(()=>{
+            const confirmed=buildConfirmedRequirementsFromChat()
+            if(approvedStagePlan) confirmed.development_stage_plan=approvedStagePlan
+            return confirmed
+          })(),
           attachment_ids:interviewAttachments.map(item=>item.attachment_id),
           attachment_memory:interviewAttachmentMemory,
           previous_design:targetWorkflowPreview||previousTargetWorkflowPreview||{},
@@ -12342,6 +14335,16 @@ function IDE() {
 
       return
     }
+    if(developmentStagePlan?.approved){
+      setDevelopmentStagePlan(null)
+      if(targetWorkflowPreview){
+        setPreviousTargetWorkflowPreview(targetWorkflowPreview)
+        setTargetWorkflowPreview(null)
+        setTargetWorkflowQuality(null)
+      }
+      setAgentBuildStage('REQUIREMENTS')
+      setAgentBuildMessage('새 요구사항이 입력되어 승인된 개발 Stage를 무효화했습니다. 최신 요구사항 분석 후 Stage를 다시 추천합니다.')
+    }
     setWorkflowReq(prev=>prev?.trim()?prev:message)
 
     const isRetry=Boolean(retryPayload?.historyBeforeSend)
@@ -12359,7 +14362,8 @@ function IDE() {
     const retryRecord={type:'CHAT',message,historyBeforeSend}
     const submittedAttachmentFiles=(interviewAttachments||[]).map(item=>({
       name:String(item?.name||''),
-      path:String(item?.path||'')
+      path:String(item?.path||''),
+      project_relative_path:String(item?.project_relative_path||'')
     })).filter(item=>item.name||item.path)
 
     try{
@@ -12372,7 +14376,8 @@ function IDE() {
           provider,
           project_root:newAgentProjectRoot||root||'',
           attachment_ids:interviewAttachments.map(item=>item.attachment_id),
-          attachment_memory:interviewAttachmentMemory
+          attachment_memory:interviewAttachmentMemory,
+          agent_specialization:agentSpecialization
         })
       })
 
@@ -12391,6 +14396,10 @@ function IDE() {
       if(visibleAttachmentSummary) setInterviewAttachmentSummary(visibleAttachmentSummary)
       if(minedAttachmentRequirements.length) setInterviewAttachmentRequirements(minedAttachmentRequirements)
       if(result?.attachment_requirement_coverage&&typeof result.attachment_requirement_coverage==='object') setInterviewAttachmentRequirementCoverage(result.attachment_requirement_coverage)
+      if(result?.requirement_recommendations&&typeof result.requirement_recommendations==='object') applyRequirementRecommendationBundle(result.requirement_recommendations)
+      if(result?.development_stage_plan&&typeof result.development_stage_plan==='object'){
+        setDevelopmentStagePlan(prev=>prev?.approved?prev:result.development_stage_plan)
+      }
       if((visibleAttachmentSummary||minedAttachmentRequirements.length)&&submittedAttachmentFiles.length){
         setInterviewAttachmentSummaryFiles(prev=>{
           const merged=[...(Array.isArray(prev)?prev:[]),...submittedAttachmentFiles]
@@ -12710,14 +14719,26 @@ function IDE() {
 
   const renderBuilderScreen=()=>{
     const leftSummary=getBuilderConversationSummary()
+    const developmentPlanSummary=developmentStagePlan?.approved
+      ? `${Number(developmentStagePlan?.stages?.length||0)}단계 승인 · Workflow 구성`
+      : developmentStagePlan?.stages?.length
+        ? `${Number(developmentStagePlan.stages.length)}단계 추천 · 승인 필요`
+        : '요구사항 수집 후 개발 단계 자동 추천'
+    const runtimeSafe=safeAgentRuntimeSetup(agentRuntimeSetup)
+    const runtimeSetupSummary=runtimeSafe.approved?`Frontend ${runtimeSafe.frontend.port} · Backend ${runtimeSafe.backend.port} · API ${runtimeSafe.api.port}`:'추천 PORT 확인 · 확정 필요'
+    const databaseSetupSummary=agentDatabaseSetup?.mode==='PENDING'?'DB 필요 시 설정 방법 선택':agentDatabaseResourcePlan?.approved?`DB 생성 계획 승인 · ${selectedAgentDatabaseProviders(agentDatabaseSetup).length}개 사용`:agentDatabaseResourcePlan?`DB Resource Plan 검토 · ${selectedAgentDatabaseProviders(agentDatabaseSetup).length}개 사용`:`${databaseModeLabel(agentDatabaseSetup?.mode)} · ${selectedAgentDatabaseProviders(agentDatabaseSetup).length}개 DB`
+    const databaseAutoProvisionRequired=['postgresql','firestore','redis'].some(key=>agentDatabaseSetup?.mode==='CONFIGURE'&&agentDatabaseSetup?.[key]?.enabled&&agentDatabaseSetup?.[key]?.auto_provision)
+    const databasePlanApprovalPending=Boolean(targetWorkflowPreview&&databaseAutoProvisionRequired&&!agentDatabaseResourcePlan?.approved)
     const builderSteps=[
       ['01','목적',leftSummary.purpose],
       ['02','기능',leftSummary.features],
       ['03','MCP / Tool',leftSummary.mcpTools],
       ['04','DB 설계',leftSummary.database],
       ['05','UI / Layout',leftSummary.uiLayout],
-      ['06','실행 환경',leftSummary.runtime],
-      ['07','확인',leftSummary.confirmation]
+      ['06','실행 환경',runtimeSetupSummary],
+      ['07','DB 구성',databaseSetupSummary],
+      ['08','개발 계획',developmentPlanSummary],
+      ['09','최종 확인',leftSummary.confirmation]
     ]
     return <div className="builder-shell">
     <aside className="builder-steps">
@@ -12743,6 +14764,7 @@ function IDE() {
         coverage={interviewAttachmentRequirementCoverage}
         compact={true}
         restored={requirementDraftRestored}
+        onOpenFile={openAttachmentSummaryFile}
       />}
       <div className="builder-tip">
         <strong>질문 방식 · Quality Gate</strong>
@@ -12757,9 +14779,11 @@ function IDE() {
         savedAt={designProjectSavedAt||requirementDraftSavedAt}
         status={designProjectProgressInfo().status}
         progress={designProjectProgressInfo().progress}
+        saving={designProjectSaving}
+        autoSaveEnabled={true}
         onNew={()=>{
           const hasWork=(chat||[]).some(item=>item?.role==='user')||Boolean(designProjectId)
-          if(hasWork&&!window.confirm('현재 Agent 설계를 종료하고 새 설계 프로젝트를 시작할까요?\n\n저장하지 않은 변경이 있다면 먼저 프로젝트 저장을 눌러주세요.')) return
+          if(hasWork&&!window.confirm("현재 Agent 설계를 종료하고 새 설계 프로젝트를 시작할까요?\n\n현재 변경 내용은 자동 저장되지만, 필요하면 '지금 저장'으로 별도 버전 Snapshot을 남길 수 있습니다.")) return
           startNewProject()
         }}
         onSave={()=>saveAgentDesignProject({createVersion:true,versionLabel:'사용자 수동 저장 Snapshot'})}
@@ -12777,6 +14801,13 @@ function IDE() {
           <div>{m.role==='assistant'?protectInterviewAssistantAnswer(m.content):sanitizeInterviewDisplayText(m.content)}</div>
         </div>)}
         {busy&&<div className="builder-msg assistant"><span>AI</span><div>답변을 분석하고 다음 질문을 준비하고 있습니다...</div></div>}
+        {developmentStagePlan?.stages?.length>0&&<div className={`builder-development-plan-inline ${developmentStagePlan?.approved?'approved':'pending'}`}>
+          <div>
+            <span>◇</span>
+            <div><strong>{developmentStagePlan?.approved?'개발 계획 승인 완료':'개발 계획 추천 준비됨'}</strong><small>복잡도 {developmentStagePlan?.complexity?.level||'-'} · {developmentStagePlan.stages.length} Stage · {developmentStagePlan?.approved?'승인된 순서로 Workflow를 구성합니다.':'단계를 확인·수정한 뒤 승인해 주세요.'}</small></div>
+          </div>
+          <button type="button" onClick={()=>setBuilderSummaryTab('STAGES')}>{developmentStagePlan?.approved?'승인 계획 보기':'개발 Stage 검토'}</button>
+        </div>}
         <div ref={builderMessagesEndRef} className="builder-messages-end" aria-hidden="true"></div>
       </div>
       <AgentBuildActionBar
@@ -12784,9 +14815,14 @@ function IDE() {
         busy={agentBuildBusy||projectCreateFlowBusy||targetWorkflowLoading}
         message={agentBuildMessage}
         workflowEnabled={canDesignFromCollectedInfo()}
+        developmentPlanApproved={Boolean(developmentStagePlan?.approved)}
+        runtimeSetupApproved={Boolean(agentRuntimeSetup?.approved)}
+        databasePlanApproved={!databasePlanApprovalPending}
         onWorkflow={()=>previewTargetWorkflow()}
         onCreateProject={createAgentProjectSmart}
         onStartDevelopment={startAgentDevelopment}
+        codeDocumentationEnabled={codeDocumentationEnabled}
+        onCodeDocumentationChange={setCodeDocumentationEnabled}
         onRedevelop={()=>startAgentDevelopment({redevelopment:true})}
         redevelopmentEnabled={Boolean(redevelopmentInfo?.available)}
         redevelopmentInfo={redevelopmentInfo}
@@ -12803,9 +14839,18 @@ function IDE() {
 
     <aside className="builder-summary">
       <div className="summary-head">
-        <div><strong>프로젝트 구성</strong><small>생성 전에 언제든 수정할 수 있습니다.</small></div>
+        <div><strong>프로젝트 구성</strong><small>요구사항 → 실행 환경 → Database → 개발 Stage → 최종 Preview 순서로 확인하고 생성합니다.</small></div>
+      </div>
+      <div className="builder-summary-tabs" role="tablist" aria-label="신규 Agent 프로젝트 구성">
+        <button type="button" className={builderSummaryTab==='REQUIREMENTS'?'active':''} onClick={()=>setBuilderSummaryTab('REQUIREMENTS')}>요구사항</button>
+        <button type="button" className={builderSummaryTab==='RUNTIME'?'active':''} onClick={()=>{setBuilderSummaryTab('RUNTIME');if(workspaceRightWidth<430)setWorkspaceRightWidth(430);if(!agentRuntimePortInfo)setTimeout(()=>recommendAgentRuntimePorts(),0)}}>실행 환경</button>
+        <button type="button" className={builderSummaryTab==='DATABASE'?'active':''} onClick={()=>{setBuilderSummaryTab('DATABASE');if(workspaceRightWidth<450)setWorkspaceRightWidth(450)}}>Database</button>
+        <button type="button" className={builderSummaryTab==='STAGES'?'active':''} onClick={()=>{setBuilderSummaryTab('STAGES');if(workspaceRightWidth<410)setWorkspaceRightWidth(410)}}>개발 Stage{developmentStagePlan?.stages?.length?` ${developmentStagePlan.stages.length}`:''}</button>
+        <button type="button" className={builderSummaryTab==='FINAL'?'active':''} onClick={()=>{setBuilderSummaryTab('FINAL');if(workspaceRightWidth<450)setWorkspaceRightWidth(450)}}>최종 Preview</button>
+        <button type="button" className={builderSummaryTab==='SUMMARY'?'active':''} onClick={()=>setBuilderSummaryTab('SUMMARY')}>설계 요약</button>
       </div>
 
+      {builderSummaryTab==='REQUIREMENTS'&&<>
       <div className="requirement-collection-card">
         <div className="requirement-collection-head">
           <div>
@@ -12894,7 +14939,9 @@ function IDE() {
           >
             {targetWorkflowPreview
               ? '◇ 저장된 요구사항으로 Workflow 다시 설계'
-              : '◇ 수집된 요구사항으로 바로 Workflow 설계'}
+              : developmentStagePlan?.approved
+                ? '◇ 승인된 Stage로 Workflow 설계'
+                : '◇ 개발 Stage 추천 · 승인 후 Workflow 설계'}
           </button>
         }
 
@@ -12912,16 +14959,124 @@ function IDE() {
           </div>
         </details>
       </div>
+      <RequirementRecommendationPanel
+        recommendations={requirementRecommendations}
+        settings={requirementRecommendationSettings}
+        onToggle={toggleRequirementRecommendation}
+        onRoutingChange={changeRequirementToolRouting}
+        onApplyDefaults={resetRequirementRecommendationsToDefaults}
+      />
+      </>}
+
+      {builderSummaryTab==='RUNTIME'&&<AgentRuntimeSetupPanel
+        value={agentRuntimeSetup}
+        onChange={updateAgentRuntimeSetup}
+        recommendation={agentRuntimePortInfo}
+        onRecommend={recommendAgentRuntimePorts}
+        busy={agentRuntimePortBusy}
+        onApprove={approveAgentRuntimeSetup}
+      />}
+
+      {builderSummaryTab==='STAGES'&&<DevelopmentStageRecommendationPanel
+        plan={developmentStagePlan}
+        busy={developmentStagePlanBusy}
+        onRecommend={()=>recommendDevelopmentStages({force:true})}
+        onApprove={approveDevelopmentStages}
+        onChangePlan={applyUserEditedDevelopmentStagePlan}
+      />}
+
+      {builderSummaryTab==='DATABASE'&&<AgentDatabaseSetupPanel
+        value={agentDatabaseSetup}
+        onChange={updateAgentDatabaseSetup}
+        onTest={testAgentDatabaseConnections}
+        onAnalyze={analyzeExistingAgentDatabase}
+        onCreateResource={createAgentDatabaseResource}
+        testBusy={agentDatabaseTestBusy}
+        testResult={agentDatabaseTestResult}
+        analyzeBusy={agentDatabaseAnalyzeBusy}
+        analyzeResult={agentDatabaseAnalyzeResult}
+        createBusy={agentDatabaseCreateBusy}
+        createResult={agentDatabaseCreateResult}
+        databaseNeeded={Boolean(targetWorkflowPreview?.database_plan?.enabled||liveDatabasePreview?.enabled||getRequirementKeywordStatus().find(item=>item.id==='database')?.collected)}
+        onBuildPlan={buildAgentDatabaseResourcePlan}
+        planBusy={agentDatabasePlanBusy}
+        resourcePlan={agentDatabaseResourcePlan}
+        onResourcePlanChange={setAgentDatabaseResourcePlan}
+        onApprovePlan={approveAgentDatabaseResourcePlan}
+        onBackFromPlan={backToAgentDatabaseSetup}
+        onOpenDatabaseDesign={()=>{setScreen('WORKSPACE');setWorkspaceTab('WORKFLOW');setWorkflowView('TARGET')}}
+      />}
+
+      {builderSummaryTab==='FINAL'&&<AgentGenerationFinalPreview
+        name={newAgentName}
+        developmentPlan={developmentStagePlan}
+        runtimeSetup={agentRuntimeSetup}
+        databaseSetup={agentDatabaseSetup}
+        databaseResourcePlan={agentDatabaseResourcePlan}
+        onOpenRuntime={()=>{setBuilderSummaryTab('RUNTIME');if(!agentRuntimePortInfo)setTimeout(()=>recommendAgentRuntimePorts(),0)}}
+        onOpenDatabase={()=>setBuilderSummaryTab('DATABASE')}
+        onOpenStages={()=>setBuilderSummaryTab('STAGES')}
+      />}
+
+      {builderSummaryTab==='SUMMARY'&&<AgentDesignSummaryPanel
+        summary={leftSummary}
+        plan={developmentStagePlan}
+        requirements={getRequirementKeywordStatus()}
+        uiLayoutConfig={uiLayoutConfig}
+        agentSpecialization={agentSpecialization}
+      />}
+
+      <div className="builder-summary-detail-label"><span>상세 프로젝트 설정</span><small>Agent 유형, UI/Layout, 프로젝트 경로와 실행 경로는 아래에서 계속 수정할 수 있습니다.</small></div>
       <AgentFeatureManager
         detectedFeatures={getDetectedAgentFeatureNames()}
         features={designFeatureRegistry}
         onChange={handleDesignFeatureChange}
       />
+      <div className={`agent-specialization-card ${agentSpecialization==='BLENDER_3D'?'blender':''}`}>
+        <div className="agent-specialization-head">
+          <div><strong>Agent 유형</strong><small>전문 제작 Template을 선택하면 해당 Workflow·Validator·Tool 계약을 기본 적용합니다.</small></div>
+          <span>{agentSpecializationById(agentSpecialization).label}</span>
+        </div>
+        <div className="agent-specialization-options">
+          {AGENT_SPECIALIZATIONS.map(item=><button
+            key={item.id}
+            type="button"
+            className={agentSpecialization===item.id?'active':''}
+            onClick={()=>changeAgentSpecialization(item.id)}
+          >
+            <i>{item.icon}</i>
+            <div><b>{item.label}</b><small>{item.description}</small></div>
+          </button>)}
+        </div>
+        {agentSpecialization==='BLENDER_3D'&&<div className="blender-agent-contract">
+          <div className="blender-agent-pipeline">
+            {['SceneSpec','Validator','LangGraph State','Blender MCP','Viewport QA','Repair','Render / Export'].map(item=><span key={item}>{item}</span>)}
+          </div>
+          <div className="blender-agent-modes">
+            <div><b>1. Agent Creator</b><small>요구 분석 → Architecture → Workflow → MCP/LLM → Scene State → UI → 실제 소스/테스트 생성</small></div>
+            <div><b>2. Agent Editor</b><small>기존 Agent 분석 → 영향 범위 계산 → 필요한 파일만 수정 → 기존 3D 기능 Regression Test</small></div>
+          </div>
+          <div className={`blender-mcp-readiness ${blenderMcpReadiness?.ready?'ready':'pending'}`}>
+            <div>
+              <b>{blenderMcpReadiness?.ready?'✓ Blender MCP 준비됨':'○ Blender MCP 연결 확인 필요'}</b>
+              <small>{blenderMcpReadinessBusy?'Registry 확인 중...':(blenderMcpReadiness?.message||'Blender MCP Server 등록 후 Tool 동기화를 실행하세요.')}</small>
+              {blenderMcpReadiness&&<em>Server {blenderMcpReadiness.server_count||0} · Tool {blenderMcpReadiness.tool_count||0}</em>}
+            </div>
+            <div>
+              <button type="button" onClick={()=>void refreshBlenderMcpReadiness()} disabled={blenderMcpReadinessBusy}>상태 확인</button>
+              <button type="button" onClick={()=>{setScreen('MCP');void refreshMcp()}}>MCP 관리</button>
+            </div>
+          </div>
+          <small className="blender-agent-note">Blender MCP는 손과 도구 역할입니다. 생성 Agent는 3D 요구 해석, Scene State, 검증, 시각 QA와 수정 판단을 별도로 책임합니다.</small>
+        </div>}
+      </div>
       <div className={`ui-layout-choice-card ${uiLayoutConfig?.template_id?'selected':''}`}>
         <div className="ui-layout-choice-head"><div><strong>UI / Layout</strong><small>썸네일을 보고 웹/웹앱 화면 구조를 선택합니다.</small></div><span>{uiLayoutConfig?.template_id?'선택됨':'선택 전'}</span></div>
         {uiLayoutConfig?.template_id?<><UILayoutWireframe config={uiLayoutConfig} compact={true}/><b>{uiLayoutSummary(uiLayoutConfig)}</b></>:<div className="ui-layout-choice-empty">좌측 메뉴, 상단 메뉴, Footer, 사용자 메뉴, Dashboard/Chat/Search Layout 등을 시각적으로 고를 수 있습니다.</div>}
         <button type="button" onClick={()=>setUiLayoutGalleryOpen(true)}>{uiLayoutConfig?.template_id?'레이아웃 변경':'레이아웃 템플릿 선택'}</button>
       </div>
+      <div className="agent-runtime-config-shortcut"><div><strong>실행 환경</strong><small>{agentRuntimeSetup?.approved?`Frontend ${safeAgentRuntimeSetup(agentRuntimeSetup).frontend.port} · Backend ${safeAgentRuntimeSetup(agentRuntimeSetup).backend.port} · API ${safeAgentRuntimeSetup(agentRuntimeSetup).api.port}`:'추천 PORT 확인 및 확정이 필요합니다.'}</small></div><button type="button" onClick={()=>{setBuilderSummaryTab('RUNTIME');if(!agentRuntimePortInfo)setTimeout(()=>recommendAgentRuntimePorts(),0)}}>실행 환경 열기</button></div>
+      <div className="agent-db-config-shortcut"><div><strong>Database 구성</strong><small>{databaseModeLabel(agentDatabaseSetup?.mode)} · {selectedAgentDatabaseProviders(agentDatabaseSetup).length}개 DB · 실제 구조 생성은 승인된 Resource Plan만 적용합니다.</small></div><button type="button" onClick={()=>setBuilderSummaryTab('DATABASE')}>DB 설정 열기</button></div>
       <label className="ux-field"><span>에이전트 이름</span><input value={newAgentName} onChange={e=>setNewAgentName(e.target.value)} placeholder="예: YouTube MCP Agent"/></label>
       <label className="ux-field required"><span>프로젝트 경로</span>
           <div className="path-input-row">
@@ -13016,16 +15171,23 @@ function IDE() {
         ? <button className="create-project-cta" onClick={()=>setScreen('WORKSPACE')}>
             분석된 프로젝트 작업공간 열기
           </button>
-        : <button className="create-project-cta" onClick={createNewAgentProject}
-            disabled={!newAgentName.trim()||!newAgentProjectRoot.trim()}>
-            프로젝트 생성
+        : <button className="create-project-cta" onClick={createAgentProjectSmart}
+            disabled={!newAgentName.trim()||!newAgentProjectRoot.trim()||!developmentStagePlan?.approved||!agentRuntimeSetup?.approved||databasePlanApprovalPending||projectCreateFlowBusy||agentBuildBusy||targetWorkflowLoading}>
+            {!developmentStagePlan?.approved?'개발 계획 승인 후 프로젝트 생성':!agentRuntimeSetup?.approved?'실행 환경 확정 후 프로젝트 생성':databasePlanApprovalPending?'DB 생성 계획 승인 후 프로젝트 생성':projectCreateFlowBusy?'프로젝트 생성 준비 중...':'프로젝트 생성'}
           </button>}
       <small className="cta-note">
         {selectedProjectId
           ? `Project #${selectedProjectId} · 분석 정보와 프로젝트 정보가 PostgreSQL에 저장되어 있습니다.`
-          : 'FastAPI를 통해 폴더를 만들고 PostgreSQL에 프로젝트 정보를 저장합니다.'}
+          : !developmentStagePlan?.approved
+            ? '요구사항 분석 → 개발 Stage 추천/수정 → 사용자 승인 후 프로젝트 생성이 활성화됩니다.'
+            : !agentRuntimeSetup?.approved
+              ? '실행 환경에서 추천 PORT와 현재 사용 상태를 확인하고 실행 환경을 확정하세요.'
+              : databasePlanApprovalPending
+                ? 'DB Resource Plan Preview에서 실제 구성 대상과 테이블 공통 정책을 확인하고 승인하세요.'
+                : '승인된 개발 Stage · 실행 환경 · DB 구성을 기준으로 프로젝트를 생성합니다.'}
       </small>
       {newAgentCreateResult&&<div className={newAgentCreateResult.ok?'ux-result good':'ux-result bad'}>{newAgentCreateResult.message}</div>}
+      <AgentDatabaseProvisionResultPanel result={newAgentCreateResult} onRetry={retryAgentDatabaseProvision} onSkip={skipAgentDatabaseProvision} busyProvider={agentDatabaseProvisionBusy}/>
     </aside>
     <UILayoutTemplateGallery
       open={uiLayoutGalleryOpen}
@@ -13529,7 +15691,7 @@ function IDE() {
       }
 
       let result=null
-      const streamResponse=await fetch(`${runtimeInfo().apiBase}/python/execute/stream`,{
+      const streamResponse=await apiFetch('/python/execute/stream',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({
@@ -13961,6 +16123,212 @@ function IDE() {
     await sendTerminalInput(id)
   }
 
+  const addCodeEditReference=(reference={})=>{
+    const rawText=String(reference?.text||'')
+    if(!rawText.trim()) return false
+
+    const maxReferenceChars=24000
+    const clippedText=rawText.length>maxReferenceChars
+      ? rawText.slice(0,maxReferenceChars)
+      : rawText
+    const path=String(reference?.path||selectedEditorFileRef.current||selected||'').trim()
+    const normalized={
+      id:String(reference?.id||`ref-${Date.now()}-${Math.random().toString(36).slice(2,8)}`),
+      path,
+      text:clippedText,
+      original_chars:rawText.length,
+      truncated:rawText.length>maxReferenceChars,
+      start_line:Number(reference?.start_line||1),
+      start_column:Number(reference?.start_column||1),
+      end_line:Number(reference?.end_line||reference?.start_line||1),
+      end_column:Number(reference?.end_column||reference?.start_column||1),
+      cell_index:Number.isInteger(reference?.cell_index)?Number(reference.cell_index):null,
+      source:String(reference?.source||'editor-selection'),
+    }
+
+    let added=false
+    setCodeEditReferences(prev=>{
+      const duplicate=prev.find(item=>
+        item.path===normalized.path
+        && Number(item.start_line)===Number(normalized.start_line)
+        && Number(item.start_column)===Number(normalized.start_column)
+        && Number(item.end_line)===Number(normalized.end_line)
+        && Number(item.end_column)===Number(normalized.end_column)
+        && item.text===normalized.text
+      )
+      if(duplicate) return prev
+      added=true
+      return [...prev,normalized].slice(-12)
+    })
+
+    setWorkspaceBottomCollapsed(false)
+    setWorkspaceTab('CODE')
+    // v5.466: LLM 참조 등록은 문서/에디터의 현재 선택 흐름을 빼앗지 않는다.
+    // 이전에는 Prompt로 즉시 focus를 옮겨 다음 우클릭 때 Monaco의 이전 선택이
+    // 남아 기존 참조 문구가 다시 선택된 것처럼 보일 수 있었다.
+    return added
+  }
+
+  const addCodeEditReferenceFromMonaco=(editor,path='')=>{
+    const model=editor?.getModel?.()
+    const selection=editor?.getSelection?.()
+    if(!model||!selection||selection.isEmpty?.()) return false
+    const text=String(model.getValueInRange?.(selection)||'')
+    if(!text.trim()) return false
+    const added=addCodeEditReference({
+      path:path||selectedEditorFileRef.current||selected||'',
+      text,
+      start_line:selection.startLineNumber,
+      start_column:selection.startColumn,
+      end_line:selection.endLineNumber,
+      end_column:selection.endColumn,
+      source:'monaco-selection',
+    })
+    // 참조 등록 후 이전 selection을 그대로 남겨 두지 않는다. 다음 텍스트를
+    // 선택해서 우클릭할 때 직전 selection이 재사용되는 문제를 막는다.
+    try{
+      editor?.setSelection?.({
+        startLineNumber:selection.endLineNumber,
+        startColumn:selection.endColumn,
+        endLineNumber:selection.endLineNumber,
+        endColumn:selection.endColumn,
+      })
+      editor?.focus?.()
+    }catch{}
+    return added
+  }
+
+  const registerCodeEditReferenceAction=(editor,pathResolver)=>{
+    try{
+      return editor?.addAction?.({
+        id:'theanova.llm-reference-selection',
+        label:'LLM 참조 문구',
+        precondition:'editorHasSelection',
+        contextMenuGroupId:'9_cutcopypaste',
+        contextMenuOrder:3.5,
+        run:currentEditor=>{
+          const resolvedPath=typeof pathResolver==='function'?pathResolver():String(pathResolver||'')
+          addCodeEditReferenceFromMonaco(currentEditor||editor,resolvedPath)
+        },
+      })
+    }catch{
+      return null
+    }
+  }
+
+  const addManualCodeEditReference=()=>{
+    if(codeEditBusy) return
+    const id=`manual-ref-${Date.now()}-${Math.random().toString(36).slice(2,8)}`
+    const manualReference={
+      id,
+      path:String(selectedEditorFileRef.current||selected||''),
+      text:'',
+      original_chars:0,
+      truncated:false,
+      start_line:1,
+      start_column:1,
+      end_line:1,
+      end_column:1,
+      cell_index:null,
+      source:'manual-entry',
+      edited:true,
+    }
+    setCodeEditReferences(prev=>[...prev,manualReference].slice(-12))
+    setWorkspaceBottomCollapsed(false)
+    setWorkspaceTab('CODE')
+    requestAnimationFrame(()=>{
+      requestAnimationFrame(()=>{
+        try{
+          const target=document.querySelector(`textarea[data-llm-reference-id="${id}"]`)
+          target?.focus?.()
+          target?.scrollIntoView?.({block:'nearest'})
+        }catch{}
+      })
+    })
+  }
+
+  const updateCodeEditReferenceText=(referenceId,nextText)=>{
+    const maxReferenceChars=24000
+    const value=String(nextText??'').slice(0,maxReferenceChars)
+    setCodeEditReferences(prev=>prev.map(item=>
+      item.id===referenceId
+        ? {
+            ...item,
+            text:value,
+            edited:true,
+            truncated:String(nextText??'').length>maxReferenceChars,
+            original_chars:String(nextText??'').length,
+          }
+        : item
+    ))
+  }
+
+  const removeCodeEditReference=(referenceId)=>{
+    setCodeEditReferences(prev=>prev.filter(item=>item.id!==referenceId))
+  }
+
+  const clearCodeEditReferences=()=>setCodeEditReferences([])
+
+  const openDocumentTextReferenceMenu=(event)=>{
+    try{
+      const target=event?.target
+      // Monaco는 자체 selection/우클릭 Action에서 정확한 line/column을 처리한다.
+      if(target?.closest?.('.monaco-editor')) return
+      // 버튼/입력/트리 등 UI 조작 영역은 문서 본문으로 취급하지 않는다.
+      if(target?.closest?.('button,input,textarea,select,a,[contenteditable="true"],.context-menu,.project-file-tree')) return
+      const selection=window.getSelection?.()
+      const selectedText=String(selection?.toString?.()||'')
+      if(!selectedText.trim()) return
+      event.preventDefault?.()
+      event.stopPropagation?.()
+      const cellElement=target?.closest?.('[data-notebook-cell-index]')
+      const rawCellIndex=cellElement?.getAttribute?.('data-notebook-cell-index')
+      const cellIndex=rawCellIndex!=null&&rawCellIndex!==''?Number(rawCellIndex):null
+      const viewportPadding=12
+      const menuWidth=160
+      const menuHeight=40
+      const x=Math.max(viewportPadding,Math.min(Number(event.clientX||0),window.innerWidth-menuWidth-viewportPadding))
+      const y=Math.max(viewportPadding,Math.min(Number(event.clientY||0),window.innerHeight-menuHeight-viewportPadding))
+      setDocumentTextReferenceMenu({
+        x,y,
+        text:selectedText,
+        path:selectedEditorFileRef.current||selected||'',
+        cell_index:Number.isInteger(cellIndex)?cellIndex:null,
+        source:'document-text-selection',
+      })
+    }catch{}
+  }
+
+  const commitDocumentTextReference=()=>{
+    const menu=documentTextReferenceMenu
+    if(!menu) return
+    addCodeEditReference({
+      path:menu.path||selectedEditorFileRef.current||selected||'',
+      text:menu.text||'',
+      start_line:1,
+      start_column:1,
+      end_line:1,
+      end_column:Math.max(1,String(menu.text||'').length+1),
+      cell_index:Number.isInteger(menu.cell_index)?menu.cell_index:null,
+      source:menu.source||'document-text-selection',
+    })
+    try{window.getSelection?.()?.removeAllRanges?.()}catch{}
+    setDocumentTextReferenceMenu(null)
+  }
+
+  useEffect(()=>{
+    if(!documentTextReferenceMenu) return undefined
+    const close=()=>setDocumentTextReferenceMenu(null)
+    const closeByKey=(event)=>{if(event?.key==='Escape') close()}
+    window.addEventListener('mousedown',close)
+    window.addEventListener('scroll',close,true)
+    window.addEventListener('keydown',closeByKey)
+    return ()=>{
+      window.removeEventListener('mousedown',close)
+      window.removeEventListener('scroll',close,true)
+      window.removeEventListener('keydown',closeByKey)
+    }
+  },[documentTextReferenceMenu])
 
   const askCodeEditorLLM=async()=>{
     const prompt=codeEditPrompt.trim()
@@ -14032,6 +16400,20 @@ function IDE() {
       targetPath
         ? (editorFileContents[targetPath] ?? code ?? '')
         : ''
+    const requestReferences=codeEditReferences
+      .filter(reference=>String(reference.text||'').trim())
+      .map(reference=>({
+        path:String(reference.path||''),
+        text:String(reference.text||''),
+        start_line:Number(reference.start_line||1),
+        start_column:Number(reference.start_column||1),
+        end_line:Number(reference.end_line||reference.start_line||1),
+        end_column:Number(reference.end_column||reference.start_column||1),
+        cell_index:Number.isInteger(reference.cell_index)?Number(reference.cell_index):null,
+        truncated:Boolean(reference.truncated),
+        original_chars:Number(reference.original_chars||String(reference.text||'').length),
+        edited:Boolean(reference.edited),
+      }))
 
     setCodeEditChat(prev=>[
       ...prev,
@@ -14039,6 +16421,9 @@ function IDE() {
         role:'user',
         content:
           `${projectMode?'[프로젝트]':'[파일]'} ${prompt}`
+          +(requestReferences.length
+            ? `\n\n🔖 LLM 참조 문구: ${requestReferences.length}개 · ${requestReferences.map(item=>{const name=String(item.path||'').replace(/\\/g,'/').split('/').pop()||'현재 파일';const line=Number(item.start_line)===Number(item.end_line)?`L${item.start_line}`:`L${item.start_line}-L${item.end_line}`;return `${name} ${line}`}).join(', ')}`
+            : '')
           +(codeEditAttachments.length
             ? `\n\n📎 참고 파일: ${codeEditAttachments.map(item=>item.name).join(', ')}`
             : '')
@@ -14059,7 +16444,8 @@ function IDE() {
             root:workspaceRoot,
             instruction:prompt,
             max_context_files:10,
-            attachment_ids:codeEditAttachments.map(item=>item.attachment_id)
+            attachment_ids:codeEditAttachments.map(item=>item.attachment_id),
+            reference_texts:requestReferences
           })
         })
 
@@ -14164,7 +16550,8 @@ function IDE() {
           active_cell_index:isNotebookFile(targetPath)
             ? notebookEditorControllerRef.current?.getActiveCellIndex?.()
             : null,
-          attachment_ids:codeEditAttachments.map(item=>item.attachment_id)
+          attachment_ids:codeEditAttachments.map(item=>item.attachment_id),
+          reference_texts:requestReferences
         })
       })
 
@@ -15307,7 +17694,7 @@ function IDE() {
             <span className="project-icon">◉</span>
             <div>
               <strong>{s.name||'MCP Server'}</strong>
-              <small>{s.endpoint||''}</small>
+              <small>{String(s.transport||'streamable_http')==='stdio'?`stdio · ${s.command||'-'} ${(s.args||[]).join(' ')}`:`HTTP · ${s.endpoint||'-'}`}</small>
               <small>{s.status?`상태: ${s.status}`:'상태 확인 필요'}</small>
             </div>
             <button type="button" className="mcp-sync-button" onClick={()=>syncMcpServer(s.id)}>Tool 동기화</button>
@@ -16183,6 +18570,49 @@ function IDE() {
     }
   },[screen,workspaceTab,root])
 
+  const refreshScheduler=async({silent=false}={})=>{
+    if(schedulerRefreshInFlightRef.current) return
+    schedulerRefreshInFlightRef.current=true
+    if(!silent) setSchedulerBusy(true)
+    setSchedulerError('')
+    try{
+      const result=await api(`/scheduler/jobs?include_terminal=${schedulerIncludeTerminal?'true':'false'}&limit=100`)
+      setSchedulerReport(result||null)
+      return result
+    }catch(error){
+      setSchedulerError(error instanceof Error?error.message:String(error||'Scheduler 조회 실패'))
+      return null
+    }finally{
+      schedulerRefreshInFlightRef.current=false
+      if(!silent) setSchedulerBusy(false)
+    }
+  }
+
+  const cancelSchedulerJob=async(job)=>{
+    const source=String(job?.source||'').trim()
+    const jobId=String(job?.id||'').trim()
+    if(!source||!jobId||!job?.can_cancel) return
+    const busyKey=`${source}:${jobId}`
+    setSchedulerCancelBusy(busyKey)
+    setSchedulerError('')
+    try{
+      await api(`/scheduler/jobs/${encodeURIComponent(source)}/${encodeURIComponent(jobId)}/cancel`,{method:'POST'})
+      await new Promise(resolve=>window.setTimeout(resolve,120))
+      await refreshScheduler({silent:true})
+    }catch(error){
+      setSchedulerError(error instanceof Error?error.message:String(error||'Scheduler 실행취소 실패'))
+    }finally{
+      setSchedulerCancelBusy('')
+    }
+  }
+
+  useEffect(()=>{
+    if(screen!=='WORKSPACE'||workspaceTab!=='SCHEDULER') return undefined
+    refreshScheduler()
+    const timer=window.setInterval(()=>refreshScheduler({silent:true}),2000)
+    return()=>window.clearInterval(timer)
+  },[screen,workspaceTab,schedulerIncludeTerminal])
+
   const exportWorkspacePowerPoint=async(scope='ALL',deckType='AGENT')=>{
     const exportScope=String(scope||'ALL').toUpperCase()
     const exportDeckType=String(deckType||'AGENT').toUpperCase()
@@ -16217,7 +18647,7 @@ function IDE() {
         testReturncode:r.testReturncode
       }
 
-      const response=await fetch(`${runtimeInfo().apiBase}/presentation/export`,{
+      const response=await apiFetch('/presentation/export',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({
@@ -16327,6 +18757,9 @@ function IDE() {
         onDebugCommand={commandNotebookCellDebug}
         controllerRef={secondaryNotebookEditorControllerRef}
         onEditorFocus={markActive}
+        onAddLlmReference={reference=>addCodeEditReference({...reference,path:relativePath})}
+        onNavigateProjectDefinition={(definition,sourceLocation)=>navigateToCodeDefinition(definition,sourceLocation)}
+        onExternalDefinitionPreview={definition=>setCodeDefinitionPreview({...definition,title:definition?.symbol||'외부 라이브러리 정의',language:getEditorLanguage(definition?.relative_path||definition?.absolute_path||'definition.py')})}
       />
     }
     return <Editor
@@ -16358,14 +18791,35 @@ function IDE() {
         const model=editor.getModel()
         const expectedLanguage=getEditorLanguage(relativePath)
         if(model&&expectedLanguage) monaco.editor.setModelLanguage(model,expectedLanguage)
+        registerCodeEditReferenceAction(editor,()=>relativePath)
+        registerEscapedDoubleQuotePairGuard(editor)
+        registerCodeIntelligence(monaco,editor,{
+          root:paneRoot,
+          relativePath,
+          language:expectedLanguage,
+          onOpenDefinition:(definition,sourceLocation)=>{
+            const targetPath=normalizeProjectRelativePath(definition?.relative_path||relativePath)
+            if(!definition?.external&&definition?.cell_index==null&&targetPath===normalizeProjectRelativePath(relativePath)){
+              const line=Math.max(1,Number(definition?.line||1))
+              const column=Math.max(1,Number(definition?.column||1))
+              editor.revealLineInCenter?.(line)
+              editor.setPosition?.({lineNumber:line,column})
+              editor.focus?.()
+              return
+            }
+            return navigateToCodeDefinition(definition,sourceLocation)
+          }
+        })
+        editor.addCommand?.(monaco.KeyMod.Alt|monaco.KeyCode.LeftArrow,()=>navigateCodeHistory(-1))
+        editor.addCommand?.(monaco.KeyMod.Alt|monaco.KeyCode.RightArrow,()=>navigateCodeHistory(1))
         editor.onDidFocusEditorText(markActive)
       }}
       theme="vs-dark"
       options={{
         minimap:{enabled:false},glyphMargin:true,lineNumbers:'on',lineNumbersMinChars:3,
         lineDecorationsWidth:14,fontSize:13,automaticLayout:true,tabSize:2,insertSpaces:true,
-        detectIndentation:true,formatOnPaste:true,autoClosingBrackets:'never',autoClosingQuotes:'never',
-        autoClosingDelete:'never',autoClosingOvertype:'never',autoSurround:'never',
+        detectIndentation:true,formatOnPaste:true,
+        ...CODE_EDITOR_PAIR_TYPING_OPTIONS,
         bracketPairColorization:{enabled:true},guides:{bracketPairs:true},suggestOnTriggerCharacters:true,
         quickSuggestions:{other:true,comments:false,strings:true}
       }}
@@ -16374,13 +18828,24 @@ function IDE() {
 
   const renderWorkspaceScreen=()=>{
     const leftSummary=getBuilderConversationSummary()
+    const designDevelopmentPlanSummary=developmentStagePlan?.approved
+      ? `${Number(developmentStagePlan?.stages?.length||0)}단계 승인 · Workflow 구성`
+      : developmentStagePlan?.stages?.length
+        ? `${Number(developmentStagePlan.stages.length)}단계 추천 · 승인 필요`
+        : '요구사항 수집 후 개발 단계 자동 추천'
+    const designRuntimeSafe=safeAgentRuntimeSetup(agentRuntimeSetup)
+    const designRuntimeSetupSummary=designRuntimeSafe.approved?`Frontend ${designRuntimeSafe.frontend.port} · Backend ${designRuntimeSafe.backend.port} · API ${designRuntimeSafe.api.port}`:'추천 PORT 확인 · 확정 필요'
+    const designDatabaseSetupSummary=agentDatabaseSetup?.mode==='PENDING'?'DB 필요 시 설정 방법 선택':agentDatabaseResourcePlan?.approved?`DB 생성 계획 승인 · ${selectedAgentDatabaseProviders(agentDatabaseSetup).length}개 사용`:agentDatabaseResourcePlan?`DB Resource Plan 검토 · ${selectedAgentDatabaseProviders(agentDatabaseSetup).length}개 사용`:`${databaseModeLabel(agentDatabaseSetup?.mode)} · ${selectedAgentDatabaseProviders(agentDatabaseSetup).length}개 DB`
     const designBuilderSteps=[
       ['01','목적',leftSummary.purpose],
       ['02','기능',leftSummary.features],
       ['03','MCP / Tool',leftSummary.mcpTools],
       ['04','DB 설계',leftSummary.database],
-      ['05','실행 환경',leftSummary.runtime],
-      ['06','확인',leftSummary.confirmation],
+      ['05','UI / Layout',leftSummary.uiLayout],
+      ['06','실행 환경',designRuntimeSetupSummary],
+      ['07','DB 구성',designDatabaseSetupSummary],
+      ['08','개발 계획',designDevelopmentPlanSummary],
+      ['09','최종 확인',leftSummary.confirmation],
     ]
 
     return <div
@@ -16435,6 +18900,7 @@ function IDE() {
             coverage={interviewAttachmentRequirementCoverage}
             compact={true}
             restored={requirementDraftRestored}
+            onOpenFile={openAttachmentSummaryFile}
           />}
 
           <div className="builder-tip">
@@ -16631,7 +19097,7 @@ function IDE() {
     />}
 
     <main className={`workspace-main workspace-tab-${workspaceTab.toLowerCase()} ${
-      ['RUN','REPORT','ARCHITECTURE','DB_ERD','LLM','BROWSER'].includes(workspaceTab)
+      ['RUN','REPORT','ARCHITECTURE','DB_ERD','SCHEDULER','LLM','BROWSER'].includes(workspaceTab)
         ? 'compact-workspace result-only-workspace'
         : workspaceTab==='CODE'&&!isBinaryPreviewFile(selected)
           ? 'workspace-with-bottom-tools code-tools-workspace'
@@ -16657,6 +19123,7 @@ function IDE() {
             ['REPORT','분석 리포트'],
             ['ARCHITECTURE','아키텍처'],
             ['DB_ERD','DB ERD'],
+            ['SCHEDULER','스케줄러'],
             ['LLM','LLM 리스트'],
             ['BROWSER','웹브라우저']
           ].map(([k,t])=><button key={k}
@@ -16696,7 +19163,7 @@ function IDE() {
       </div>
 
       <div className={
-        ['RUN','REPORT','ARCHITECTURE','DB_ERD','LLM','BROWSER'].includes(workspaceTab)
+        ['RUN','REPORT','ARCHITECTURE','DB_ERD','SCHEDULER','LLM','BROWSER'].includes(workspaceTab)
           ? 'workspace-top-pane compact-result-pane'
           : 'workspace-top-pane'
       }>
@@ -16728,6 +19195,14 @@ function IDE() {
               {busy&&<div className="builder-msg assistant">
                 <span>AI</span>
                 <div>답변을 분석하고 다음 질문을 준비하고 있습니다...</div>
+              </div>}
+
+              {developmentStagePlan?.stages?.length>0&&<div className={`builder-development-plan-inline ${developmentStagePlan?.approved?'approved':'pending'}`}>
+                <div>
+                  <span>◇</span>
+                  <div><strong>{developmentStagePlan?.approved?'개발 계획 승인 완료':'개발 계획 추천 준비됨'}</strong><small>복잡도 {developmentStagePlan?.complexity?.level||'-'} · {developmentStagePlan.stages.length} Stage · {developmentStagePlan?.approved?'승인된 순서로 Workflow를 구성합니다.':'단계를 확인·수정한 뒤 승인해 주세요.'}</small></div>
+                </div>
+                <button type="button" onClick={()=>{setBuilderSummaryTab('STAGES');setWorkspaceRightCollapsed(false);if(workspaceRightWidth<390)setWorkspaceRightWidth(390)}}>{developmentStagePlan?.approved?'승인 계획 보기':'개발 Stage 검토'}</button>
               </div>}
 
               <div
@@ -16785,6 +19260,7 @@ function IDE() {
               requirements={interviewAttachmentRequirements}
               coverage={interviewAttachmentRequirementCoverage}
               restored={requirementDraftRestored}
+              onOpenFile={openAttachmentSummaryFile}
               onClear={()=>{
                 setInterviewAttachmentSummary('')
                 setInterviewAttachmentSummaryFiles([])
@@ -17025,6 +19501,30 @@ function IDE() {
               <small>자동 모드 우선순위: Codex → OpenAI → Ollama</small>
             </div>}
 
+            {targetWorkflowPreview?.three_d_agent_plan?.type==='BLENDER_3D'&&<div className="workflow-3d-agent-card">
+              <div className="workflow-3d-agent-head">
+                <div><span>◈</span><div><strong>3D 제작 Agent · Blender MCP</strong><small>MCP Tool 호출만이 아니라 Scene 상태와 실제 화면 품질까지 검증하는 제작 Workflow입니다.</small></div></div>
+                <em>BLENDER 3D</em>
+              </div>
+              <div className="workflow-3d-pipeline">
+                {['SceneSpec','Validator','LangGraph State','Blender MCP','Viewport QA','Repair','Render / Export'].map((item,index)=><React.Fragment key={item}><span>{item}</span>{index<6&&<b>→</b>}</React.Fragment>)}
+              </div>
+              <div className="workflow-3d-grid">
+                <div><small>SceneSpec</small><strong>{(targetWorkflowPreview.three_d_agent_plan.scene_schema_fields||[]).length} fields</strong><p>{(targetWorkflowPreview.three_d_agent_plan.scene_schema_fields||[]).slice(0,6).join(' · ')}</p></div>
+                <div><small>Scene State</small><strong>{(targetWorkflowPreview.three_d_agent_plan.scene_state_fields||[]).length} fields</strong><p>{(targetWorkflowPreview.three_d_agent_plan.scene_state_fields||[]).slice(0,6).join(' · ')}</p></div>
+                <div><small>검증 계층</small><strong>{(targetWorkflowPreview.three_d_agent_plan.validation_layers||[]).length} layers</strong><p>{(targetWorkflowPreview.three_d_agent_plan.validation_layers||[]).slice(0,6).join(' · ')}</p></div>
+              </div>
+              <div className="workflow-3d-editor-contract">
+                <b>Agent Editor 증분 수정 계약</b>
+                <span>{(targetWorkflowPreview.three_d_agent_plan.editor_contract?.pipeline||[]).join(' → ')}</span>
+                <small>보존: {(targetWorkflowPreview.three_d_agent_plan.editor_contract?.preserve||[]).join(' · ')}</small>
+              </div>
+              <div className={`workflow-3d-readiness ${blenderMcpReadiness?.ready?'ready':'pending'}`}>
+                <div><b>{blenderMcpReadiness?.ready?'✓ Blender MCP Registry 준비됨':'○ Blender MCP Registry 연결 필요'}</b><small>{blenderMcpReadinessBusy?'상태 확인 중...':(blenderMcpReadiness?.message||'설계는 계속할 수 있지만 실제 3D 실행 전 Blender MCP 연결이 필요합니다.')}</small></div>
+                <button type="button" onClick={()=>void refreshBlenderMcpReadiness()} disabled={blenderMcpReadinessBusy}>상태 확인</button>
+              </div>
+            </div>}
+
             {targetWorkflowPreview?.database_plan&&<div className={`database-design-card ${targetWorkflowPreview.database_plan.enabled?'enabled':'disabled'} ${targetWorkflowPreview.database_plan.finalized?'finalized':''}`}>
               <div className="database-design-head">
                 <div>
@@ -17110,6 +19610,7 @@ function IDE() {
               </>}
             </div>}
 
+            <DevelopmentStageWorkflowDiagram workflow={targetWorkflowPreview?.development_workflow}/>
             <TargetWorkflowDiagram workflow={targetWorkflowPreview?.target_agent_workflow||(selectedProjectId?loadedProjectAnalysis?.adaptive_report?.workflow:null)}/>
           </div>}
         </div>}
@@ -17248,7 +19749,14 @@ function IDE() {
                   </div>
                 )
               })}
-              {openEditorFiles.length===0&&
+              {temporaryMedia&&<div className={`code-file-tab temporary-media-tab ${temporaryMediaActive?'active':''}`} title={`${temporaryMedia.title} · 임시 미디어`}>
+                <button type="button" className="code-file-tab-select" onClick={()=>setTemporaryMediaActive(true)}>
+                  <span className="code-file-tab-name">▶ {temporaryMedia.title}</span>
+                  <span className="temporary-media-badge">임시</span>
+                </button>
+                <button type="button" className="code-file-tab-close" onClick={event=>{event.stopPropagation();closeTemporaryExternalMedia()}} title="임시 영상 닫기">×</button>
+              </div>}
+              {openEditorFiles.length===0&&!temporaryMedia&&
                 <div className="code-file-tab-empty">열린 파일이 없습니다.</div>
               }
             </div>
@@ -17282,9 +19790,19 @@ function IDE() {
               <span className="code-file-actions-spacer" aria-hidden="true" />
               <button
                 type="button"
+                className="powershell-run-button editor-save-toolbar-button"
+                onClick={()=>saveFile('', '저장 버튼')}
+                disabled={temporaryMediaActive||!selected||isBinaryPreviewFile(selected)||fileSaveStatus==='저장 중'}
+                title="현재 열린 파일의 변경 내용을 디스크에 저장합니다. (Ctrl+S)"
+              >
+                {selected&&editorFileDirty[selected]&&<span className="editor-save-button-dot" aria-hidden="true">●</span>}
+                저장
+              </button>
+              <button
+                type="button"
                 className="powershell-run-button editor-find-toolbar-button"
                 onClick={()=>openEditorTextSearch('CURRENT')}
-                disabled={!selected}
+                disabled={temporaryMediaActive||!selected}
                 title="현재 파일에서 찾기 · 검색창에서 프로젝트 전체로 전환할 수 있습니다."
               >
                 ⌕ 찾기
@@ -17576,7 +20094,9 @@ function IDE() {
               style={editorSplit?{flexBasis:`${editorSplit.side==='LEFT'?100-editorSplitRatio:editorSplitRatio}%`}:undefined}
               onMouseDown={()=>{activeEditorPathRef.current=selected||''}}
             >
-{fileLoading&&fileLoadingPath===selected
+{temporaryMediaActive&&temporaryMedia
+            ? <TemporaryMediaViewer url={temporaryMedia.url} title={temporaryMedia.title} onClose={closeTemporaryExternalMedia}/>
+            : fileLoading&&fileLoadingPath===selected
             ? <div className="editor-load-error-shell">
                 <div className="editor-load-error-card">
                   <span className="editor-load-error-icon">…</span>
@@ -17671,6 +20191,9 @@ function IDE() {
                   onDebugCommand={commandNotebookCellDebug}
                   controllerRef={notebookEditorControllerRef}
                   onEditorFocus={()=>{activeEditorPathRef.current=selected||'';setFocusOwnerSafe('editor')}}
+                  onAddLlmReference={reference=>addCodeEditReference({...reference,path:selected||reference.path||''})}
+                  onNavigateProjectDefinition={(definition,sourceLocation)=>navigateToCodeDefinition(definition,sourceLocation)}
+                  onExternalDefinitionPreview={definition=>setCodeDefinitionPreview({...definition,title:definition?.symbol||'외부 라이브러리 정의',language:getEditorLanguage(definition?.relative_path||definition?.absolute_path||'definition.py')})}
                 />
               : <>
                 {isSourceDebugFile(selected)&&sourceDebugState&&<div className="source-debug-dock">
@@ -17725,6 +20248,20 @@ function IDE() {
                 monaco.editor.setModelLanguage(model,expectedLanguage)
               }
 
+              // v5.448: selected editor text can be attached and edited as an LLM reference
+              // context-menu action that sends only that exact selection to the
+              // LLM conversational code editor as explicit reference context.
+              registerCodeEditReferenceAction(editor,()=>selectedEditorFileRef.current||selected||'')
+              registerEscapedDoubleQuotePairGuard(editor)
+              registerCodeIntelligence(monaco,editor,{
+                root:resolveWorkspaceRoot(editorFileRootRef.current?.[selectedEditorFileRef.current||selected||'']||fileTreeRootRef.current||root||''),
+                relativePath:selectedEditorFileRef.current||selected||'',
+                language:expectedLanguage,
+                onOpenDefinition:(definition,sourceLocation)=>navigateToCodeDefinition(definition,sourceLocation)
+              })
+              editor.addCommand?.(monaco.KeyMod.Alt|monaco.KeyCode.LeftArrow,()=>navigateCodeHistory(-1))
+              editor.addCommand?.(monaco.KeyMod.Alt|monaco.KeyCode.RightArrow,()=>navigateCodeHistory(1))
+
               editor.onDidFocusEditorText(()=>{
                 activeEditorPathRef.current=selectedEditorFileRef.current||selected||''
                 setFocusOwnerSafe('editor')
@@ -17770,11 +20307,7 @@ function IDE() {
               insertSpaces:true,
               detectIndentation:true,
               formatOnPaste:true,
-              autoClosingBrackets:'never',
-              autoClosingQuotes:'never',
-              autoClosingDelete:'never',
-              autoClosingOvertype:'never',
-              autoSurround:'never',
+              ...CODE_EDITOR_PAIR_TYPING_OPTIONS,
               bracketPairColorization:{enabled:true},
               guides:{bracketPairs:true},
               suggestOnTriggerCharacters:true,
@@ -18377,6 +20910,17 @@ function IDE() {
           </div>
         })()}
 
+        {workspaceTab==='SCHEDULER'&&<SchedulerPanel
+          report={schedulerReport}
+          loading={schedulerBusy}
+          error={schedulerError}
+          includeTerminal={schedulerIncludeTerminal}
+          cancelBusy={schedulerCancelBusy}
+          onRefresh={()=>refreshScheduler()}
+          onIncludeTerminalChange={setSchedulerIncludeTerminal}
+          onCancel={cancelSchedulerJob}
+        />}
+
         {workspaceTab==='LLM'&&<LlmCatalogPanel
           catalog={llmCatalog}
           history={llmHistory}
@@ -18459,11 +21003,7 @@ function IDE() {
           <div className="pane-title ux-pane-title">
             <strong>LLM 대화형 코드 편집</strong>
             <div>
-              <span>{selected ? selected.split(/[\\/]/).pop() : '파일 선택 필요'}</span>
-
-              {selected&&editorFileDirty[selected]&&
-                <span className="file-save-status dirty" title="저장되지 않은 변경">●</span>
-              }
+              {codeEditReferences.length>0&&<span className="code-edit-reference-summary">LLM 참조 문구 {codeEditReferences.length}개</span>}
 
               {fileSaveStatus==='저장 중'&&
                 <span className="file-save-status saving">저장 중...</span>
@@ -18477,30 +21017,25 @@ function IDE() {
                 <span className="file-save-status failed">저장 실패</span>
               }
 
-              <button onClick={saveFile} disabled={!selected||isBinaryPreviewFile(selected)}>상단 코드 저장</button>
+              <button
+                type="button"
+                className="code-edit-add-reference-button"
+                onClick={addManualCodeEditReference}
+                disabled={codeEditBusy||codeEditReferences.length>=12}
+                title="선택 영역 없이 LLM 참조 문구를 직접 작성합니다."
+              >+ 참조 문구</button>
+              <button
+                type="button"
+                onClick={clearCodeEditReferences}
+                disabled={codeEditBusy||codeEditReferences.length===0}
+                title={codeEditReferences.length>0?'등록된 LLM 참조 문구를 모두 해제합니다.':'해제할 LLM 참조 문구가 없습니다.'}
+              >전체 해제</button>
             </div>
           </div>
 
           <div className="code-llm-side chat-only">
-            <div className="code-llm-head">
-              <div>
-                <MiniBadge>AI</MiniBadge>
-                <strong>
-                  {codeEditScope==='PROJECT'
-                    ? '프로젝트 전체 코딩'
-                    : '선택된 파일과 대화하며 코드 수정'}
-                </strong>
-              </div>
-              <small>
-                {codeEditScope==='PROJECT'
-                  ? `현재 대상 프로젝트: ${currentProjectName}`
-                  : selected
-                    ? `현재 대상 파일: ${selected}`
-                    : '파일 단위 작업은 먼저 파일을 선택하세요.'}
-              </small>
-            </div>
-
-            <div className="code-llm-chat" ref={codeEditChatRef}>
+            <div className="code-llm-scroll-region" ref={codeEditChatRef}>
+              <div className="code-llm-chat">
               {codeEditChat.map((m,i)=><div
                 key={i}
                 className={`code-edit-message ${m.role}`}
@@ -18529,6 +21064,47 @@ function IDE() {
                     우측 제안 보기
                   </button>
                 </div>
+              </div>}
+              </div>
+
+              {codeEditReferences.length>0&&<div className="code-edit-reference-panel" aria-label="LLM 참조 문구">
+              <div className="code-edit-reference-list">
+                    {codeEditReferences.map((reference,index)=>{
+                      const isManualReference=reference.source==='manual-entry'
+                      const fileName=isManualReference
+                        ? '직접 입력 참조'
+                        : String(reference.path||'').replace(/\\/g,'/').split('/').pop()||reference.path||'현재 파일'
+                      const lineRange=Number(reference.start_line)===Number(reference.end_line)
+                        ? `L${reference.start_line}`
+                        : `L${reference.start_line}-L${reference.end_line}`
+                      const lineLabel=isManualReference
+                        ? '사용자 입력'
+                        : Number.isInteger(reference.cell_index)
+                          ? `Cell ${Number(reference.cell_index)+1} · ${lineRange}`
+                          : lineRange
+                      return <div className="code-edit-reference-item" key={reference.id}>
+                        <div className="code-edit-reference-meta">
+                          <span>#{index+1}</span>
+                          <strong title={reference.path||''}>{fileName}</strong>
+                          <code>{lineLabel}</code>
+                          {reference.truncated&&<em title="참조 문구는 최대 24,000자까지 사용할 수 있습니다.">24,000자 제한</em>}
+                          <button type="button" title="이 참조 문구 해제" onClick={()=>removeCodeEditReference(reference.id)} disabled={codeEditBusy}>×</button>
+                        </div>
+                        <textarea
+                          className="code-edit-reference-text"
+                          data-llm-reference-id={reference.id}
+                          placeholder={isManualReference?'LLM이 참고할 문구를 직접 입력하세요.':''}
+                          value={reference.text}
+                          onChange={event=>updateCodeEditReferenceText(reference.id,event.target.value)}
+                          disabled={codeEditBusy}
+                          maxLength={24000}
+                          rows={4}
+                          spellCheck={false}
+                          aria-label={`${fileName} ${lineLabel} LLM 참조 문구 편집`}
+                        />
+                      </div>
+                    })}
+                  </div>
               </div>}
             </div>
 
@@ -18560,6 +21136,7 @@ function IDE() {
               </select>
 
               <textarea
+                ref={codeEditPromptRef}
                 value={codeEditPrompt}
                 onFocus={()=>setFocusOwnerSafe('code-chat')}
                 onPointerDown={()=>setFocusOwnerSafe('code-chat')}
@@ -18703,6 +21280,79 @@ function IDE() {
       aria-hidden={workspaceRightCollapsed}
     >
       {workspaceTab==='DESIGN'&&<>
+        <div className="info-card design-plan-tabs-card">
+          <div className="summary-head design-plan-summary-head">
+            <div><strong>신규 Agent 설계</strong><small>요구사항 → 실행 환경 → Database → 개발 Stage → 최종 Preview를 확인한 뒤 프로젝트를 생성합니다.</small></div>
+          </div>
+          <div className="builder-summary-tabs workspace-design-tabs" role="tablist" aria-label="신규 Agent 설계 구성">
+            <button type="button" className={builderSummaryTab==='REQUIREMENTS'?'active':''} onClick={()=>setBuilderSummaryTab('REQUIREMENTS')}>요구사항</button>
+            <button type="button" className={builderSummaryTab==='RUNTIME'?'active':''} onClick={()=>{setBuilderSummaryTab('RUNTIME');if(workspaceRightWidth<430)setWorkspaceRightWidth(430);if(!agentRuntimePortInfo)setTimeout(()=>recommendAgentRuntimePorts(),0)}}>실행 환경</button>
+            <button type="button" className={builderSummaryTab==='DATABASE'?'active':''} onClick={()=>{setBuilderSummaryTab('DATABASE');if(workspaceRightWidth<450)setWorkspaceRightWidth(450)}}>Database</button>
+            <button type="button" className={builderSummaryTab==='STAGES'?'active':''} onClick={()=>{setBuilderSummaryTab('STAGES');if(workspaceRightWidth<410)setWorkspaceRightWidth(410)}}>개발 Stage{developmentStagePlan?.stages?.length?` ${developmentStagePlan.stages.length}`:''}</button>
+            <button type="button" className={builderSummaryTab==='FINAL'?'active':''} onClick={()=>{setBuilderSummaryTab('FINAL');if(workspaceRightWidth<450)setWorkspaceRightWidth(450)}}>최종 Preview</button>
+            <button type="button" className={builderSummaryTab==='SUMMARY'?'active':''} onClick={()=>setBuilderSummaryTab('SUMMARY')}>설계 요약</button>
+          </div>
+          {builderSummaryTab==='REQUIREMENTS'&&<div className="design-tab-intro">
+            <strong>요구사항 수집 및 재정의</strong>
+            <small>확정된 요구사항과 추천 기능/메뉴/Tool을 확인합니다. 아래 요구사항 패널에서 세부 내용을 수정할 수 있습니다.</small>
+            <span>{getRequirementKeywordStatus().filter(x=>x.collected).length}/{getRequirementKeywordStatus().length} 수집</span>
+          </div>}
+          {builderSummaryTab==='RUNTIME'&&<AgentRuntimeSetupPanel
+            value={agentRuntimeSetup}
+            onChange={updateAgentRuntimeSetup}
+            recommendation={agentRuntimePortInfo}
+            onRecommend={recommendAgentRuntimePorts}
+            busy={agentRuntimePortBusy}
+            onApprove={approveAgentRuntimeSetup}
+          />}
+          {builderSummaryTab==='STAGES'&&<DevelopmentStageRecommendationPanel
+            plan={developmentStagePlan}
+            busy={developmentStagePlanBusy}
+            onRecommend={()=>recommendDevelopmentStages({force:true})}
+            onApprove={approveDevelopmentStages}
+            onChangePlan={applyUserEditedDevelopmentStagePlan}
+          />}
+          {builderSummaryTab==='DATABASE'&&<AgentDatabaseSetupPanel
+            value={agentDatabaseSetup}
+            onChange={updateAgentDatabaseSetup}
+            onTest={testAgentDatabaseConnections}
+            onAnalyze={analyzeExistingAgentDatabase}
+            onCreateResource={createAgentDatabaseResource}
+            testBusy={agentDatabaseTestBusy}
+            testResult={agentDatabaseTestResult}
+            analyzeBusy={agentDatabaseAnalyzeBusy}
+            analyzeResult={agentDatabaseAnalyzeResult}
+            createBusy={agentDatabaseCreateBusy}
+            createResult={agentDatabaseCreateResult}
+            databaseNeeded={Boolean(targetWorkflowPreview?.database_plan?.enabled||liveDatabasePreview?.enabled||getRequirementKeywordStatus().find(item=>item.id==='database')?.collected)}
+            onBuildPlan={buildAgentDatabaseResourcePlan}
+            planBusy={agentDatabasePlanBusy}
+            resourcePlan={agentDatabaseResourcePlan}
+            onResourcePlanChange={setAgentDatabaseResourcePlan}
+            onApprovePlan={approveAgentDatabaseResourcePlan}
+            onBackFromPlan={backToAgentDatabaseSetup}
+            editorMode={Boolean(selectedProjectId)}
+            onOpenDatabaseDesign={()=>{setWorkspaceTab('WORKFLOW');setWorkflowView('TARGET')}}
+          />}
+          {builderSummaryTab==='FINAL'&&<AgentGenerationFinalPreview
+            name={newAgentName}
+            developmentPlan={developmentStagePlan}
+            runtimeSetup={agentRuntimeSetup}
+            databaseSetup={agentDatabaseSetup}
+            databaseResourcePlan={agentDatabaseResourcePlan}
+            onOpenRuntime={()=>{setBuilderSummaryTab('RUNTIME');if(!agentRuntimePortInfo)setTimeout(()=>recommendAgentRuntimePorts(),0)}}
+            onOpenDatabase={()=>setBuilderSummaryTab('DATABASE')}
+            onOpenStages={()=>setBuilderSummaryTab('STAGES')}
+          />}
+          {builderSummaryTab==='SUMMARY'&&<AgentDesignSummaryPanel
+            summary={getBuilderConversationSummary()}
+            plan={developmentStagePlan}
+            requirements={getRequirementKeywordStatus()}
+            uiLayoutConfig={uiLayoutConfig}
+            agentSpecialization={agentSpecialization}
+          />}
+        </div>
+
         <div className="info-card unified-project-config">
           <div className="summary-head">
             <div>
@@ -18722,6 +21372,8 @@ function IDE() {
               : <div className="ui-layout-choice-empty">Agent 성격에 맞는 레이아웃 템플릿을 선택하세요.</div>}
             <button type="button" onClick={()=>setUiLayoutGalleryOpen(true)}>{uiLayoutConfig?.template_id?'레이아웃 변경':'레이아웃 템플릿 선택'}</button>
           </div>
+      <div className="agent-runtime-config-shortcut"><div><strong>실행 환경</strong><small>{agentRuntimeSetup?.approved?`Frontend ${safeAgentRuntimeSetup(agentRuntimeSetup).frontend.port} · Backend ${safeAgentRuntimeSetup(agentRuntimeSetup).backend.port} · API ${safeAgentRuntimeSetup(agentRuntimeSetup).api.port}`:'추천 PORT 확인 및 확정이 필요합니다.'}</small></div><button type="button" onClick={()=>{setBuilderSummaryTab('RUNTIME');if(!agentRuntimePortInfo)setTimeout(()=>recommendAgentRuntimePorts(),0)}}>실행 환경 열기</button></div>
+      <div className="agent-db-config-shortcut"><div><strong>Database 구성</strong><small>{databaseModeLabel(agentDatabaseSetup?.mode)} · {selectedAgentDatabaseProviders(agentDatabaseSetup).length}개 DB · 실제 구조 생성은 승인된 Resource Plan만 적용합니다.</small></div><button type="button" onClick={()=>setBuilderSummaryTab('DATABASE')}>DB 설정 열기</button></div>
 
           <label className="ux-field">
             <span>에이전트 이름</span>
@@ -18803,12 +21455,25 @@ function IDE() {
         </div>
 
         <div className="info-card right-agent-build-card">
-          <SectionTitle title="Agent 제작 진행"/>
+          <SectionTitle
+            title="Agent 제작 진행"
+            action={<AgentBuildStyleControls
+              documentationEnabled={codeDocumentationEnabled}
+              codingStyle={agentCodingStyle}
+              busy={agentBuildBusy||projectCreateFlowBusy||targetWorkflowLoading}
+              stage={agentBuildStage}
+              onDocumentationChange={setCodeDocumentationEnabled}
+              onCodingStyleChange={setAgentCodingStyle}
+            />}
+          />
           <AgentBuildActionBar
             stage={agentBuildStage}
             busy={agentBuildBusy||projectCreateFlowBusy||targetWorkflowLoading}
             message={agentBuildMessage}
             workflowEnabled={canDesignFromCollectedInfo()}
+            developmentPlanApproved={Boolean(developmentStagePlan?.approved)}
+            runtimeSetupApproved={Boolean(agentRuntimeSetup?.approved)}
+            databasePlanApproved={!Boolean(targetWorkflowPreview&&['postgresql','firestore','redis'].some(key=>agentDatabaseSetup?.mode==='CONFIGURE'&&agentDatabaseSetup?.[key]?.enabled&&agentDatabaseSetup?.[key]?.auto_provision)&&!agentDatabaseResourcePlan?.approved)}
             onWorkflow={()=>{
               setWorkspaceTab('WORKFLOW')
               setWorkflowView('TARGET')
@@ -18832,6 +21497,8 @@ function IDE() {
               savedAt={designProjectSavedAt||requirementDraftSavedAt}
               status={designProjectProgressInfo().status}
               progress={designProjectProgressInfo().progress}
+              saving={designProjectSaving}
+              autoSaveEnabled={true}
               showNew={false}
               panelMode
               onSave={()=>saveAgentDesignProject({createVersion:true,versionLabel:'사용자 수동 저장 Snapshot'})}
@@ -18895,6 +21562,15 @@ function IDE() {
                   <strong>{module.label||module.id}</strong>
                   <small>{module.reason||''}</small>
                 </div>)}
+                {liveDatabasePreview.firestore_plan?.enabled&&<div className="live-db-redis-module firestore">
+                  <strong>Google Cloud Firestore</strong>
+                  <small>{liveDatabasePreview.firestore_plan.policy}</small>
+                  <div className="live-db-redis-keys">
+                    {(liveDatabasePreview.firestore_plan.collections||[]).map(item=><div key={item.name}>
+                      <code>{item.name}</code><span>{item.purpose}</span><em>Collection</em>
+                    </div>)}
+                  </div>
+                </div>}
                 {liveDatabasePreview.redis_plan?.enabled&&<div className="live-db-redis-module">
                   <strong>Redis Cache / Session</strong>
                   <small>{liveDatabasePreview.redis_plan.policy}</small>
@@ -18904,7 +21580,7 @@ function IDE() {
                     </div>)}
                   </div>
                 </div>}
-                {!(liveDatabasePreview.modules||[]).length&&!liveDatabasePreview.redis_plan?.enabled&&<small>현재 DB Module이 선택되지 않았습니다.</small>}
+                {!(liveDatabasePreview.modules||[]).length&&!liveDatabasePreview.firestore_plan?.enabled&&!liveDatabasePreview.redis_plan?.enabled&&<small>현재 DB Module이 선택되지 않았습니다.</small>}
               </div>}
 
               {liveDatabasePreviewTab==='ENTITIES'&&<div className="live-db-entity-list">
@@ -18943,7 +21619,7 @@ function IDE() {
           </>}
         </div>
 
-        <div className="info-card requirement-collection-wrapper">
+        {builderSummaryTab==='REQUIREMENTS'&&<div className="info-card requirement-collection-wrapper">
           <div className="requirement-collection-card active-design">
             <div className="requirement-collection-head">
               <div>
@@ -19096,7 +21772,14 @@ function IDE() {
               </div>
             </details>
           </div>
-        </div>
+          <RequirementRecommendationPanel
+            recommendations={requirementRecommendations}
+            settings={requirementRecommendationSettings}
+            onToggle={toggleRequirementRecommendation}
+            onRoutingChange={changeRequirementToolRouting}
+            onApplyDefaults={resetRequirementRecommendationsToDefaults}
+          />
+        </div>}
 
       </>}
 
@@ -19132,12 +21815,25 @@ function IDE() {
       </>}
       {workspaceTab==='WORKFLOW'&&
       <div className="info-card right-agent-build-card">
-        <SectionTitle title="Agent 제작 진행"/>
+        <SectionTitle
+            title="Agent 제작 진행"
+            action={<AgentBuildStyleControls
+              documentationEnabled={codeDocumentationEnabled}
+              codingStyle={agentCodingStyle}
+              busy={agentBuildBusy||projectCreateFlowBusy||targetWorkflowLoading}
+              stage={agentBuildStage}
+              onDocumentationChange={setCodeDocumentationEnabled}
+              onCodingStyleChange={setAgentCodingStyle}
+            />}
+          />
         <AgentBuildActionBar
           stage={agentBuildStage}
           busy={agentBuildBusy||projectCreateFlowBusy||targetWorkflowLoading}
           message={agentBuildMessage}
           workflowEnabled={canDesignFromCollectedInfo()}
+          developmentPlanApproved={Boolean(developmentStagePlan?.approved)}
+          runtimeSetupApproved={Boolean(agentRuntimeSetup?.approved)}
+          databasePlanApproved={!Boolean(targetWorkflowPreview&&['postgresql','firestore','redis'].some(key=>agentDatabaseSetup?.mode==='CONFIGURE'&&agentDatabaseSetup?.[key]?.enabled&&agentDatabaseSetup?.[key]?.auto_provision)&&!agentDatabaseResourcePlan?.approved)}
           onWorkflow={()=>{
             setWorkspaceTab('WORKFLOW')
             setWorkflowView('TARGET')
@@ -19155,7 +21851,7 @@ function IDE() {
 
       {workspaceTab==='CODE'&&
       <div className="code-right-panel-shell">
-        <div className="code-right-panel-tabs code-four-tabs" role="tablist" aria-label="코드 편집 우측 패널">
+        <div className="code-right-panel-tabs code-five-tabs" role="tablist" aria-label="코드 편집 우측 패널">
           <button
             type="button"
             className={codeRightPanelTab==='FILES'?'active':''}
@@ -19183,12 +21879,28 @@ function IDE() {
             onClick={()=>{setCodeRightPanelTab('CODEX');if(workspaceRightWidth<420)setWorkspaceRightWidth(420)}}
             title="ChatGPT 계정으로 사용하는 Codex"
           >Codex</button>
+          <button
+            type="button"
+            className={codeRightPanelTab==='MEMO'?'active':''}
+            onClick={()=>{setCodeRightPanelTab('MEMO');if(workspaceRightWidth<420)setWorkspaceRightWidth(420)}}
+            title="현재 프로젝트의 파일별 메모"
+          >메모{mediaSession.status==='RECORDING'&&<span className="memo-recording-tab-dot" title="녹음 중">●</span>}</button>
         </div>
 
         {codeRightPanelTab==='CODEX'&&
         <CodexPanel
           projectRoot={resolveWorkspaceRoot()}
           activeFile={selected||''}
+          onCodeProposal={registerCodexCodeProposal}
+        />}
+
+        {codeRightPanelTab==='MEMO'&&
+        <ProjectMemoPanel
+          projectRoot={resolveWorkspaceRoot()}
+          activeFile={selected||''}
+          projectFiles={files}
+          onAddLlmReference={reference=>addCodeEditReference({...reference,path:selected||reference.path||''})}
+          onOpenExternalMedia={openTemporaryExternalMedia}
         />}
 
         {codeRightPanelTab==='FILES'&&
@@ -19720,7 +22432,44 @@ function IDE() {
           </div>
 
           {codeEditProposal
-            ? <>
+            ? codeEditProposal.proposalType==='codex_blocks'
+              ? <>
+                  <div className="code-proposal-meta">
+                    <span>제안 출처</span>
+                    <code>Codex · 코드 블록 {Number(codeEditProposal.codeBlockCount||0)}개</code>
+                  </div>
+                  {codeEditProposal.path&&<div className="code-proposal-meta">
+                    <span>현재 파일</span>
+                    <code>{codeEditProposal.path}</code>
+                  </div>}
+                  {codeEditProposal.instruction&&
+                    <div className="code-proposal-instruction">
+                      <span>질문</span>
+                      <p>{codeEditProposal.instruction}</p>
+                    </div>
+                  }
+                  <div className="codex-proposal-blocks">
+                    {codeEditProposal.blocks.map((block,index)=>{
+                      const codeIndex=block.type==='code'
+                        ? codeEditProposal.blocks.slice(0,index+1).filter(item=>item.type==='code').length
+                        : 0
+                      return block.type==='code'
+                        ? <div className="codex-proposal-code-block" key={`codex-code-${index}`}>
+                            <div className="codex-proposal-code-head">
+                              <strong>코드 {codeIndex}/{Number(codeEditProposal.codeBlockCount||0)}</strong>
+                              <span>{block.language||'text'}</span>
+                              <button type="button" onClick={()=>navigator.clipboard?.writeText(block.content||'').catch(()=>{})}>코드 복사</button>
+                            </div>
+                            <pre><code>{block.content}</code></pre>
+                          </div>
+                        : <div className="codex-proposal-explanation" key={`codex-explanation-${index}`}>{block.content}</div>
+                    })}
+                  </div>
+                  <div className="code-proposal-panel-actions">
+                    <button type="button" onClick={discardCodeEditProposal}>제안 닫기</button>
+                  </div>
+                </>
+              : <>
                 <div className="code-proposal-meta">
                   <span>대상 파일</span>
                   <code>{codeEditProposal.path}</code>
@@ -20155,6 +22904,7 @@ function IDE() {
     {id:'report',icon:'▤',category:'워크스페이스',title:'분석 리포트 열기',description:'현재 Agent/프로젝트 분석 리포트를 확인합니다.',run:()=>openWorkspaceCommand('REPORT')},
     {id:'architecture',icon:'▱',category:'워크스페이스',title:'아키텍처 열기',description:'프로젝트 적응형 Architecture를 확인합니다.',run:()=>openWorkspaceCommand('ARCHITECTURE')},
     {id:'erd',icon:'DB',category:'데이터베이스',title:'DB ERD 열기',description:'현재 Agent/프로젝트 DB ERD를 확인합니다.',keywords:['erd','database'],run:()=>openWorkspaceCommand('DB_ERD')},
+    {id:'scheduler',icon:'◷',category:'워크스페이스',title:'스케줄러 열기',description:'현재 Backend Scheduler 실행 목록과 취소 상태를 확인합니다.',keywords:['scheduler','job','background','스케줄러'],run:()=>openWorkspaceCommand('SCHEDULER')},
     {id:'llm',icon:'LLM',category:'워크스페이스',title:'LLM 리스트 열기',description:'LLM 사용/호출 목록 화면으로 이동합니다.',run:()=>openWorkspaceCommand('LLM')},
     {id:'browser',icon:'◎',category:'워크스페이스',title:'웹브라우저 열기',description:'AgentStudio 웹브라우저 Workspace를 엽니다.',run:()=>openWorkspaceCommand('BROWSER')},
     {id:'find-current',icon:'⌕',category:'찾기',title:'현재 파일에서 텍스트 찾기',description:'현재 편집 파일에서 문자열을 검색합니다.',keywords:['찾기','검색'],run:()=>{openWorkspaceCommand('CODE');openEditorTextSearch('CURRENT')}},
@@ -20171,7 +22921,7 @@ function IDE() {
   ]
 
 
-  return <div className="app studio-app ux-app">
+  return <div className="app studio-app ux-app" onContextMenuCapture={openDocumentTextReferenceMenu}>
     <header className="ux-topbar">
       <div className="brand-block" onClick={()=>setScreen('HOME')} title="THEANOVA AgentStudio 홈">
         <img
@@ -20504,6 +23254,19 @@ function IDE() {
       <span><b className="status-green">●</b> Ollama</span>
       <span><b className="status-blue">●</b> MCP {mcpServers.length}</span>
       <span><b className="status-green">●</b> PostgreSQL</span>
+      {(mediaSession.status==='RECORDING'||mediaSession.status==='STARTING'||mediaSession.status==='STOPPING')&&<div className="global-media-status-group">
+        <button
+          type="button"
+          className="global-media-status"
+          onClick={()=>{setScreen('WORKSPACE');setWorkspaceTab('CODE');setCodeRightPanelTab('MEMO');if(workspaceRightWidth<420)setWorkspaceRightWidth(420)}}
+          title="녹음 세션 열기 · 화면을 이동해도 녹음은 계속됩니다."
+        >
+          <b className="global-media-recording-dot">●</b>
+          {mediaSession.status==='RECORDING'?'녹음 중':'녹음 전환 중'} {formatMediaElapsed(mediaSession.elapsedSeconds)}
+          <span>{mediaSession.enableStt?mediaSession.sttStatus:'STT OFF'}</span>
+        </button>
+        <button type="button" className="global-media-stop" onClick={()=>void mediaSession.stop()} disabled={mediaSession.status!=='RECORDING'} title="전역 녹음 정지">■ 정지</button>
+      </div>}
       <div className="statusbar-spacer"/>
       <span>Project #{selectedProjectId||'-'}</span>
       <span>{new Date().toLocaleTimeString()}</span>
@@ -20531,13 +23294,42 @@ function IDE() {
           </label>
 
           <label className="mcp-add-field">
+            <span>Transport</span>
+            <select
+              value={mcpAddForm.transport}
+              onChange={e=>setMcpAddForm(p=>({...p,transport:e.target.value}))}
+            >
+              <option value="streamable_http">Streamable HTTP</option>
+              <option value="stdio">stdio · 로컬 MCP Command</option>
+            </select>
+          </label>
+
+          {mcpAddForm.transport==='streamable_http'?<label className="mcp-add-field">
             <span>Endpoint</span>
             <input
               value={mcpAddForm.endpoint}
               onChange={e=>setMcpAddForm(p=>({...p,endpoint:e.target.value}))}
               placeholder="예: http://127.0.0.1:8001/mcp"
             />
-          </label>
+          </label>:<>
+            <label className="mcp-add-field">
+              <span>Command</span>
+              <input
+                value={mcpAddForm.command}
+                onChange={e=>setMcpAddForm(p=>({...p,command:e.target.value}))}
+                placeholder="예: uvx 또는 npx"
+              />
+            </label>
+            <label className="mcp-add-field">
+              <span>Arguments <small>한 줄에 인자 하나</small></span>
+              <textarea
+                value={mcpAddForm.args_text}
+                onChange={e=>setMcpAddForm(p=>({...p,args_text:e.target.value}))}
+                placeholder={'예: blender-mcp\n--option\nvalue'}
+                rows={4}
+              />
+            </label>
+          </>}
 
           <label className="mcp-add-field">
             <span>신뢰 수준</span>
@@ -20865,6 +23657,57 @@ function IDE() {
           </button>)}
         </div>}
       </div>
+    </div>}
+
+    {documentTextReferenceMenu&&<div
+      className="document-text-reference-menu"
+      style={{left:documentTextReferenceMenu.x,top:documentTextReferenceMenu.y}}
+      role="menu"
+      onMouseDown={event=>event.stopPropagation()}
+    >
+      <button
+        type="button"
+        role="menuitem"
+        onMouseDown={event=>{event.preventDefault();event.stopPropagation()}}
+        onClick={event=>{event.preventDefault();event.stopPropagation();commitDocumentTextReference()}}
+      >LLM 참조 문구</button>
+    </div>}
+
+    {codeDefinitionPreview&&<div className="code-definition-preview-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)setCodeDefinitionPreview(null)}}>
+      <section className="code-definition-preview" role="dialog" aria-modal="true" aria-label="외부 라이브러리 정의">
+        <header>
+          <div>
+            <strong>{codeDefinitionPreview.title||codeDefinitionPreview.symbol||'정의 보기'}</strong>
+            <small>{codeDefinitionPreview.absolute_path||codeDefinitionPreview.module||'외부 라이브러리'}</small>
+          </div>
+          <button type="button" onClick={()=>setCodeDefinitionPreview(null)} title="정의 보기 닫기">✕</button>
+        </header>
+        <div className="code-definition-preview-meta">
+          <span>{codeDefinitionPreview.kind||'symbol'}</span>
+          <span>Line {Math.max(1,Number(codeDefinitionPreview.line||1))}</span>
+          {codeDefinitionPreview.signature&&<code>{codeDefinitionPreview.signature}</code>}
+        </div>
+        <div className="code-definition-preview-editor">
+          {codeDefinitionPreview.content
+            ? <Editor
+                height="100%"
+                language={codeDefinitionPreview.language||'python'}
+                value={String(codeDefinitionPreview.content||'')}
+                theme="vs-dark"
+                onMount={editor=>{
+                  const line=Math.max(1,Number(codeDefinitionPreview.line||1))
+                  const column=Math.max(1,Number(codeDefinitionPreview.column||1))
+                  window.setTimeout(()=>{
+                    editor.revealLineInCenter?.(line)
+                    editor.setPosition?.({lineNumber:line,column})
+                  },0)
+                }}
+                options={{readOnly:true,minimap:{enabled:false},lineNumbers:'on',fontSize:13,automaticLayout:true,scrollBeyondLastLine:false}}
+              />
+            : <div className="code-definition-preview-empty">정의 위치는 찾았지만 소스 Preview를 불러올 수 없습니다.</div>}
+        </div>
+        <footer><span>Ctrl+Click으로 연 외부 라이브러리 정의입니다.</span><button type="button" onClick={()=>setCodeDefinitionPreview(null)}>닫기</button></footer>
+      </section>
     </div>}
 
     <GlobalCommandPalette

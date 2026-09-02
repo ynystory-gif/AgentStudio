@@ -502,11 +502,23 @@ async def next_interview_message(
     provider: str | None = None,
     attachment_context: str = "",
     attachment_memory: str = "",
+    agent_specialization: str = "",
 ) -> str:
     fresh_attachment_block = str(attachment_context or "").strip()
     cached_requirement_context = str(attachment_memory or "").strip()
+    specialization = str(agent_specialization or "").strip().upper()
+    specialization_context = ""
+    if specialization == "BLENDER_3D":
+        specialization_context = (
+            "[선택된 Agent 전문 유형: BLENDER_3D]\n"
+            "사용자는 Blender MCP 기반 3D 제작 Agent를 만들고 있습니다. Blender MCP의 구체 Tool 호출 순서, "
+            "LangGraph 분기, Scene State 내부 구현은 AgentStudio가 설계하며 사용자에게 기술 선택을 떠넘기지 않습니다. "
+            "다만 3D Agent가 반드시 지원해야 할 제작 범위(모델링/재질/조명/카메라/애니메이션), 입력 참고자료, "
+            "최종 산출물(.blend/GLB/FBX/OBJ/Render/Animation)처럼 사용자 의사결정이 필요한 내용이 불명확하면 "
+            "한 번에 하나씩 우선 질문합니다. Viewport/Render Vision QA와 bounded repair는 기본 안전 계약으로 간주합니다."
+        )
     combined_requirement_context = '\n\n'.join(
-        part for part in (cached_requirement_context, fresh_attachment_block) if part
+        part for part in (specialization_context, cached_requirement_context, fresh_attachment_block) if part
     )[-18_000:]
 
     # v5.359 Fast Interview Path: 첨부 원문을 새로 분석하는 턴이 아니고,
@@ -519,6 +531,8 @@ async def next_interview_message(
     llm = model_for_task(LLMTask.REQUIREMENTS_ANALYSIS, provider)
     compact = "\n".join(f"{x['role']}: {x['content']}" for x in history[-20:])
     context_parts = []
+    if specialization_context:
+        context_parts.append(specialization_context)
     if cached_requirement_context:
         context_parts.append(
             '[기존 첨부 분석/요구사항 메모리]\n'

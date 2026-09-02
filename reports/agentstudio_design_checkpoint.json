@@ -1,0 +1,114 @@
+{
+  "version": 3,
+  "saved_at": "2026-08-31T08:31:06.929Z",
+  "agent_name": "AgentStudio",
+  "design_project_id": 4,
+  "design_project_version": 1,
+  "project_root": "C:\\AI\\AgentStudio",
+  "workflow_request": "AgentStudio: 소스 파일 620개를 로컬 고속 분석 Pipeline으로 분석했습니다. 주요 기술: md, Python, json, React/TypeScript, React/JavaScript, TypeScript, css, SQL. LLM 전달 전 관련 후보를 20개로 압축했습니다. Index Cache 재사용 0개 / 재분석 620개. 1차 분석에서는 LLM/Embedding API를 호출하지 않았습니다.",
+  "chat": [
+    {
+      "role": "assistant",
+      "content": "만들고 싶은 AI Agent + MCP 프로그램을 말씀해 주세요. 필요한 질문은 한 번에 하나씩 하겠습니다."
+    }
+  ],
+  "confirmed_requirements": {
+    "original_request": "AgentStudio: 소스 파일 620개를 로컬 고속 분석 Pipeline으로 분석했습니다. 주요 기술: md, Python, json, React/TypeScript, React/JavaScript, TypeScript, css, SQL. LLM 전달 전 관련 후보를 20개로 압축했습니다. Index Cache 재사용 0개 / 재분석 620개. 1차 분석에서는 LLM/Embedding API를 호출하지 않았습니다.",
+    "user_answers": [],
+    "latest_analysis": "",
+    "ui": "",
+    "frontend": null,
+    "ui_layout": null,
+    "superseded_requirements": [],
+    "agent_specialization": {
+      "type": "GENERAL",
+      "label": "일반 Agent"
+    },
+    "backend": "",
+    "llm": {
+      "default_provider": "",
+      "default_model": "",
+      "configurable_provider": false,
+      "ollama_supported": false
+    },
+    "file_access": {
+      "allowed_extensions": [
+        ".txt",
+        ".md",
+        ".py"
+      ],
+      "restrict_to_project_root": false,
+      "user_select_or_input": false
+    },
+    "mcp": {
+      "default_transport": "",
+      "future_transport": "",
+      "transport_layer_separated": false
+    },
+    "database": {
+      "enabled": true,
+      "future_extension": false
+    },
+    "result": {
+      "ui_display": false,
+      "language": "",
+      "api_format": "",
+      "export_formats": []
+    },
+    "processing": {
+      "max_file_size_mb": null,
+      "timeout_seconds": null,
+      "chunking": false
+    },
+    "runtime": {
+      "os": "",
+      "python": "",
+      "virtual_env": "",
+      "deployment": ""
+    },
+    "auth": {
+      "enabled": true,
+      "rbac": false
+    },
+    "recommendation_settings": {
+      "selected_features": [],
+      "selected_menus": [],
+      "selected_tools": [],
+      "llm_tool_routing": {
+        "enabled": true,
+        "first_stage_id": "llm_intent_capability_classifier",
+        "second_stage_id": "tool_registry_candidate_selector",
+        "llm_only_when_ambiguous": true
+      },
+      "source": "REQUIREMENT_ANALYSIS_RECOMMENDATION",
+      "customized": false
+    },
+    "attachment_summary": "",
+    "attachment_requirements": [],
+    "attachment_requirement_coverage": {},
+    "manual_overrides": {},
+    "feature_registry": []
+  },
+  "workflow_preview": null,
+  "workflow_quality": null,
+  "agent_build_stage": "WORKFLOW_READY",
+  "attachment_memory": "",
+  "attachment_summary": "",
+  "attachment_summary_files": [],
+  "attachment_requirements": [],
+  "attachment_requirement_coverage": {},
+  "manual_requirement_overrides": {},
+  "feature_registry": [],
+  "ui_layout": null,
+  "build_resume": {
+    "source": "SAVED_CHECKPOINT",
+    "run_id": "",
+    "status": "",
+    "failure_stage": "",
+    "failure_reason": "",
+    "project_root": "C:\\AI\\AgentStudio",
+    "workflow_state": {},
+    "requirements_snapshot": {}
+  },
+  "server_saved_at": "2026-08-31T17:31:07.505262+09:00"
+}

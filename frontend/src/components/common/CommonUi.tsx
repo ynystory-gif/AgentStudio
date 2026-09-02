@@ -12,14 +12,18 @@ export interface StudioIconProps {
   children: ReactNode
   active?: boolean
   onClick?: MouseEventHandler<HTMLButtonElement>
+  title?: string
+  'aria-label'?: string
 }
 
-export function StudioIcon({ children, active = false, onClick }: StudioIconProps) {
+export function StudioIcon({ children, active = false, onClick, title, 'aria-label': ariaLabel }: StudioIconProps) {
   return (
     <button
       type="button"
       className={active ? 'studio-nav-icon active' : 'studio-nav-icon'}
       onClick={onClick}
+      title={title}
+      aria-label={ariaLabel || title}
     >
       {children}
     </button>

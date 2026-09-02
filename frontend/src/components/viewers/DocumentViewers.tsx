@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { AgentStudioApiError, api, runtimeInfo } from '../../api'
+import { AgentStudioApiError, api, apiFetch } from '../../api'
 
 export interface BinaryViewerProps {
   filePath?: string
@@ -59,8 +59,50 @@ export function PdfViewer({
   navigationToken = 0,
   matchSnippet = '',
 }: BinaryViewerProps) {
-  const apiBase = runtimeInfo().apiBase
-  const baseSrc = `${apiBase}/files/pdf?root=${encodeURIComponent(projectRoot)}&relative_path=${encodeURIComponent(filePath)}&v=${encodeURIComponent(String(revision))}`
+  const [previewUrl, setPreviewUrl] = useState('')
+  const [previewError, setPreviewError] = useState('')
+  const [previewLoading, setPreviewLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    let objectUrl = ''
+    setPreviewLoading(true)
+    setPreviewError('')
+    setPreviewUrl('')
+
+    const params = new URLSearchParams({
+      root: String(projectRoot || ''),
+      relative_path: String(filePath || ''),
+      v: String(revision),
+    })
+
+    // v5.438: PDF iframe navigation cannot attach the AgentStudio Bearer token.
+    // Fetch the PDF through apiFetch (Authorization included), then give Chromium
+    // a local blob URL. This keeps the PDF endpoint protected and avoids the
+    // {"detail":"로그인이 필요합니다."} payload appearing inside the viewer.
+    apiFetch(`/files/pdf?${params.toString()}`)
+      .then(response => response.blob())
+      .then(blob => {
+        if (cancelled) return
+        const pdfBlob = blob.type === 'application/pdf'
+          ? blob
+          : new Blob([blob], { type: 'application/pdf' })
+        objectUrl = URL.createObjectURL(pdfBlob)
+        setPreviewUrl(objectUrl)
+        setPreviewLoading(false)
+      })
+      .catch(error => {
+        if (cancelled) return
+        setPreviewLoading(false)
+        setPreviewError(error instanceof Error ? error.message : String(error || 'PDF 미리보기를 불러오지 못했습니다.'))
+      })
+
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [filePath, projectRoot, revision])
+
   // When a Unified Find result is clicked, the page number is authoritative.
   // Passing #search together with #page lets Chromium's native PDF viewer run a
   // document-wide search and it can override the requested page, making every
@@ -69,28 +111,40 @@ export function PdfViewer({
   const fragment = targetPage > 0
     ? `page=${targetPage}`
     : (String(searchQuery || '').trim() ? `search=${encodeURIComponent(String(searchQuery || '').trim())}` : '')
-  const src = fragment ? `${baseSrc}#${fragment}` : baseSrc
+  const src = previewUrl && fragment ? `${previewUrl}#${fragment}` : previewUrl
   const displayMatchSnippet = String(matchSnippet || '').replace(/\s+/g, ' ').trim().slice(0, 180)
 
   return (
     <div className="pdf-viewer-shell">
       <div className="pdf-viewer-toolbar">
         <div>
-          <strong>PDF 미리보기</strong>
           <span>{filePath}</span>
         </div>
         <small>
           {targetPage > 0
             ? `통합 찾기 결과 · 페이지 ${targetPage}${displayMatchSnippet ? ` · ${displayMatchSnippet}` : ''}`
-            : 'PDF는 바이너리 파일이므로 코드 편집기 대신 브라우저 PDF Viewer로 표시됩니다.'}
+            : 'PDF는 인증된 Backend에서 읽어 브라우저 PDF Viewer로 안전하게 표시됩니다.'}
         </small>
       </div>
-      <iframe
-        key={`${filePath}:${revision}:${page}:${searchQuery}:${navigationToken}`}
-        className="pdf-viewer-frame"
-        src={src}
-        title={`PDF 미리보기 - ${filePath || '문서'}`}
-      />
+      {previewLoading ? (
+        <div className="presentation-viewer-message">
+          <strong>PDF 미리보기 불러오는 중...</strong>
+          <span>프로젝트 PDF를 Backend에서 인증 후 읽고 있습니다.</span>
+        </div>
+      ) : previewError ? (
+        <div className="presentation-viewer-message error">
+          <strong>PDF 파일을 열 수 없습니다.</strong>
+          <span>{previewError}</span>
+          <small>Backend 로그인 상태와 프로젝트 경로 등록 상태를 확인해 주세요.</small>
+        </div>
+      ) : (
+        <iframe
+          key={`${filePath}:${revision}:${page}:${searchQuery}:${navigationToken}:${previewUrl}`}
+          className="pdf-viewer-frame"
+          src={src}
+          title={`PDF 미리보기 - ${filePath || '문서'}`}
+        />
+      )}
     </div>
   )
 }
@@ -118,9 +172,10 @@ function readPresentationError(error: unknown): { message: string; attempts: Pre
 }
 
 export function PresentationViewer({ filePath = '', projectRoot = '', revision = 0 }: BinaryViewerProps) {
-  const apiBase = runtimeInfo().apiBase
   const [previewState, setPreviewState] = useState<PresentationPreviewState>(initialPresentationPreviewState)
   const [refreshNonce, setRefreshNonce] = useState(0)
+  const [previewPdfUrl, setPreviewPdfUrl] = useState('')
+  const [previewPdfError, setPreviewPdfError] = useState('')
 
   useEffect(() => {
     let cancelled = false
@@ -161,9 +216,47 @@ export function PresentationViewer({ filePath = '', projectRoot = '', revision =
     }
   }, [filePath, projectRoot, revision, refreshNonce])
 
-  const src = previewState.error || previewState.loading
-    ? ''
-    : `${apiBase}/files/presentation/pdf?root=${encodeURIComponent(projectRoot)}&relative_path=${encodeURIComponent(filePath)}&v=${encodeURIComponent(`${revision}:${previewState.sourceSha256}`)}`
+  useEffect(() => {
+    if (previewState.error || previewState.loading) {
+      setPreviewPdfUrl('')
+      setPreviewPdfError('')
+      return
+    }
+
+    let cancelled = false
+    let objectUrl = ''
+    setPreviewPdfUrl('')
+    setPreviewPdfError('')
+    const params = new URLSearchParams({
+      root: String(projectRoot || ''),
+      relative_path: String(filePath || ''),
+      v: `${revision}:${previewState.sourceSha256}`,
+    })
+
+    // Same authenticated-blob bridge as PdfViewer. A plain iframe request does
+    // not carry the Bearer token used by AgentStudio authentication.
+    apiFetch(`/files/presentation/pdf?${params.toString()}`)
+      .then(response => response.blob())
+      .then(blob => {
+        if (cancelled) return
+        const pdfBlob = blob.type === 'application/pdf'
+          ? blob
+          : new Blob([blob], { type: 'application/pdf' })
+        objectUrl = URL.createObjectURL(pdfBlob)
+        setPreviewPdfUrl(objectUrl)
+      })
+      .catch(error => {
+        if (cancelled) return
+        setPreviewPdfError(error instanceof Error ? error.message : String(error || 'PowerPoint PDF 미리보기를 불러오지 못했습니다.'))
+      })
+
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [filePath, projectRoot, revision, previewState.error, previewState.loading, previewState.sourceSha256])
+
+  const src = previewPdfUrl
 
   return (
     <div className="pdf-viewer-shell presentation-viewer-shell">
@@ -211,9 +304,20 @@ export function PresentationViewer({ filePath = '', projectRoot = '', revision =
           )}
           <small>원본 파일은 변경되지 않습니다. PowerPoint가 설치되어 있는데도 실패하면 위 변환 단계의 오류를 확인하세요.</small>
         </div>
+      ) : previewPdfError ? (
+        <div className="presentation-viewer-message error">
+          <strong>PowerPoint PDF 미리보기를 열 수 없습니다.</strong>
+          <span>{previewPdfError}</span>
+          <small>Backend 인증 상태를 확인한 뒤 새로고침해 주세요.</small>
+        </div>
+      ) : !src ? (
+        <div className="presentation-viewer-message">
+          <strong>PowerPoint PDF 미리보기 불러오는 중...</strong>
+          <span>변환된 PDF를 Backend에서 인증 후 읽고 있습니다.</span>
+        </div>
       ) : (
         <iframe
-          key={`${filePath}:${revision}:${previewState.sourceSha256}`}
+          key={`${filePath}:${revision}:${previewState.sourceSha256}:${previewPdfUrl}`}
           className="pdf-viewer-frame"
           src={src}
           title={`PowerPoint 미리보기 - ${filePath || '프레젠테이션'}`}

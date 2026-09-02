@@ -1,4 +1,8 @@
-﻿$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+﻿param(
+    [switch]$ElevatedChild
+)
+
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -20,7 +24,8 @@ if (-not $IsAdministrator) {
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            ('"{0}"' -f $PSCommandPath)
+            ('"{0}"' -f $PSCommandPath),
+            "-ElevatedChild"
         )
         $ElevatedProcess = Start-Process `
             -FilePath "powershell.exe" `
@@ -595,9 +600,17 @@ $requiredFrontendPackages = @(
     "@xterm/xterm",
     "@xterm/addon-fit",
     "typescript",
+    "vite",
     "@types/node",
     "@types/react",
     "@types/react-dom"
+)
+$requiredFrontendPackageFiles = @(
+    "typescript\bin\tsc",
+    "vite\client.d.ts",
+    "@types\node\index.d.ts",
+    "@types\react\index.d.ts",
+    "@types\react-dom\index.d.ts"
 )
 
 $needNpmInstall = -not (Test-Path $frontendNodeModules)
@@ -607,6 +620,17 @@ if (-not $needNpmInstall) {
         $packagePath = Join-Path $frontendNodeModules $packageName
         if (-not (Test-Path $packagePath)) {
             Write-Host "[확인] Frontend 필수 패키지 누락: $packageName" -ForegroundColor Yellow
+            $needNpmInstall = $true
+            break
+        }
+    }
+}
+
+if (-not $needNpmInstall) {
+    foreach ($relativePackageFile in $requiredFrontendPackageFiles) {
+        $packageFilePath = Join-Path $frontendNodeModules $relativePackageFile
+        if (-not (Test-Path $packageFilePath)) {
+            Write-Host "[확인] Frontend 패키지 파일 누락/불완전: $relativePackageFile" -ForegroundColor Yellow
             $needNpmInstall = $true
             break
         }
@@ -631,9 +655,25 @@ else {
     Write-Host "[확인] Frontend 필수 패키지가 모두 설치되어 있습니다." -ForegroundColor DarkGray
 }
 
-        & npm run build
-        if ($LASTEXITCODE -ne 0) {
-            throw "Frontend 빌드 검증 실패"
+        $FrontendBuildLog = Join-Path $LogDir "frontend_build.log"
+        # v5.467: Windows PowerShell 5.1 converts native stderr from npm.ps1 into
+        # ErrorRecord/RemoteException when ErrorActionPreference=Stop. Build tools often
+        # write warnings to stderr even when they intend normal output, so capture the
+        # complete stream without letting PowerShell terminate before npm's exit code
+        # can be evaluated.
+        $PreviousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $FrontendBuildOutput = & npm run build 2>&1 | Tee-Object -FilePath $FrontendBuildLog
+            $FrontendBuildExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $PreviousErrorActionPreference
+        }
+        $FrontendBuildOutput | ForEach-Object { Write-Host $_ }
+        if ($FrontendBuildExitCode -ne 0) {
+            $FrontendBuildTail = ($FrontendBuildOutput | Select-Object -Last 50) -join [Environment]::NewLine
+            throw "Frontend 빌드 검증 실패`n$FrontendBuildTail`n전체 빌드 로그: $FrontendBuildLog"
         }
         Write-Ok "Frontend 빌드 검증"
     }
@@ -908,5 +948,22 @@ catch {
     Write-Host "실패 상세 로그: $FailureLog" -ForegroundColor Yellow
     Write-Host "상세 오류:"
     Write-Host $_.Exception.ToString()
+
+    # v5.467: when SYSTEM_ADMIN was relaunched through UAC, this is the elevated
+    # console that previously disappeared immediately after a startup failure.
+    # Keep it open so the actual npm/backend/frontend error remains readable.
+    if ($ElevatedChild) {
+        Write-Host ""
+        Write-Host "============================================================" -ForegroundColor DarkYellow
+        Write-Host "[실패] 오류 확인을 위해 이 관리자 창을 자동으로 닫지 않습니다." -ForegroundColor Yellow
+        Write-Host "로그를 확인한 뒤 Enter 키를 누르면 창을 닫습니다." -ForegroundColor Yellow
+        Write-Host "============================================================" -ForegroundColor DarkYellow
+        try {
+            [void](Read-Host)
+        }
+        catch {
+            # Non-interactive hosts may not provide stdin; failure logging already completed.
+        }
+    }
     exit 1
 }

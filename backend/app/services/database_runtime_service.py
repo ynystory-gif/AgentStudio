@@ -783,6 +783,13 @@ async def save_supabase_runtime_settings(
     }
 
 
+async def _prepare_learning_schema_after_runtime_rebind() -> dict[str, Any]:
+    """Run learning DDL/backfill only after an explicit AgentStudio runtime DB switch."""
+    from app.services.learning_relational_schema_service import ensure_learning_relational_schema
+
+    return await ensure_learning_relational_schema(force=True, run_backfill=True)
+
+
 async def activate_database_provider(
     provider: str,
     *,
@@ -807,6 +814,7 @@ async def activate_database_provider(
         get_settings.cache_clear()
         await rebind_database(target_database_url)
         await migrate_agentstudio_schema()
+        await _prepare_learning_schema_after_runtime_rebind()
         await agent_graph_runtime.set_database_url(target_langgraph_url, restart=True)
         _ACTIVE_PROVIDER = PROVIDER_LOCAL
         _LAST_ERROR = ""
@@ -873,6 +881,8 @@ async def activate_database_provider(
         # v5.308: project machine-scope schema changes must also be present when
         # callers skip the full schema initializer. The migration is idempotent.
         await migrate_agentstudio_schema()
+        # v5.446: learning DDL is a lifecycle migration, never a Learning Center page-read side effect.
+        await _prepare_learning_schema_after_runtime_rebind()
         scoped_langgraph_url = _postgres_url_with_search_path(langgraph_url, target_schema)
         langgraph_ok = bool(await agent_graph_runtime.set_database_url(scoped_langgraph_url, restart=True))
         if not langgraph_ok:

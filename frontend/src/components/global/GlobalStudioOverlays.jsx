@@ -127,7 +127,7 @@ export function AgentWorkCenterPanel({open,onClose,jobs={},developmentProgress,w
 
 const HELP_ARTICLES=[
   {id:'start',category:'시작하기',title:'AgentStudio 시작하기',keywords:'신규 agent 프로젝트',body:'신규 Agent 만들기에서 목적을 설명하면 요구사항을 한 번에 하나씩 수집합니다. 프로젝트 이름과 경로를 지정한 뒤 설계 검토 → 프로젝트 생성 → 개발 시작 순서로 진행합니다.'},
-  {id:'tabs',category:'탭별 사용법',title:'워크스페이스 탭',keywords:'워크플로우 코드 실행 분석 아키텍처 erd llm 브라우저',body:'에이전트 설계, 워크플로우, 코드 편집, 실행 결과, 분석 리포트, 아키텍처, DB ERD, LLM 리스트, 웹브라우저 탭을 프로젝트 상태에 맞게 사용할 수 있습니다.'},
+  {id:'tabs',category:'탭별 사용법',title:'워크스페이스 탭',keywords:'워크플로우 코드 실행 분석 아키텍처 erd 스케줄러 scheduler llm 브라우저',body:'에이전트 설계, 워크플로우, 코드 편집, 실행 결과, 분석 리포트, 아키텍처, DB ERD, 스케줄러, LLM 리스트, 웹브라우저 탭을 프로젝트 상태에 맞게 사용할 수 있습니다.'},
   {id:'attachment',category:'자주 쓰는 작업',title:'첨부 파일 분석',keywords:'참고 파일 ipynb pdf csv 요구사항',body:'첨부 파일은 안전한 Context로 분석합니다. AI가 추출한 요구사항은 첨부 파일 AI 정리에서 확인할 수 있고 원문/긴 코드는 대화창에 그대로 노출하지 않습니다.'},
   {id:'redevelop',category:'문제 해결',title:'개발 실패 후 재개발',keywords:'실패 복구 재개 checkpoint',body:'실패 Checkpoint가 있는 프로젝트를 선택하면 재개발 시작 버튼이 활성화됩니다. 요구사항부터 다시 시작하지 않고 실패 직전 검증 단계부터 수정된 소스를 재검증합니다.'},
   {id:'ppt',category:'리포트',title:'Agent PPT와 Studio PPT',keywords:'ppt powerpoint erd',body:'Agent PPT는 현재 Agent/로드 프로젝트만 포함합니다. Studio PPT는 THEANOVA AgentStudio 자체 자료만 포함하며 각각 DB ERD도 해당 범위에 맞게 포함됩니다.'},

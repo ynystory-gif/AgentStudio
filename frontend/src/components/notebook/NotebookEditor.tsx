@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import Editor from '@monaco-editor/react'
-import { getEditorModelPath } from '../../utils/editor'
+import { CODE_EDITOR_PAIR_TYPING_OPTIONS, getEditorModelPath, registerEscapedDoubleQuotePairGuard } from '../../utils/editor'
+import { registerCodeIntelligence } from '../../utils/codeIntelligence'
 import { notebookKernelLanguage, parseNotebookDocument, textToNotebookSource } from '../../utils/notebook'
 import type {
   NotebookCell,
@@ -77,6 +78,14 @@ interface NotebookMonacoEditorLike {
   setPosition?: (position: { lineNumber: number; column: number }) => void
   deltaDecorations?: (oldDecorations: string[], newDecorations: NotebookEditorDecorationLike[]) => string[]
   onMouseDown?: (listener: (event: NotebookEditorMouseDownEventLike) => void) => { dispose?: () => void }
+  addAction?: (descriptor: {
+    id: string
+    label: string
+    precondition?: string
+    contextMenuGroupId?: string
+    contextMenuOrder?: number
+    run: (editor: NotebookMonacoEditorLike) => void
+  }) => { dispose?: () => void }
   focus?: () => void
 }
 
@@ -204,6 +213,13 @@ function notebookScrollKey(projectRoot?: string, filePath?: string): string {
   return `${root}::${path}`
 }
 
+function formatNotebookExecutionElapsed(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}
+
 export interface NotebookEditorProps {
   value: string
   filePath?: string
@@ -215,6 +231,45 @@ export interface NotebookEditorProps {
   onDebugCommand?: (request: NotebookDebugCommandRequest) => Promise<NotebookDebugResult | null | undefined> | NotebookDebugResult | null | undefined
   controllerRef?: React.MutableRefObject<NotebookEditorController | null> | null
   onEditorFocus?: () => void
+  onAddLlmReference?: (reference: {
+    path?: string
+    text: string
+    start_line: number
+    start_column: number
+    end_line: number
+    end_column: number
+    cell_index?: number
+    source?: string
+  }) => void
+  onNavigateProjectDefinition?: (definition: any, sourceLocation?: { line: number; column: number; cellIndex?: number }) => void | Promise<void>
+  onExternalDefinitionPreview?: (definition: any) => void
+}
+
+function extractNotebookNameErrorSymbol(result: NotebookExecutionResult): string {
+  if (String(result?.error_type || '') !== 'NameError') return ''
+  const message = String(result?.error_message || '')
+  const match = message.match(/name ['"]([^'"]+)['"] is not defined/)
+  return String(match?.[1] || '').trim()
+}
+
+function findNotebookDefinitionCells(notebook: NotebookDocument, symbol: string): number[] {
+  const safeSymbol = String(symbol || '').trim()
+  if (!safeSymbol) return []
+  const escaped = safeSymbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const patterns = [
+    new RegExp(`(^|\\n)\\s*${escaped}\\s*(?::[^=\\n]+)?=`, 'm'),
+    new RegExp(`(^|\\n)\\s*(?:async\\s+)?def\\s+${escaped}\\s*\\(`, 'm'),
+    new RegExp(`(^|\\n)\\s*class\\s+${escaped}\\b`, 'm'),
+    new RegExp(`(^|\\n)\\s*from\\s+[^\\n]+\\s+import\\s+[^\\n]*\\b${escaped}\\b`, 'm'),
+    new RegExp(`(^|\\n)\\s*import\\s+[^\\n]*\\b${escaped}\\b`, 'm'),
+  ]
+  const matches: number[] = []
+  notebook.cells.forEach((cell, index) => {
+    if (cell?.cell_type !== 'code') return
+    const source = notebookSourceToText(cell.source)
+    if (patterns.some(pattern => pattern.test(source))) matches.push(index)
+  })
+  return matches
 }
 
 function errorToExecutionResult(error: unknown): NotebookExecutionResult {
@@ -249,6 +304,9 @@ export function NotebookEditor({
   onDebugCommand,
   controllerRef,
   onEditorFocus,
+  onAddLlmReference,
+  onNavigateProjectDefinition,
+  onExternalDefinitionPreview,
 }: NotebookEditorProps) {
   const parsed = React.useMemo(() => parseNotebookDocument(value), [value])
   const shellRef = useRef<HTMLDivElement | null>(null)
@@ -264,6 +322,7 @@ export function NotebookEditor({
   // model and move the caret to the end of the cell. Keep cell editors
   // uncontrolled after mount and mirror the latest text here for external sync.
   const latestCellSourcesRef = useRef<Record<number, string>>({})
+  const codeNavigationHistoryRef = useRef<{ back: Array<{ cellIndex: number; line: number; column: number }>; forward: Array<{ cellIndex: number; line: number; column: number }> }>({ back: [], forward: [] })
   const [editingMarkdown, setEditingMarkdown] = useState<Record<number, boolean>>({})
   const [activeCellIndex, setActiveCellIndex] = useState(0)
   const [bookmarkRevision, setBookmarkRevision] = useState(0)
@@ -273,6 +332,13 @@ export function NotebookEditor({
   const [debugExpression, setDebugExpression] = useState('')
   const [debugConsole, setDebugConsole] = useState<Array<{ expression: string; result: string; error?: boolean }>>([])
   const [runningCells, setRunningCells] = useState<Record<number, boolean>>({})
+  // v5.473: arbitrary Python code cannot expose a reliable percentage, so long
+  // Notebook runs use an indeterminate progress strip plus elapsed time. This
+  // makes it obvious that the kernel is still working without inventing a fake %.
+  const executionStartedAtRef = useRef<Record<number, number>>({})
+  const executionProgressDelayRef = useRef<Record<number, number>>({})
+  const [executionProgressVisible, setExecutionProgressVisible] = useState<Record<number, boolean>>({})
+  const [executionHeartbeatAt, setExecutionHeartbeatAt] = useState(() => Date.now())
   const [liveOutputsByCell, setLiveOutputsByCell] = useState<Record<number, NotebookOutputData[] | undefined>>({})
   // v5.412: clear_output(wait=True) must keep the previous frame visible until
   // the replacement rich output is ready. This mirrors Jupyter's deferred-clear
@@ -289,6 +355,14 @@ export function NotebookEditor({
   useEffect(() => {
     scrollKeyRef.current = scrollKey
   }, [scrollKey])
+
+  useEffect(() => {
+    const hasRunningCell = Object.values(runningCells).some(Boolean)
+    if (!hasRunningCell) return
+    setExecutionHeartbeatAt(Date.now())
+    const timer = window.setInterval(() => setExecutionHeartbeatAt(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [runningCells])
 
   useEffect(() => {
     if (!parsed.ok) return
@@ -308,6 +382,11 @@ export function NotebookEditor({
     setDebugConsole([])
     pendingLiveClearWaitRef.current = {}
     replaceLiveOutputOnNextEventRef.current = {}
+    Object.values(executionProgressDelayRef.current).forEach(timer => window.clearTimeout(timer))
+    executionProgressDelayRef.current = {}
+    executionStartedAtRef.current = {}
+    setExecutionProgressVisible({})
+    setRunningCells({})
     setLiveOutputsByCell({})
   }, [filePath])
 
@@ -593,6 +672,96 @@ export function NotebookEditor({
     patchCell(index, { source: textToNotebookSource(text) })
   }
 
+  const buildLiveNotebookContent = (): string => {
+    if (!parsed.ok) return value
+    const notebook = structuredClone(parsed.notebook)
+    Object.entries(latestCellSourcesRef.current).forEach(([indexText, source]) => {
+      const index = Number(indexText)
+      if (!Number.isInteger(index)) return
+      const cell = notebook.cells[index]
+      if (!cell || cell.cell_type !== 'code') return
+      notebook.cells[index] = { ...cell, source: textToNotebookSource(String(source ?? '')) }
+    })
+    return JSON.stringify(notebook, null, 1) + '\n'
+  }
+
+  const revealCodeDefinition = (cellIndex: number, line: number, column = 1): void => {
+    const maxIndex = parsed.ok ? Math.max(0, parsed.notebook.cells.length - 1) : 0
+    const safeCellIndex = Math.max(0, Math.min(maxIndex, Number(cellIndex) || 0))
+    const safeLine = Math.max(1, Number(line) || 1)
+    const safeColumn = Math.max(1, Number(column) || 1)
+    setActiveCellIndex(safeCellIndex)
+    const section = shellRef.current?.querySelector(`[data-notebook-cell-index="${safeCellIndex}"]`) as HTMLElement | null
+    section?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+    window.setTimeout(() => {
+      const targetEditor = cellEditorsRef.current[safeCellIndex]
+      targetEditor?.revealLineInCenter?.(safeLine)
+      targetEditor?.setPosition?.({ lineNumber: safeLine, column: safeColumn })
+      targetEditor?.focus?.()
+    }, 70)
+  }
+
+  const notebookCurrentCodeLocation = (fallbackCellIndex = activeCellIndex): { cellIndex: number; line: number; column: number } => {
+    const editor = cellEditorsRef.current[fallbackCellIndex]
+    const position = editor?.getPosition?.() || { lineNumber: 1, column: 1 }
+    return {
+      cellIndex: fallbackCellIndex,
+      line: Math.max(1, Number(position.lineNumber || 1)),
+      column: Math.max(1, Number(position.column || 1)),
+    }
+  }
+
+  const openNotebookDefinition = async (definition: any, sourceLocation?: { line: number; column: number }, sourceCellIndex = activeCellIndex): Promise<void> => {
+    if (!definition) return
+    if (definition.external || (!definition.relative_path && definition.absolute_path)) {
+      onExternalDefinitionPreview?.(definition)
+      return
+    }
+    const targetPath = String(definition.relative_path || filePath || '').replace(/\\/g, '/')
+    const currentPath = String(filePath || '').replace(/\\/g, '/')
+    if (targetPath && currentPath && targetPath.toLowerCase() !== currentPath.toLowerCase()) {
+      await onNavigateProjectDefinition?.(definition, {
+        line: Math.max(1, Number(sourceLocation?.line || 1)),
+        column: Math.max(1, Number(sourceLocation?.column || 1)),
+        cellIndex: sourceCellIndex,
+      })
+      return
+    }
+    if (definition.cell_index == null) {
+      await onNavigateProjectDefinition?.(definition, {
+        line: Math.max(1, Number(sourceLocation?.line || 1)),
+        column: Math.max(1, Number(sourceLocation?.column || 1)),
+        cellIndex: sourceCellIndex,
+      })
+      return
+    }
+    const history = codeNavigationHistoryRef.current
+    history.back = [...history.back, {
+      cellIndex: sourceCellIndex,
+      line: Math.max(1, Number(sourceLocation?.line || notebookCurrentCodeLocation(sourceCellIndex).line)),
+      column: Math.max(1, Number(sourceLocation?.column || notebookCurrentCodeLocation(sourceCellIndex).column)),
+    }].slice(-80)
+    history.forward = []
+    revealCodeDefinition(Number(definition.cell_index), Number(definition.line || 1), Number(definition.column || 1))
+  }
+
+  const navigateNotebookCodeHistory = (direction: 1 | -1): void => {
+    const history = codeNavigationHistoryRef.current
+    const source = direction < 0 ? history.back : history.forward
+    if (!source.length) return
+    const target = source[source.length - 1]
+    if (!target) return
+    const current = notebookCurrentCodeLocation()
+    if (direction < 0) {
+      history.back = source.slice(0, -1)
+      history.forward = [...history.forward, current].slice(-80)
+    } else {
+      history.forward = source.slice(0, -1)
+      history.back = [...history.back, current].slice(-80)
+    }
+    revealCodeDefinition(target.cellIndex, target.line, target.column)
+  }
+
   const applyExecutionResult = (
     notebook: NotebookDocument,
     index: number,
@@ -637,6 +806,21 @@ export function NotebookEditor({
           dependency.requirements_command ? `requirements.txt 전체 설치: ${dependency.requirements_command}` : '',
           '※ 에이전트 스튜디오는 프로젝트 가상환경을 자동 변경하지 않습니다.',
         ].filter(Boolean).join('\n')
+        outputs.push({ name: 'stderr', output_type: 'stream', text: textToNotebookSource(diagnostic + '\n') })
+      }
+
+      const missingSymbol = extractNotebookNameErrorSymbol(result)
+      if (missingSymbol) {
+        const definitionCells = findNotebookDefinitionCells(notebook, missingSymbol)
+        const candidateText = definitionCells.length
+          ? `정의 후보 셀: ${definitionCells.map(cellIndex => `Cell ${cellIndex + 1}`).join(', ')}`
+          : '현재 Notebook에서 이 이름을 정의하는 셀을 찾지 못했습니다.'
+        const diagnostic = [
+          `[NameError 안내] ${missingSymbol} 이(가) 현재 Python 실행 세션에 정의되어 있지 않습니다.`,
+          candidateText,
+          '가능한 원인: 정의 셀을 아직 실행하지 않았거나, 앞 셀이 실패했거나, Backend/Notebook 세션이 재시작되어 이전 변수 상태가 초기화되었습니다.',
+          definitionCells.length ? '정의 후보 셀을 먼저 실행한 뒤 현재 셀을 다시 실행하거나, 전체 실행을 사용하세요.' : '변수 이름과 이전 실행 결과를 확인한 뒤 다시 실행하세요.',
+        ].join('\n')
         outputs.push({ name: 'stderr', output_type: 'stream', text: textToNotebookSource(diagnostic + '\n') })
       }
     }
@@ -726,6 +910,14 @@ export function NotebookEditor({
     if (!String(pythonCode || '').trim()) return notebook
 
     setRunningCells(prev => ({ ...prev, [index]: true }))
+    executionStartedAtRef.current[index] = Date.now()
+    setExecutionHeartbeatAt(Date.now())
+    setExecutionProgressVisible(prev => ({ ...prev, [index]: false }))
+    const previousProgressTimer = executionProgressDelayRef.current[index]
+    if (previousProgressTimer) window.clearTimeout(previousProgressTimer)
+    executionProgressDelayRef.current[index] = window.setTimeout(() => {
+      setExecutionProgressVisible(prev => ({ ...prev, [index]: true }))
+    }, 650)
     pendingLiveClearWaitRef.current[index] = false
     replaceLiveOutputOnNextEventRef.current[index] = true
     // Keep the previous rendered output on screen until the first new output
@@ -747,6 +939,16 @@ export function NotebookEditor({
     } catch (error) {
       return applyExecutionResult(notebook, index, errorToExecutionResult(error))
     } finally {
+      const progressTimer = executionProgressDelayRef.current[index]
+      if (progressTimer) window.clearTimeout(progressTimer)
+      delete executionProgressDelayRef.current[index]
+      delete executionStartedAtRef.current[index]
+      setExecutionProgressVisible(prev => {
+        if (!Object.prototype.hasOwnProperty.call(prev, index)) return prev
+        const next = { ...prev }
+        delete next[index]
+        return next
+      })
       setRunningCells(prev => ({ ...prev, [index]: false }))
       pendingLiveClearWaitRef.current[index] = false
       replaceLiveOutputOnNextEventRef.current[index] = false
@@ -1126,6 +1328,9 @@ export function NotebookEditor({
         const source = notebookSourceToText(cell?.source)
         const active = index === activeCellIndex
         const running = !!runningCells[index]
+        const progressVisible = running && !!executionProgressVisible[index]
+        const executionStartedAt = Number(executionStartedAtRef.current[index] || executionHeartbeatAt)
+        const executionElapsed = formatNotebookExecutionElapsed(executionHeartbeatAt - executionStartedAt)
         const lineCount = Math.max(1, source.replace(/\r\n|\r/g, '\n').split('\n').length)
         const editorHeight = Math.min(520, Math.max(92, lineCount * 20 + 30))
 
@@ -1169,6 +1374,17 @@ export function NotebookEditor({
               </div>
             </div>
 
+            {cellType === 'code' && progressVisible && <div className="notebook-execution-progress" role="status" aria-live="polite">
+              <div className="notebook-execution-progress-head">
+                <strong>{runAllBusy ? '전체 실행 중' : '셀 실행 중'}</strong>
+                <span>{executionElapsed}</span>
+              </div>
+              <div className="notebook-execution-progress-track" role="progressbar" aria-label="Notebook Python 실행 중" aria-valuetext={`실행 중 ${executionElapsed}`}>
+                <i />
+              </div>
+              <small>Python 실행 결과를 기다리고 있습니다. 실행 시간이 길어도 이 표시가 움직이면 작업은 계속 진행 중입니다.</small>
+            </div>}
+
             {cellType === 'code'
               ? <Editor
                   height={`${editorHeight}px`}
@@ -1176,9 +1392,54 @@ export function NotebookEditor({
                   language="python"
                   defaultValue={source}
                   onChange={nextValue => updateCellSource(index, nextValue ?? '')}
-                  onMount={editor => {
+                  onMount={(editor, monaco) => {
                     cellEditorsRef.current[index] = editor as unknown as NotebookMonacoEditorLike
                     latestCellSourcesRef.current[index] = editor.getValue?.() ?? source
+                    registerEscapedDoubleQuotePairGuard(editor as unknown as any)
+                    registerCodeIntelligence(monaco, editor, {
+                      root: String(projectRoot || ''),
+                      relativePath: String(filePath || ''),
+                      language: 'python',
+                      cellIndex: index,
+                      getNotebookContent: buildLiveNotebookContent,
+                      onOpenDefinition: (definition, sourceLocation) => openNotebookDefinition(definition, sourceLocation, index),
+                    })
+                    editor.addCommand?.(monaco.KeyMod.Alt | monaco.KeyCode.LeftArrow, () => navigateNotebookCodeHistory(-1))
+                    editor.addCommand?.(monaco.KeyMod.Alt | monaco.KeyCode.RightArrow, () => navigateNotebookCodeHistory(1))
+                    editor.addAction?.({
+                      id: `theanova.llm-reference-selection.cell-${index}`,
+                      label: 'LLM 참조 문구',
+                      precondition: 'editorHasSelection',
+                      contextMenuGroupId: '9_cutcopypaste',
+                      contextMenuOrder: 3.5,
+                      run: currentEditor => {
+                        const selection = currentEditor?.getSelection?.()
+                        const model = currentEditor?.getModel?.()
+                        if (!selection || !model || selection.isEmpty?.()) return
+                        const selectedText = String(model.getValueInRange(selection) || '')
+                        if (!selectedText.trim()) return
+                        setActiveCellIndex(index)
+                        onAddLlmReference?.({
+                          path: filePath,
+                          text: selectedText,
+                          start_line: selection.startLineNumber,
+                          start_column: selection.startColumn,
+                          end_line: selection.endLineNumber,
+                          end_column: selection.endColumn,
+                          cell_index: index,
+                          source: 'notebook-code-cell-selection',
+                        })
+                        // v5.466: 직전 참조 selection이 다음 우클릭에서 다시
+                        // 사용되지 않도록 참조 등록 직후 caret로 접습니다.
+                        currentEditor?.setSelection?.({
+                          startLineNumber: selection.endLineNumber,
+                          startColumn: selection.endColumn,
+                          endLineNumber: selection.endLineNumber,
+                          endColumn: selection.endColumn,
+                        })
+                        currentEditor?.focus?.()
+                      },
+                    })
                     applyBookmarkDecorations(index, editor)
                     applyDebugDecorations(index, editor)
                     editor.onMouseDown?.((event: NotebookEditorMouseDownEventLike) => {
@@ -1238,15 +1499,11 @@ export function NotebookEditor({
                     automaticLayout: true,
                     tabSize: 4,
                     insertSpaces: true,
-                    // AgentStudio Notebook uses literal/manual typing semantics.
-                    // Typing `print(` must remain `print(` (not `print()`), and
-                    // typing a quote must not inject a matching quote that can
-                    // relocate the caret after the notebook JSON round-trip.
-                    autoClosingBrackets: 'never',
-                    autoClosingQuotes: 'never',
-                    autoClosingDelete: 'never',
-                    autoClosingOvertype: 'never',
-                    autoSurround: 'never',
+                    // v5.462: Notebook code cells use the same VS Code-style pair typing
+                    // as source editors. The cell stays uncontrolled while focused, so Monaco
+                    // can insert (), {}, [], and "" without losing the caret during the
+                    // Notebook JSON mirror update. Escaped " quotes are guarded explicitly.
+                    ...CODE_EDITOR_PAIR_TYPING_OPTIONS,
                     folding: false,
                     renderLineHighlight: 'line',
                     overviewRulerLanes: 0,
@@ -1265,6 +1522,40 @@ export function NotebookEditor({
                         path={`${getEditorModelPath(projectRoot, filePath)}?markdown=${index}`}
                         language="markdown"
                         defaultValue={source}
+                        onMount={(editor) => {
+                          editor.addAction?.({
+                            id: `theanova.llm-reference-selection.markdown-${index}`,
+                            label: 'LLM 참조 문구',
+                            precondition: 'editorHasSelection',
+                            contextMenuGroupId: '9_cutcopypaste',
+                            contextMenuOrder: 3.5,
+                            run: currentEditor => {
+                              const selection = currentEditor?.getSelection?.()
+                              const model = currentEditor?.getModel?.()
+                              if (!selection || !model || selection.isEmpty?.()) return
+                              const selectedText = String(model.getValueInRange(selection) || '')
+                              if (!selectedText.trim()) return
+                              setActiveCellIndex(index)
+                              onAddLlmReference?.({
+                                path: filePath,
+                                text: selectedText,
+                                start_line: selection.startLineNumber,
+                                start_column: selection.startColumn,
+                                end_line: selection.endLineNumber,
+                                end_column: selection.endColumn,
+                                cell_index: index,
+                                source: 'notebook-markdown-selection',
+                              })
+                              currentEditor?.setSelection?.({
+                                startLineNumber: selection.endLineNumber,
+                                startColumn: selection.endColumn,
+                                endLineNumber: selection.endLineNumber,
+                                endColumn: selection.endColumn,
+                              })
+                              currentEditor?.focus?.()
+                            },
+                          })
+                        }}
                         onChange={nextValue => updateCellSource(index, nextValue ?? '')}
                         theme="vs-dark"
                         options={{

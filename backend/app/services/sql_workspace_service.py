@@ -1177,6 +1177,20 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _normalize_sql_text(statement: str) -> str:
+    """Normalize editor/file SQL before parsing or execution.
+
+    UTF-8 BOM files decode to a leading U+FEFF when read with plain ``utf-8``.
+    PostgreSQL/psycopg treats that character as SQL input and may fail at line 1
+    before the first ``--`` comment.  Strip only leading BOM markers so SQL
+    copied from old AgentStudio diagnostic downloads remains executable.
+    """
+    text = str(statement or "")
+    while text.startswith("\ufeff"):
+        text = text[1:]
+    return text
+
+
 def _split_sql_by_semicolon(statement: str) -> list[str]:
     """Split SQL on top-level semicolons while preserving quoted/comment blocks.
 
@@ -1184,7 +1198,7 @@ def _split_sql_by_semicolon(statement: str) -> list[str]:
     protects the common cases needed by the SQL Workspace: quoted strings,
     identifiers, line/block comments, and PostgreSQL dollar-quoted bodies.
     """
-    text = str(statement or "")
+    text = _normalize_sql_text(statement)
     parts: list[str] = []
     buf: list[str] = []
     i = 0
@@ -1328,7 +1342,7 @@ def _split_sql_statements(statement: str, db_type: str) -> list[str]:
 
 
 def execute(root: str, sql: str, max_rows: int = 1000) -> dict[str, Any]:
-    statement = str(sql or "")
+    statement = _normalize_sql_text(sql)
     if not statement.strip():
         raise RuntimeError("실행할 SQL이 없습니다.")
 
@@ -1364,6 +1378,7 @@ def execute(root: str, sql: str, max_rows: int = 1000) -> dict[str, Any]:
         result_sets: list[dict[str, Any]] = []
 
         for index, current in enumerate(statements, start=1):
+            current = _normalize_sql_text(current)
             try:
                 cursor.execute(current)
             except Exception as exc:

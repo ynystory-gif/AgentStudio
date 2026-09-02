@@ -1352,6 +1352,7 @@ def _add_ui_layout_slide(prs, payload: dict[str, Any], page: int, version: str):
     x, y, w, h = 0.62, 2.30, 7.15, 4.45
     frame = _add_box(slide, x, y, w, h, fill="F7FBFE", line="96BBD2", radius=True)
     header = bool(layout.get("header", True)); sidebar = bool(layout.get("sidebar", False)); footer = bool(layout.get("footer", False)); user_menu = bool(layout.get("user_menu", True))
+    sidebar_menu_icons = bool(layout.get("sidebar_menu_icons", False)); header_icons = bool(layout.get("header_icons", False))
     top = y + 0.08
     if header:
         _add_box(slide, x+0.10, top, w-0.20, 0.52, fill="DDF1FA", line="B8D6E7", radius=True)
@@ -1391,7 +1392,7 @@ def _add_ui_layout_slide(prs, payload: dict[str, Any], page: int, version: str):
     _add_text(slide,"선택 구성",panel_x,1.45,4.55,0.28,size=12,bold=True,color=C["navy"])
     items=[
         ("App type", layout.get("app_type")), ("Navigation", layout.get("navigation")), ("Main layout", layout.get("main_layout")),
-        ("Header", "사용" if header else "없음"), ("Sidebar", "접기 가능" if sidebar and layout.get("sidebar_collapsible") else ("사용" if sidebar else "없음")),
+        ("Header", ("사용 · 아이콘" if header_icons else "사용") if header else "없음"), ("Sidebar", (("접기 가능" if layout.get("sidebar_collapsible") else "사용") + (" · 아이콘" if sidebar_menu_icons else "")) if sidebar else "없음"),
         ("Footer", "사용" if footer else "없음"), ("User menu", _safe_text(layout.get("user_menu_position"),"사용" if user_menu else "없음",30) if user_menu else "없음"),
         ("Theme", layout.get("theme_name") if layout.get("theme") == "custom" else layout.get("theme")), ("Responsive", "Yes" if layout.get("responsive",True) else "No"),
     ]

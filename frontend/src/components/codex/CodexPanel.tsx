@@ -11,9 +11,26 @@ import type {
   CodexTranscriptItem
 } from '../../types/codex'
 
+type CodexProposalBlock = {
+  type: 'explanation' | 'code'
+  content: string
+  language?: string
+}
+
+type CodexCodeProposal = {
+  source: 'codex'
+  question: string
+  responseText: string
+  blocks: CodexProposalBlock[]
+  codeBlockCount: number
+  activeFile: string
+  createdAt: string
+}
+
 type Props = {
   projectRoot: string
   activeFile?: string
+  onCodeProposal?: (proposal: CodexCodeProposal) => void
 }
 
 type CodexWireEvent = {
@@ -92,6 +109,34 @@ function toText(value: unknown): string {
   try { return JSON.stringify(value, null, 2) } catch { return String(value) }
 }
 
+
+function parseCodexCodeProposal(text: string): { blocks: CodexProposalBlock[]; codeBlockCount: number } | null {
+  const source = String(text || '')
+  if (!source.includes('```')) return null
+  const blocks: CodexProposalBlock[] = []
+  const pattern = /```([^\n`]*)\n?([\s\S]*?)```/g
+  let cursor = 0
+  let match: RegExpExecArray | null
+  let codeBlockCount = 0
+  while ((match = pattern.exec(source)) !== null) {
+    const explanation = source.slice(cursor, match.index).trim()
+    if (explanation) blocks.push({ type: 'explanation', content: explanation })
+    const content = String(match[2] || '').replace(/\s+$/g, '')
+    if (content.trim()) {
+      codeBlockCount += 1
+      blocks.push({
+        type: 'code',
+        language: String(match[1] || '').trim().split(/\s+/)[0] || 'text',
+        content
+      })
+    }
+    cursor = pattern.lastIndex
+  }
+  const tail = source.slice(cursor).trim()
+  if (tail) blocks.push({ type: 'explanation', content: tail })
+  return codeBlockCount > 0 ? { blocks, codeBlockCount } : null
+}
+
 function transcriptFromThread(thread: any): CodexTranscriptItem[] {
   const items: CodexTranscriptItem[] = []
   const turns = Array.isArray(thread?.turns) ? thread.turns : []
@@ -131,7 +176,7 @@ function transcriptFromThread(thread: any): CodexTranscriptItem[] {
   return items
 }
 
-export function CodexPanel({ projectRoot, activeFile = '' }: Props) {
+export function CodexPanel({ projectRoot, activeFile = '', onCodeProposal }: Props) {
   const [status, setStatus] = useState<CodexStatus>({ installed: false, running: false, initialized: false })
   const [busy, setBusy] = useState(false)
   const [input, setInput] = useState('')
@@ -157,6 +202,12 @@ export function CodexPanel({ projectRoot, activeFile = '' }: Props) {
   const activeAssistantIdRef = useRef('')
   const autoStartAttemptedRef = useRef('')
   const settingsMenuRef = useRef<HTMLDivElement | null>(null)
+  const lastSubmittedQuestionRef = useRef('')
+  const activeFileRef = useRef(activeFile)
+
+  useEffect(() => {
+    activeFileRef.current = activeFile
+  }, [activeFile])
 
   const models = status.models || []
   const selectedModel = useMemo(() => models.find(row => modelId(row) === model) || null, [models, model])
@@ -371,11 +422,35 @@ export function CodexPanel({ projectRoot, activeFile = '' }: Props) {
         if (type === 'agentMessage' && completed) {
           const text = toText(item.text || item.content)
           if (text) {
-            const activeId = activeAssistantIdRef.current
-            if (activeId) {
-              setTranscript(prev => prev.map(row => row.id === activeId ? { ...row, text } : row))
+            const parsedProposal = parseCodexCodeProposal(text)
+            if (parsedProposal && onCodeProposal) {
+              const activeId = activeAssistantIdRef.current
+              onCodeProposal({
+                source: 'codex',
+                question: lastSubmittedQuestionRef.current,
+                responseText: text,
+                blocks: parsedProposal.blocks,
+                codeBlockCount: parsedProposal.codeBlockCount,
+                activeFile: activeFileRef.current,
+                createdAt: new Date().toISOString()
+              })
+              setTranscript(prev => {
+                const filtered = activeId ? prev.filter(row => row.id !== activeId) : prev.filter(row => row.id !== id)
+                return [...filtered, {
+                  id: nowId('proposal'),
+                  kind: 'assistant',
+                  text: `코드가 포함된 답변을 AI 변경 제안으로 등록했습니다. 코드 블록 ${parsedProposal.codeBlockCount}개`,
+                  createdAt: Date.now()
+                }]
+              })
+              activeAssistantIdRef.current = ''
             } else {
-              setTranscript(prev => [...prev, { id, kind: 'assistant', text, createdAt: Date.now() }])
+              const activeId = activeAssistantIdRef.current
+              if (activeId) {
+                setTranscript(prev => prev.map(row => row.id === activeId ? { ...row, text } : row))
+              } else {
+                setTranscript(prev => [...prev, { id, kind: 'assistant', text, createdAt: Date.now() }])
+              }
             }
           }
         } else if (type === 'commandExecution') {
@@ -414,7 +489,7 @@ export function CodexPanel({ projectRoot, activeFile = '' }: Props) {
       if (socketRef.current === ws) socketRef.current = null
       try { ws.close() } catch { /* noop */ }
     }
-  }, [appendAssistantDelta, loadThreads, pushTranscript, refreshStatus])
+  }, [appendAssistantDelta, loadThreads, onCodeProposal, pushTranscript, refreshStatus])
 
   useEffect(() => {
     const element = transcriptRef.current
@@ -491,6 +566,7 @@ export function CodexPanel({ projectRoot, activeFile = '' }: Props) {
     if (!text || busy || turnId || !status.initialized || !projectRoot) return
     if (attachments.length && !attachmentAnalysis.ready) return
     setInput('')
+    lastSubmittedQuestionRef.current = text
     const attachmentLabel = attachments.length
       ? `\n\n📎 참고 파일: ${attachments.map(item => item.name).join(', ')}`
       : ''

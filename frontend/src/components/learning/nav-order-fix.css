@@ -1,0 +1,4 @@
+.ux-global-nav>.nav-spacer{order:90!important}
+.ux-global-nav>button[data-agentstudio-learning-nav="true"]{order:0!important}
+.ux-global-nav>button:nth-of-type(6){order:91!important}
+.ux-global-nav>.nav-spacer+button{order:92!important}

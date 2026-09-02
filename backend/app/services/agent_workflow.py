@@ -53,9 +53,13 @@ class AgentState(TypedDict, total=False):
     architecture_repair_iteration: int
     database_plan: dict
     target_agent_workflow: dict
+    development_stage_plan: dict
+    development_workflow: dict
+    active_development_stage: dict
     file_plan: dict
     settings_plan: dict
     test_environment_plan: dict
+    three_d_agent_plan: dict
     settings_path_normalization: dict
     settings_requirement_spec: dict
     settings_schema: dict
@@ -101,6 +105,210 @@ class AgentState(TypedDict, total=False):
 def _bundle(state: AgentState) -> dict:
     value = state.get("design_bundle")
     return value if isinstance(value, dict) else {}
+
+
+def _code_documentation_policy(state: AgentState) -> dict:
+    """Return the user-selected generated-code documentation policy."""
+    raw = (_bundle(state).get("code_documentation") or {}) if isinstance(_bundle(state), dict) else {}
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "enabled": bool(raw.get("enabled")),
+        "level": str(raw.get("level") or "standard"),
+        "preserve_existing_comments": raw.get("preserve_existing_comments", True) is not False,
+        "skip_trivial_locals": raw.get("skip_trivial_locals", True) is not False,
+    }
+
+
+def _code_documentation_instruction(state: AgentState) -> str:
+    policy = _code_documentation_policy(state)
+    if not policy.get("enabled"):
+        return ""
+    return (
+        "\n\n[사용자 선택: 변수·메소드 설명 주석 추가 - 반드시 적용]\n"
+        "생성하거나 수정하는 소스에는 유지보수에 도움이 되는 설명 주석을 함께 작성하십시오. "
+        "클래스의 역할, 공개 함수/메소드의 목적·주요 파라미터·반환값·중요 예외를 설명하고, "
+        "주요 필드/상수/설정 변수에는 값이 무엇을 의미하고 어디에 쓰이는지 설명하십시오. "
+        "Python은 docstring과 필요한 # 주석, TypeScript/JavaScript는 JSDoc, C#은 XML documentation, "
+        "Java는 Javadoc 등 해당 언어의 표준 문서화 형식을 사용하십시오. "
+        "단순 반복문의 index, 임시 문자열처럼 이름만으로 명확한 지역 변수에는 주석을 남발하지 마십시오. "
+        "코드를 그대로 한국어로 번역하는 주석보다 왜 필요한지와 역할을 설명하십시오. "
+        "기존 파일을 수정할 때 이미 존재하는 유효한 주석/docstring은 삭제하거나 불필요하게 다시 작성하지 마십시오."
+    )
+
+
+USER_CODING_STYLE_DEFAULTS = {
+    "meaningful_names": True,
+    "uppercase_constants": True,
+    "snake_case_functions": True,
+    "pascal_case_classes": True,
+    "type_hints": True,
+    "function_docstrings": True,
+    "notebook_single_responsibility": True,
+    "refactor_repetition": True,
+    "labeled_outputs": True,
+    "avoid_magic_numbers": True,
+}
+
+
+def _user_coding_style_policy(state: AgentState) -> dict:
+    """Return the user-selected project code style profile from the design bundle."""
+    raw = (_bundle(state).get("user_coding_style") or {}) if isinstance(_bundle(state), dict) else {}
+    if not isinstance(raw, dict) or not raw:
+        return {"enabled": False, **USER_CODING_STYLE_DEFAULTS}
+    return {
+        "enabled": raw.get("enabled", True) is not False,
+        **{
+            key: raw.get(key, default) is not False
+            for key, default in USER_CODING_STYLE_DEFAULTS.items()
+        },
+    }
+
+
+def _user_coding_style_instruction(state: AgentState) -> str:
+    policy = _user_coding_style_policy(state)
+    if not policy.get("enabled"):
+        return ""
+
+    rules: list[str] = []
+    if policy.get("meaningful_names"):
+        rules.append("변수·함수·클래스 이름은 역할과 데이터 의미가 드러나게 작성하고 불필요한 축약어를 피하십시오.")
+    if policy.get("uppercase_constants"):
+        rules.append("Python 등 해당 언어 관례에서 상수는 UPPER_SNAKE_CASE로 구분하고 반복 설정값을 코드 곳곳에 흩어놓지 마십시오.")
+    if policy.get("snake_case_functions"):
+        rules.append("Python 함수/메소드는 snake_case를 기본으로 하고 외부 Framework 계약이 요구하는 이름은 해당 표준을 우선하십시오.")
+    if policy.get("pascal_case_classes"):
+        rules.append("클래스/타입 이름은 PascalCase를 기본으로 하고 언어 또는 Framework의 공식 naming convention과 충돌하면 공식 규칙을 우선하십시오.")
+    if policy.get("type_hints"):
+        rules.append("타입 표현이 가능한 언어에서는 공개 함수/메소드의 파라미터와 반환 타입을 명확히 작성하고 Python에서는 가능한 범위에서 Type Hint를 사용하십시오.")
+    if policy.get("function_docstrings") and _code_documentation_policy(state).get("enabled"):
+        rules.append("설명 주석 옵션이 켜져 있으므로 공개 함수/메소드에는 해당 언어 표준 Docstring/JSDoc/XML Documentation을 작성하십시오.")
+    if policy.get("notebook_single_responsibility"):
+        rules.append("Jupyter Notebook을 생성/수정할 때 환경설정, 로딩, 전처리, Chunking, Embedding, Retrieval, Prompt, LLM 호출, 결과 확인처럼 의미가 다른 단계는 가능한 한 한 Cell에 한 역할로 분리하십시오.")
+    if policy.get("refactor_repetition"):
+        rules.append("동일하거나 유사한 처리 로직이 반복되면 재사용 가능한 함수/메소드/Service로 분리하되 교육용 최소 예제의 흐름 가독성을 해치도록 과도하게 추상화하지 마십시오.")
+    if policy.get("labeled_outputs"):
+        rules.append("Notebook/CLI의 주요 진행 출력에는 [PDF 로딩], [Chunking], [검색], [LLM]처럼 단계 Label을 사용해 실행 결과의 출처를 쉽게 식별할 수 있게 하십시오.")
+    if policy.get("avoid_magic_numbers"):
+        rules.append("반복되는 모델명·임계값·Chunk 크기·Top-K·경로·Timeout 등의 Magic Number/String은 상수, Settings 또는 환경설정으로 분리하십시오.")
+
+    if not rules:
+        return ""
+    return (
+        "\n\n[사용자 선택: 기본 코딩 스타일 - 반드시 적용]\n"
+        + "\n".join(f"{index}. {rule}" for index, rule in enumerate(rules, start=1))
+        + "\n기존 프로젝트를 수정할 때는 이미 사용 중인 언어/Framework 표준과 공개 API 계약을 깨지 않는 범위에서 위 규칙을 적용하십시오."
+    )
+
+
+def _nearby_comment(lines: list[str], line_no: int, suffix: str) -> bool:
+    """Conservative check for a documentation comment immediately above a symbol."""
+    start = max(0, int(line_no or 1) - 6)
+    window = "\n".join(lines[start:max(0, int(line_no or 1) - 1)])
+    suffix = str(suffix or "").casefold()
+    if suffix in {".js", ".jsx", ".ts", ".tsx", ".java"}:
+        return "/**" in window or any(row.strip().startswith("//") for row in window.splitlines()[-3:])
+    if suffix == ".cs":
+        return any(row.strip().startswith("///") for row in window.splitlines()[-4:])
+    return False
+
+
+def _code_documentation_findings(content: str, suffix: str) -> dict:
+    """Lightweight language-aware audit used only when the user enabled documentation comments."""
+    suffix = str(suffix or "").casefold()
+    lines = str(content or "").splitlines()
+    missing_symbols: list[dict] = []
+    missing_variables: list[dict] = []
+
+    if suffix == ".py":
+        try:
+            import ast
+            tree = ast.parse(content)
+        except (SyntaxError, ValueError, TypeError):
+            return {"missing_symbols": [], "missing_variables": []}
+
+        def add_symbol(node, kind: str):
+            name = str(getattr(node, "name", "") or "")
+            if not name or name.startswith("_") or name.startswith("test_"):
+                return
+            if not ast.get_docstring(node, clean=False):
+                missing_symbols.append({"kind": kind, "name": name, "line": int(getattr(node, "lineno", 1) or 1)})
+
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                add_symbol(node, "class")
+                for child in node.body:
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        add_symbol(child, "method")
+                    elif isinstance(child, (ast.Assign, ast.AnnAssign)):
+                        names = []
+                        if isinstance(child, ast.Assign):
+                            for target in child.targets:
+                                if isinstance(target, ast.Name):
+                                    names.append(target.id)
+                        elif isinstance(child.target, ast.Name):
+                            names.append(child.target.id)
+                        for name in names:
+                            if name.isupper() and not _python_preceding_comment(lines, int(getattr(child, "lineno", 1) or 1)):
+                                missing_variables.append({"kind": "class_constant", "name": name, "line": int(getattr(child, "lineno", 1) or 1)})
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                add_symbol(node, "function")
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                names = []
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            names.append(target.id)
+                elif isinstance(node.target, ast.Name):
+                    names.append(node.target.id)
+                for name in names:
+                    if name.isupper() and not _python_preceding_comment(lines, int(getattr(node, "lineno", 1) or 1)):
+                        missing_variables.append({"kind": "constant", "name": name, "line": int(getattr(node, "lineno", 1) or 1)})
+        return {"missing_symbols": missing_symbols, "missing_variables": missing_variables}
+
+    if suffix in {".js", ".jsx", ".ts", ".tsx"}:
+        symbol_patterns = (
+            ("function", re.compile(r"^\s*export\s+(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)")),
+            ("class", re.compile(r"^\s*export\s+(?:default\s+)?class\s+([A-Za-z_$][\w$]*)")),
+            ("function", re.compile(r"^\s*export\s+const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>")),
+        )
+        for index, line in enumerate(lines, 1):
+            for kind, pattern in symbol_patterns:
+                match = pattern.search(line)
+                if match and not _nearby_comment(lines, index, suffix):
+                    missing_symbols.append({"kind": kind, "name": match.group(1), "line": index})
+            var_match = re.search(r"^\s*export\s+const\s+([A-Z][A-Z0-9_]*)\b", line)
+            if var_match and not _nearby_comment(lines, index, suffix):
+                missing_variables.append({"kind": "constant", "name": var_match.group(1), "line": index})
+        return {"missing_symbols": missing_symbols, "missing_variables": missing_variables}
+
+    if suffix == ".cs":
+        for index, line in enumerate(lines, 1):
+            class_match = re.search(r"^\s*public\s+(?:sealed\s+|abstract\s+|partial\s+)?class\s+(\w+)", line)
+            method_match = re.search(r"^\s*public\s+(?:static\s+|async\s+|virtual\s+|override\s+|sealed\s+|new\s+)*[\w<>,?\[\].]+\s+(\w+)\s*\(", line)
+            match = class_match or method_match
+            if match and not _nearby_comment(lines, index, suffix):
+                missing_symbols.append({"kind": "class" if class_match else "method", "name": match.group(1), "line": index})
+        return {"missing_symbols": missing_symbols, "missing_variables": []}
+
+    if suffix == ".java":
+        for index, line in enumerate(lines, 1):
+            class_match = re.search(r"^\s*public\s+(?:final\s+|abstract\s+)?class\s+(\w+)", line)
+            method_match = re.search(r"^\s*public\s+(?:static\s+|final\s+|synchronized\s+)*[\w<>,?\[\].]+\s+(\w+)\s*\(", line)
+            match = class_match or method_match
+            if match and not _nearby_comment(lines, index, suffix):
+                missing_symbols.append({"kind": "class" if class_match else "method", "name": match.group(1), "line": index})
+        return {"missing_symbols": missing_symbols, "missing_variables": []}
+
+    return {"missing_symbols": [], "missing_variables": []}
+
+
+def _python_preceding_comment(lines: list[str], line_no: int) -> bool:
+    start = max(0, int(line_no or 1) - 4)
+    for row in lines[start:max(0, int(line_no or 1) - 1)]:
+        if row.strip().startswith("#"):
+            return True
+    return False
 
 
 _RUNTIME_CONTEXT_DIRS = {
@@ -227,7 +435,11 @@ async def requirement_analysis_node(state: AgentState):
         "design_bundle": design,
         "requirement_spec": design.get("requirement_spec") or {},
         "database_plan": design.get("database_plan") or {},
+        "development_stage_plan": design.get("development_stage_plan") or {},
+        "development_workflow": design.get("development_workflow") or {},
+        "active_development_stage": design.get("active_development_stage") or {},
         "test_environment_plan": design.get("test_environment_plan") or {},
+        "three_d_agent_plan": design.get("three_d_agent_plan") or {},
         "status": "REQUIREMENTS_ANALYZED",
     }
 
@@ -912,6 +1124,15 @@ async def project_file_plan_node(state: AgentState):
         design_bundle=bundle,
     )
 
+    development_workflow = bundle.get("development_workflow") or state.get("development_workflow") or {}
+    development_stages = development_workflow.get("stages") if isinstance(development_workflow, dict) else []
+    if development_stages:
+        first_stage = development_stages[0]
+        for row in value.get("new_files") or []:
+            if isinstance(row, dict) and not row.get("development_stage_id"):
+                row["development_stage_id"] = first_stage.get("id") or "STAGE_1"
+                row["development_stage_order"] = int(first_stage.get("order") or 1)
+
     coding_style = coding_rules_for_request(
         request=state["request"],
         project_scope=True,
@@ -1323,6 +1544,7 @@ async def approval_node(state: AgentState):
                     ),
                     "file_plan": state.get("file_plan", {}),
                     "settings_plan": state.get("settings_plan", {}),
+                    "three_d_agent_plan": state.get("three_d_agent_plan", {}) or _bundle(state).get("three_d_agent_plan", {}),
                 },
             )
         )
@@ -2351,6 +2573,14 @@ def _repair_targets_from_validation(
         for item in artifact.get("coding_style_errors") or []
         if isinstance(item, dict)
     ]
+    documentation = [
+        {
+            **item,
+            "relative_path": rel(str(item.get("path") or "")),
+        }
+        for item in artifact.get("code_documentation_errors") or []
+        if isinstance(item, dict)
+    ]
 
     return {
         "missing_files": missing,
@@ -2358,6 +2588,7 @@ def _repair_targets_from_validation(
         "placeholder_files": placeholders,
         "placeholder_details": placeholder_details,
         "coding_style_errors": style,
+        "code_documentation_errors": documentation,
     }
 
 
@@ -2372,6 +2603,7 @@ def _repair_required_paths(
     for key in (
         "architecture_errors",
         "coding_style_errors",
+        "code_documentation_errors",
     ):
         for item in targets.get(key) or []:
             path = str(item.get("relative_path") or "").replace("\\", "/").casefold()
@@ -2637,6 +2869,8 @@ async def _focused_test_failure_repair_plan(
               "5. Python이면 들여쓰기/문법/import를 포함해 파일 단위 문법이 유효해야 합니다.\n"
               "6. TODO/placeholder/stub를 남기지 않습니다.\n"
               "7. 다른 파일은 수정하지 않습니다.\n"
+            + _code_documentation_instruction(state)
+            + _user_coding_style_instruction(state)
         )
         raw_plan = await create_patch(
             request,
@@ -2880,6 +3114,33 @@ def _normalize_generated_fastapi_imports(project_root: str) -> dict:
         "working_directory": str(backend_dir),
     }
 
+def _blender_3d_generation_instruction(build_context: dict, *, editor_mode: bool = False) -> str:
+    plan = build_context.get("three_d_agent_plan") or {}
+    if not isinstance(plan, dict) or str(plan.get("type") or "").upper() != "BLENDER_3D":
+        return ""
+    base = (
+        " [Blender MCP 3D Agent 필수 계약] "
+        "Blender MCP는 실행 Tool 계층으로만 사용하고, Agent가 Intent Router → 3D Schema Router → "
+        "Structured Extraction(Pydantic SceneSpec) → Validator → LangGraph Scene State → Blender MCP → "
+        "Viewport/Render Vision QA → bounded repair → Render/Export를 책임지게 구현하십시오. "
+        "Scene State에는 scene_objects, selected_objects, materials, textures, camera, lights, current_step, "
+        "completed_steps, failed_steps, render_status, output_files를 유지하십시오. "
+        "MCP success만으로 완료 처리하지 말고 실제 Scene 상태와 Viewport/Render 결과를 검증하십시오. "
+        "Blender MCP Tool은 Registry의 name/description/inputSchema/capability/risk를 분석해 선택하고, "
+        "임의 Python/Script 실행은 고위험 Tool로 분류하여 승인 정책을 적용하십시오. "
+        "stdio/streamable_http Transport는 Adapter에서 분리하고 Output/Asset 허용 Root 밖의 파일 작업을 금지하십시오. "
+        "필수 테스트는 SceneSpec Validator, Blender MCP 계약, 3D Workflow, Regression을 포함하십시오. "
+    )
+    if editor_mode:
+        base += (
+            "Agent Editor 증분 수정에서는 현재 Agent 소스/Architecture/Workflow를 먼저 기준으로 삼고, "
+            "변경 요구의 영향 범위와 수정 파일만 계산해 부분 수정하십시오. 기존 SceneSpec/MCP/Scene State/Render 계약과 "
+            "변경 무관 기능을 보존하고, 수정 후 기존 3D 핵심 기능 Regression Test와 As-Built 검증을 반드시 수행하십시오. "
+            "전체 프로젝트를 재생성하거나 정상 파일을 대량 교체하지 마십시오. "
+        )
+    return base
+
+
 def _incremental_revision_info(state: AgentState) -> dict:
     runtime = (_bundle(state).get("design_runtime") or {}) if isinstance(_bundle(state), dict) else {}
     value = runtime.get("incremental_revision") or {}
@@ -2930,6 +3191,8 @@ def _incremental_focus_paths(state: AgentState, revision: dict) -> set[str]:
         add_matching(("llm", "provider", "model", "config", "settings"))
     if "mcp" in groups or "tool_mcp_plan" in affected:
         add_matching(("mcp", "tool"))
+    if "agent_specialization" in groups or "three_d_agent_plan" in affected:
+        add_matching(("blender", "scene", "3d", "viewport", "render", "asset", "mcp", "workflow", "validator"))
     if "database" in groups or "database_plan" in affected:
         add_matching(("database", "db", "repository", "model", "schema", "migration"))
     if "auth" in groups:
@@ -2964,9 +3227,15 @@ async def code_generation_node(state: AgentState):
         "agent_architecture": state.get("agent_architecture", {}),
         "database_plan": state.get("database_plan", {}) or design_bundle.get("database_plan", {}),
         "target_agent_workflow": state.get("target_agent_workflow", {}),
+        "development_stage_plan": state.get("development_stage_plan", {}) or design_bundle.get("development_stage_plan", {}),
+        "development_workflow": state.get("development_workflow", {}) or design_bundle.get("development_workflow", {}),
+        "active_development_stage": state.get("active_development_stage", {}) or design_bundle.get("active_development_stage", {}),
+        "code_documentation": _code_documentation_policy(state),
+        "user_coding_style": _user_coding_style_policy(state),
         "file_plan": state.get("file_plan", {}),
         "settings_plan": state.get("settings_plan", {}),
         "test_environment_plan": state.get("test_environment_plan", {}) or design_bundle.get("test_environment_plan", {}),
+        "three_d_agent_plan": state.get("three_d_agent_plan", {}) or design_bundle.get("three_d_agent_plan", {}),
         "settings_schema": state.get("settings_schema", {}),
         "settings_ui_plan": state.get("settings_ui_plan", {}),
         # 전체 Coding Style rule/prompt는 create_patch()가 한 번만 주입합니다.
@@ -2981,6 +3250,21 @@ async def code_generation_node(state: AgentState):
             state.get("file_plan") or {},
         ),
     }
+
+    development_workflow = build_context.get("development_workflow") or {}
+    development_stage_instruction = ""
+    if development_workflow.get("stages"):
+        development_stage_instruction = (
+            "\n\n[사용자 승인 개발 Stage Workflow - 반드시 준수]\n"
+            + json.dumps(development_workflow, ensure_ascii=False, indent=2)
+            + "\nStage 순서를 무시해 한 번에 범위를 섞지 마십시오. 파일의 development_stage_id를 보존하고, 각 Stage의 deliverables/validation 경계를 지키십시오. "
+            "완료된 Stage 기능을 이후 Stage에서 불필요하게 다시 작성하지 말고, 실패 시 해당 Stage 범위만 수정할 수 있도록 변경 경계를 유지하십시오."
+        )
+
+    three_d_generation_instruction = _blender_3d_generation_instruction(build_context, editor_mode=False)
+    three_d_editor_instruction = _blender_3d_generation_instruction(build_context, editor_mode=True)
+    code_documentation_instruction = _code_documentation_instruction(state)
+    user_coding_style_instruction = _user_coding_style_instruction(state)
 
     latest_debug = _latest_debug_entry(state)
     test_repair_mode = (
@@ -3057,6 +3341,9 @@ async def code_generation_node(state: AgentState):
             "missing_required_file은 반드시 create_file=true로 생성하고, missing_component는 component_file_map의 실제 파일에 구현하십시오. "
             "이미 검증된 기능을 삭제하거나 전체 프로젝트를 불필요하게 재작성하지 마십시오. "
             "Workflow/LangGraph/DB/MCP 계약은 확정 설계를 유지하십시오. 수정 후 정적 As-Built 분석에서 증거가 확인되도록 실제 코드를 구현하십시오."
+            + three_d_editor_instruction
+            + code_documentation_instruction
+            + user_coding_style_instruction
         )
         try:
             plan = await create_patch(
@@ -3168,8 +3455,8 @@ async def code_generation_node(state: AgentState):
             + emergency_repair_instruction
             + "이전 전체 Code Plan을 반복하지 마십시오. "
             "위 missing_files는 반드시 create_file=true로 생성하고, "
-            "architecture_errors / placeholder_files / coding_style_errors는 "
-            "해당 파일만 실제 수정하십시오. "
+            "architecture_errors / placeholder_files / coding_style_errors / code_documentation_errors는 "
+            "해당 파일만 실제 수정하십시오. code_documentation_errors는 사용자 선택 설명 주석 정책의 누락이므로 기존 기능을 바꾸지 말고 문서화만 보완하십시오. "
             "placeholder_details의 line/reason/snippet은 검증기가 실제로 발견한 미구현 근거입니다. "
             "해당 미구현 로직을 동작 가능한 구현으로 교체하고 같은 marker가 남지 않게 하십시오. "
             "React/HTML의 placeholder= 속성은 정상 입력 힌트이므로 제거하거나 미구현 코드로 취급하지 마십시오. "
@@ -3181,6 +3468,9 @@ async def code_generation_node(state: AgentState):
             "React + TypeScript 요구이면 App.tsx/main.tsx와 분리된 Layout/Header/Sidebar/Footer/Page 구조를 유지하고 .jsx/.js로 후퇴하지 마십시오. "
             "UI Layout Runtime 정책이 있으면 메뉴/탭 이동으로 Agent run을 중단하지 말고 session_id/run_id 기반 Backend Runtime 유지, Frontend 상태 복원, WebSocket/SSE 재연결·run 재조회를 보존하십시오. "
             "Generated Agent Test Environment 정책이 있으면 테스트 데이터 격리, 권한별 테스트 계정, 관리자 impersonation, production 거부 계약을 삭제하거나 약화하지 마십시오."
+            + three_d_editor_instruction
+            + code_documentation_instruction
+            + user_coding_style_instruction
         )
 
         try:
@@ -3285,8 +3575,11 @@ async def code_generation_node(state: AgentState):
             + "\n\n전체 프로젝트를 처음부터 다시 생성하지 마십시오. 기존 정상 파일은 보존하고 이번 변경에 영향받은 파일만 수정하십시오. "
             "새 설계에서 추가된 required 파일은 생성할 수 있습니다. 변경과 무관한 파일은 changes[]에 넣지 마십시오. "
             "ui_layout 변경분에 실행/상태 유지 설정이 포함되면 기존 Agent Runtime을 UI component lifecycle에 종속시키지 말고, 상태 store·복원·실행 상태 표시·알림·WebSocket/SSE 재연결 정책만 필요한 파일에 증분 반영하십시오. "
-            "ui_layout.theme가 custom이면 theme_id/theme_name/theme_tokens/component_rules/layout_rules를 보존하고 기존 Frontend 기술에 맞는 native Theme 방식으로 증분 스타일링하십시오. component_rules.menu.normal/hover/active가 있으면 메뉴 기본·마우스 오버·활성 상태를 반영하고, submenu/user_menu/button/input/card의 hover/focus/open 상태 규칙도 존재하는 범위에서 그대로 반영하십시오. React/Vue/Angular/Svelte/Next/Nuxt/Astro/HTML/Streamlit/Gradio/NiceGUI/Blazor/React Native/Flutter 등 특정 Framework 하나로 강제하지 마십시오. 참조 사이트의 로고·콘텐츠는 복제하지 마십시오. "
+            "ui_layout.theme가 custom이면 theme_id/theme_name/theme_tokens/component_rules/layout_rules를 보존하고 기존 Frontend 기술에 맞는 native Theme 방식으로 증분 스타일링하십시오. component_rules.menu.normal/hover/active가 있으면 메뉴 기본·마우스 오버·활성 상태를 반영하고, transition/transform/opacity/filter/boxShadow/textDecoration/fontWeight/padding/borderBottom 및 motionTransition 같은 동작 속성도 존재하는 범위에서 실제 interaction으로 구현하십시오. 원본 animation keyframe 이름 자체를 복제하지 말고 감지된 duration/timing/transform/opacity를 해당 Frontend의 안전한 transition/animation으로 재현하십시오. submenu/user_menu/button/input/card의 hover/focus/open 상태 규칙도 존재하는 범위에서 그대로 반영하십시오. layout_rules.layoutContract.navigation.presentation.mode가 icon_text이거나 sourceNavigationPresentation.mode가 icon_text이면 메뉴를 '아이콘 + 텍스트' 구조로 구현하고 감지된 icon_side/icon_size/gap을 최대한 유지하십시오. 원본 사이트의 독점 SVG path를 복제하지 말고 해당 Frontend의 표준 아이콘 라이브러리 또는 의미상 동등한 일반 아이콘을 사용하십시오. ui_layout.sidebar_menu_icons=true이면 Sidebar와 모바일 Drawer의 각 Navigation 항목을 반드시 '의미상 맞는 표준 아이콘 + 텍스트'로 구현하고, false이면 Theme의 명시적 icon_text 근거가 없는 한 아이콘을 강제하지 마십시오. ui_layout.header_icons=true이면 Header의 상단 Navigation 및 검색·알림·설정 등 주요 Action에 의미상 맞는 표준 아이콘을 배치하고 Hover/Active Theme 상태도 동일하게 적용하십시오. React/Vue/Angular/Svelte/Next/Nuxt/Astro/HTML/Streamlit/Gradio/NiceGUI/Blazor/React Native/Flutter 등 특정 Framework 하나로 강제하지 마십시오. 참조 사이트의 로고·콘텐츠는 복제하지 마십시오. "
             "auth/role/permission/database/상품/주문 변경으로 test_environment_plan이 바뀌면 Seed Data·권한별 테스트 계정·시나리오·관리자 Test-as-user 관련 파일만 함께 증분 반영하십시오."
+            + three_d_editor_instruction
+            + code_documentation_instruction
+            + user_coding_style_instruction
         )
         try:
             plan = await create_patch(patch_request, files, state.get("provider"), project_scope=True)
@@ -3338,7 +3631,7 @@ async def code_generation_node(state: AgentState):
             "10MB/120초/Chunking 등 인터뷰 확정값도 구현하십시오. "
             "AgentStudio Coding Style Registry의 선택 규칙을 생성 코드에 적용하십시오. "
             "confirmed_requirements.ui_layout이 선택되어 있으면 메뉴/탭/Route 전환과 Frontend View/Component lifecycle이 Agent run의 cancel/stop과 연결되지 않게 하십시오. "
-            "custom Theme이 선택되어 있으면 ui_layout.theme_tokens/component_rules/layout_rules를 canonical Design Token으로 유지한 뒤 확정된 Frontend Framework의 native Theme 방식으로 변환하여 Header/Navigation/Card/Button/Form/Table/Modal 등 공통 UI에 일관되게 적용하십시오. component_rules.menu.normal/hover/active가 있으면 메뉴 기본·마우스 오버·활성 상태를 모두 구현하고, submenu/user_menu/button/input/card의 상태 규칙도 존재하는 경우 실제 interaction CSS/컴포넌트 상태로 구현하십시오. React 전용 Theme Provider나 CSS 변수 방식으로 고정하지 마십시오. "
+            "custom Theme이 선택되어 있으면 ui_layout.theme_tokens/component_rules/layout_rules를 canonical Design Token으로 유지한 뒤 확정된 Frontend Framework의 native Theme 방식으로 변환하여 Header/Navigation/Card/Button/Form/Table/Modal 등 공통 UI에 일관되게 적용하십시오. component_rules.menu.normal/hover/active가 있으면 메뉴 기본·마우스 오버·활성 상태를 모두 구현하고 transition/transform/opacity/filter/boxShadow/textDecoration/fontWeight/padding/borderBottom/motionTransition을 실제 interaction CSS/컴포넌트 상태에 반영하십시오. 원본 사이트의 animation keyframe 이름을 그대로 복제하지 말고 감지된 duration/timing/transform/opacity를 프로젝트의 native transition/animation으로 재현하십시오. submenu/user_menu/button/input/card의 상태 규칙도 존재하는 경우 실제 interaction CSS/컴포넌트 상태로 구현하십시오. layout_rules.layoutContract.navigation.presentation.mode가 icon_text이거나 sourceNavigationPresentation.mode가 icon_text이면 Navigation/Sidebar/모바일 Drawer의 항목을 '아이콘 + 텍스트' 구조로 생성하고 감지된 icon_side/icon_size/gap을 반영하십시오. 원본의 고유 SVG artwork는 복사하지 말고 프로젝트에서 사용하는 표준 아이콘 세트 또는 의미상 동등한 일반 아이콘으로 매핑하십시오. ui_layout.sidebar_menu_icons=true이면 Sidebar/모바일 Drawer Navigation에 아이콘+텍스트를 반드시 생성하고 아이콘은 메뉴 의미에 맞게 매핑하십시오. ui_layout.header_icons=true이면 Header Navigation과 검색·알림·설정 등 주요 Header Action에 표준 아이콘을 생성하십시오. 두 옵션이 false이면 Theme에 명시된 icon_text 근거가 없는 영역에는 아이콘을 임의로 강제하지 마십시오. React 전용 Theme Provider나 CSS 변수 방식으로 고정하지 마십시오. "
             + frontend_theme_generation_instruction((state.get("request") or "") + "\n" + json.dumps(build_context, ensure_ascii=False)) + " "
             "Agent Runtime은 Backend session_id/run_id 기반으로 UI lifecycle과 분리하고, Frontend는 실행 상태 store와 상태 재조회/재연결로 복원하십시오. "
             "restore_screen_state/restore_scroll_position/restore_draft_input/restore_selection_state/screen_restore_mode와 show_running_tasks/runtime_status_position/알림 설정을 실제 UI 코드에 반영하십시오. "
@@ -3349,6 +3642,10 @@ async def code_generation_node(state: AgentState):
             "관리자는 각 테스트 계정의 '이 권한으로 테스트' 기능으로 short-lived impersonation을 시작/종료할 수 있어야 하며 모든 전환을 감사 로그에 남기고 TEST 배너를 표시하십시오. "
             "production에서는 seed/reset/delete/impersonation을 Backend에서 반드시 거부하고 테스트 비밀번호를 소스에 하드코딩하지 마십시오. "
             "상품 도메인이 있으면 기본 상품 50개 및 카테고리/재고, 주문 기능이 있으면 주문 Seed를 plan 수량대로 연계 생성하십시오."
+            + development_stage_instruction
+            + three_d_generation_instruction
+            + code_documentation_instruction
+            + user_coding_style_instruction
         )
 
         try:
@@ -3747,6 +4044,10 @@ async def build_artifact_validation_node(state: AgentState):
     placeholder_details = []
     style_failures = []
     style_warnings = []
+    code_documentation_errors = []
+    code_documentation_warnings = []
+    documentation_policy = _code_documentation_policy(state)
+    user_coding_style_policy = _user_coding_style_policy(state)
     checked = []
 
     for path in required_paths:
@@ -3756,7 +4057,7 @@ async def build_artifact_validation_node(state: AgentState):
 
         suffix = path.suffix.casefold()
         if suffix not in {
-            ".py", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".astro", ".dart", ".razor", ".cshtml",
+            ".py", ".js", ".jsx", ".ts", ".tsx", ".cs", ".java", ".vue", ".svelte", ".astro", ".dart", ".razor", ".cshtml",
             ".md", ".json", ".txt", ".html", ".css", ".scss", ".sass", ".less", ".yml", ".yaml",
         }:
             continue
@@ -3797,6 +4098,21 @@ async def build_artifact_validation_node(state: AgentState):
                 else:
                     style_warnings.append(row)
 
+        if documentation_policy.get("enabled") and suffix in {".py", ".js", ".jsx", ".ts", ".tsx", ".cs", ".java"}:
+            findings = _code_documentation_findings(content, suffix)
+            if findings.get("missing_symbols"):
+                code_documentation_errors.append({
+                    "path": str(path),
+                    "message": "사용자가 설명 주석 생성을 선택했지만 공개 클래스/함수/메소드 설명이 누락되었습니다.",
+                    "missing_symbols": list(findings.get("missing_symbols") or [])[:30],
+                })
+            if findings.get("missing_variables"):
+                code_documentation_warnings.append({
+                    "path": str(path),
+                    "message": "주요 상수/변수 설명 주석을 추가하면 유지보수성이 좋아집니다.",
+                    "missing_variables": list(findings.get("missing_variables") or [])[:30],
+                })
+
     architecture_errors = []
     for violation in fastapi_import_validation.get("violations") or []:
         architecture_errors.append({
@@ -3820,7 +4136,7 @@ async def build_artifact_validation_node(state: AgentState):
         })
 
     source_suffixes = {
-        ".py", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".astro", ".dart", ".razor", ".cshtml",
+        ".py", ".js", ".jsx", ".ts", ".tsx", ".cs", ".java", ".vue", ".svelte", ".astro", ".dart", ".razor", ".cshtml",
         ".json", ".md", ".txt", ".html", ".css", ".scss", ".sass", ".less",
     }
 
@@ -4023,6 +4339,7 @@ async def build_artifact_validation_node(state: AgentState):
         and not placeholder_files
         and not style_failures
         and not architecture_errors
+        and not code_documentation_errors
     )
 
     result = {
@@ -4034,6 +4351,10 @@ async def build_artifact_validation_node(state: AgentState):
         "placeholder_details": placeholder_details,
         "coding_style_errors": style_failures,
         "coding_style_warnings": style_warnings,
+        "code_documentation_policy": documentation_policy,
+        "user_coding_style_policy": user_coding_style_policy,
+        "code_documentation_errors": code_documentation_errors,
+        "code_documentation_warnings": code_documentation_warnings,
         "architecture_errors": architecture_errors,
         "react_typescript_legacy_cleanup": react_ts_cleanup,
         "fastapi_import_validation": fastapi_import_validation,
@@ -4063,6 +4384,8 @@ async def build_artifact_validation_node(state: AgentState):
         "placeholder_details": placeholder_details,
         "coding_style_errors": style_failures,
         "coding_style_warnings": style_warnings,
+        "code_documentation_errors": code_documentation_errors,
+        "code_documentation_warnings": code_documentation_warnings,
         "architecture_errors": architecture_errors,
         "should_retry": True,
     })
@@ -4087,6 +4410,14 @@ async def build_artifact_validation_node(state: AgentState):
                         "message": item.get("message"),
                     }
                     for item in row.get("architecture_errors") or []
+                ],
+                "code_documentation_errors": [
+                    {
+                        "path": item.get("path"),
+                        "message": item.get("message"),
+                        "missing_symbols": item.get("missing_symbols") or [],
+                    }
+                    for item in row.get("code_documentation_errors") or []
                 ],
             },
             ensure_ascii=False,
@@ -5273,6 +5604,8 @@ async def package_completion_node(state: AgentState):
             "target_agent_workflow",
             {},
         ),
+        "development_stage_plan": state.get("development_stage_plan", {}),
+        "development_workflow": state.get("development_workflow", {}),
         "database_plan": state.get(
             "database_plan",
             {},
@@ -5309,6 +5642,7 @@ async def package_completion_node(state: AgentState):
                     state.get("coding_style_context", {}).get("rules") or []
                 )
             ],
+            "user_preferences": _user_coding_style_policy(state),
             "validation": state.get(
                 "build_artifact_validation",
                 {},

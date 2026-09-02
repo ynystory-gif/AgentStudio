@@ -1038,9 +1038,12 @@ async def project_file_snapshot(root: str):
 
 async def read_file(path: str) -> str:
     p = _allowed(path)
+    # SQL downloads from older AgentStudio versions may contain an UTF-8 BOM.
+    # Decode .sql with utf-8-sig so Monaco does not keep U+FEFF in the query.
+    encoding = "utf-8-sig" if p.suffix.casefold() == ".sql" else "utf-8"
     return await asyncio.to_thread(
         p.read_text,
-        encoding="utf-8",
+        encoding=encoding,
         errors="replace",
     )
 

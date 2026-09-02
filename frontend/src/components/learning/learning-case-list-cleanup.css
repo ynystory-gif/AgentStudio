@@ -1,0 +1,481 @@
+/* LLM learning misjudgment list cleanup.
+   Keep the case list focused on traceable error information. */
+
+/* The learning-data state is already available in Dataset/PC apply tabs.
+   Hide the redundant case-list column and its old explanatory hint. */
+.llm-case-table th:nth-child(8),
+.llm-case-table td:nth-child(8) {
+  display: none !important;
+}
+
+.llm-learning-filter em {
+  display: none !important;
+}
+
+/* Rebalance the 9 visible columns after adding the misjudgment ID column. */
+.llm-case-table {
+  min-width: 1395px !important;
+  table-layout: fixed !important;
+}
+
+.llm-case-table th:nth-child(1) { width: 82px !important; }   /* 상태 */
+.llm-case-table th:nth-child(2) { width: 205px !important; }  /* 오판 ID */
+.llm-case-table th:nth-child(3) { width: 60px !important; }   /* 횟수 */
+.llm-case-table th:nth-child(4) { width: 132px !important; }  /* 최근 발생 */
+.llm-case-table th:nth-child(5) { width: 145px !important; }  /* 수집 PC */
+.llm-case-table th:nth-child(6) { width: 160px !important; }  /* Provider / Model */
+.llm-case-table th:nth-child(7) { width: 180px !important; }  /* 감지 사유 */
+.llm-case-table th:nth-child(9) { width: 345px !important; }  /* 요청 / 결과 */
+.llm-case-table th:nth-child(10) { width: 86px !important; }  /* 작업 */
+
+/* IDs must stay readable without consuming the whole row. */
+.llm-case-table td:nth-child(2) {
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Keep metadata compact and give the actual request/result more room. */
+.llm-case-table td:nth-child(3),
+.llm-case-table td:nth-child(4),
+.llm-case-table td:nth-child(5),
+.llm-case-table td:nth-child(6),
+.llm-case-table td:nth-child(7),
+.llm-case-table td:nth-child(10) {
+  font-size: 13px;
+}
+
+.llm-case-table .case-text-scroll {
+  height: 170px;
+}
+
+/*
+ * Dataset table has seven native columns. LearningDatasetTraceEnhancer inserts
+ * one trace column after Status, so the rendered table has exactly eight columns:
+ *  1 Status, 2 Misjudgment/Dataset ID, 3 Source PC, 4 Learning topic,
+ *  5 Problems, 6 Validation, 7 Current PC, 8 Actions.
+ * Keep these widths aligned with that real DOM structure.
+ */
+.llm-dataset-table:has(th[data-learning-trace]) {
+  min-width: 1220px !important;
+  table-layout: fixed !important;
+}
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(1) { width: 82px !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(2) { width: 225px !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(3) { width: 165px !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(4) { width: auto !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(5) { width: 72px !important; text-align:center; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(6) { width: 118px !important; text-align:center; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(7) { width: 165px !important; }
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(8) { width: 165px !important; }
+
+.llm-dataset-table:has(th[data-learning-trace]) td:nth-child(2) {
+  padding-right: 14px !important;
+}
+.llm-dataset-table:has(th[data-learning-trace]) td:nth-child(3) {
+  color: #c4cfdd;
+  overflow-wrap: anywhere;
+}
+.llm-dataset-table:has(th[data-learning-trace]) td:nth-child(4) {
+  padding-right: 22px !important;
+}
+.llm-dataset-table:has(th[data-learning-trace]) td:nth-child(4)>b {
+  display: -webkit-box !important;
+  overflow: hidden !important;
+  -webkit-box-orient: vertical !important;
+  -webkit-line-clamp: 2 !important;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.llm-dataset-table:has(th[data-learning-trace]) td:nth-child(4)>small {
+  display: -webkit-box !important;
+  overflow: hidden !important;
+  -webkit-box-orient: vertical !important;
+  -webkit-line-clamp: 2 !important;
+}
+.llm-dataset-table:has(th[data-learning-trace]) td:nth-child(5),
+.llm-dataset-table:has(th[data-learning-trace]) td:nth-child(6) {
+  text-align: center !important;
+  white-space: nowrap;
+}
+.llm-dataset-table:has(th[data-learning-trace]) td:nth-child(5) {
+  font-size: 15px;
+  font-weight: 800;
+  color: #9ecbff;
+}
+.llm-dataset-table:has(th[data-learning-trace]) td:nth-child(7)>b {
+  color: #8ed5a7;
+}
+.llm-dataset-table:has(th[data-learning-trace]) td:nth-child(8) .llm-learning-actions {
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+.llm-dataset-table:has(th[data-learning-trace]) td:nth-child(8) button {
+  min-width: 70px;
+  padding: 6px 8px;
+}
+
+.learning-dataset-trace-cell {
+  vertical-align: middle !important;
+}
+.learning-dataset-trace-block + .learning-dataset-trace-block {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid #213044;
+}
+.learning-dataset-trace-block small {
+  margin: 0 0 2px !important;
+  font-size: 13px;
+  color: #8396ae;
+}
+.learning-trace-id {
+  display: block;
+  max-width: 100%;
+  font: 13px/1.45 Consolas, 'Courier New', monospace;
+  color: #9fc5ef;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.learning-problem-trace {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #27364a;
+  background: #0d1621;
+}
+.learning-problem-trace code {
+  font: 13px/1.45 Consolas, 'Courier New', monospace;
+  color: #9fc5ef;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+/* Problem viewer now includes each generated Problem ID. */
+.llm-problem-list table:has(th[data-learning-trace]) {
+  min-width: 1420px !important;
+}
+.llm-problem-list table:has(th[data-learning-trace]) th:nth-child(1) { width: 50px !important; }
+.llm-problem-list table:has(th[data-learning-trace]) th:nth-child(2) { width: 210px !important; }
+.llm-problem-list table:has(th[data-learning-trace]) th:nth-child(3) { width: 130px !important; }
+.llm-problem-list table:has(th[data-learning-trace]) th:nth-child(4) { width: 350px !important; }
+.llm-problem-list table:has(th[data-learning-trace]) th:nth-child(5) { width: 280px !important; }
+.llm-problem-list table:has(th[data-learning-trace]) th:nth-child(6) { width: 400px !important; }
+
+/* Use the available page height for the list and let the learning page/body scroll. */
+.llm-learning-page {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+
+.llm-learning-body {
+  flex: none !important;
+  min-height: 520px !important;
+  overflow: auto !important;
+  padding-bottom: 28px !important;
+}
+
+@media (max-height: 850px) {
+  .llm-learning-body {
+    min-height: 430px !important;
+  }
+}
+
+/* v5.441 - Dataset learning-topic readability and two-axis scrolling. */
+.llm-dataset-table-scroll {
+  width: 100%;
+  max-height: min(52vh, 520px);
+  overflow-x: auto;
+  overflow-y: auto;
+  border: 1px solid #27364a;
+  border-radius: 8px;
+  background: #0c131d;
+  scrollbar-gutter: stable both-edges;
+}
+
+.llm-dataset-table-scroll .llm-dataset-table {
+  min-width: 1280px !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  overflow: visible !important;
+}
+
+.llm-dataset-table-scroll .llm-dataset-table thead th {
+  top: 0 !important;
+}
+
+.llm-dataset-table:has(th[data-learning-trace]) th:nth-child(4) {
+  width: 360px !important;
+}
+
+.llm-dataset-table:has(th[data-learning-trace]) td.learning-topic-cell {
+  width: 360px !important;
+  min-width: 360px !important;
+  padding: 8px 10px !important;
+  vertical-align: top !important;
+}
+
+.learning-topic-scroll {
+  width: 100%;
+  min-width: 0;
+  max-height: 132px;
+  overflow-x: auto;
+  overflow-y: auto;
+  padding: 8px 10px;
+  border: 1px solid #2a3a50;
+  border-radius: 7px;
+  background: #09111b;
+  scrollbar-gutter: stable;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  line-height: 1.5;
+}
+
+.learning-topic-scroll > b,
+.learning-topic-scroll > small {
+  display: block !important;
+  width: 100%;
+  max-width: 100%;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+  word-break: normal !important;
+  -webkit-line-clamp: unset !important;
+  -webkit-box-orient: initial !important;
+}
+
+.learning-topic-scroll > b {
+  color: #e3eaf4;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.learning-topic-scroll > small {
+  margin-top: 6px !important;
+  color: #91a4bb;
+  line-height: 1.55 !important;
+}
+
+/* v5.442 - exact misjudgment/problem trace and SQL export controls. */
+.llm-learning-filter.llm-learning-sql-row {
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.llm-learning-filter > button,
+.llm-learning-training-head > button {
+  flex: 0 0 auto;
+  min-width: 58px;
+}
+
+.llm-learning-training-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.llm-learning-training-head h3 {
+  margin: 0;
+}
+
+.learning-problem-id-block {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  min-width: 190px;
+}
+
+.learning-problem-id-block small {
+  display: block;
+  color: #7790ad;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .02em;
+}
+
+.learning-problem-id-block small:not(:first-child) {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #243449;
+}
+
+.learning-problem-id-block .learning-trace-id {
+  display: block;
+  width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.learning-problem-id-block .learning-source-case-id {
+  color: #8fd3b5;
+}
+
+.learning-id-warning {
+  color: #f3bd65 !important;
+  font-weight: 700;
+  white-space: normal !important;
+}
+
+/* v5.443 - visible learning-center load heartbeat/progress. */
+.llm-data-load-progress {
+  flex: 0 0 auto;
+  padding: 10px 16px 11px;
+  border-bottom: 1px solid #2a3b50;
+  background: #0d1825;
+}
+
+.llm-data-load-progress.running {
+  background: #0d1b2a;
+}
+
+.llm-data-load-progress.completed {
+  background: #10251b;
+}
+
+.llm-data-load-progress.failed {
+  background: #2a1518;
+  border-bottom-color: #683239;
+}
+
+.llm-data-load-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 13px;
+}
+
+.llm-data-load-progress-head b {
+  color: #dfe9f6;
+}
+
+.llm-data-load-progress-head span {
+  color: #9fb1c6;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.llm-data-load-progress-track {
+  position: relative;
+  height: 10px;
+  margin: 8px 0 7px;
+  overflow: hidden;
+  border: 1px solid #2c4058;
+  border-radius: 999px;
+  background: #1c2a3b;
+}
+
+.llm-data-load-progress-track > i {
+  display: block;
+  height: 100%;
+  min-width: 6px;
+  border-radius: inherit;
+  background: linear-gradient(90deg,#2f7ed8,#56a7ff,#2f7ed8);
+  background-size: 180% 100%;
+  transition: width .3s ease;
+}
+
+.llm-data-load-progress.running .llm-data-load-progress-track > i {
+  animation: llm-learning-load-pulse 1.1s linear infinite;
+}
+
+.llm-data-load-progress.completed .llm-data-load-progress-track > i {
+  background: #34d399;
+}
+
+.llm-data-load-progress.failed .llm-data-load-progress-track > i {
+  background: #ef5c68;
+}
+
+.llm-data-load-progress-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  font-size: 13px;
+  color: #91a5bc;
+}
+
+.llm-data-load-progress-foot > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-data-load-progress-foot > div {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  flex: 0 0 auto;
+}
+
+.llm-data-load-progress-foot small {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 4px;
+  margin: 0 !important;
+  padding: 3px 7px;
+  border: 1px solid #304257;
+  border-radius: 999px;
+  background: #111c29;
+  color: #8799ae !important;
+  white-space: nowrap;
+}
+
+.llm-data-load-progress-foot small.done {
+  border-color: #285640;
+  background: #10251b;
+  color: #8ed5a7 !important;
+}
+
+.llm-data-load-progress-foot small.error {
+  border-color: #6a3138;
+  background: #2a1518;
+  color: #ff9ca6 !important;
+}
+
+.llm-data-load-error {
+  margin-top: 7px !important;
+  color: #ff9ca6 !important;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@keyframes llm-learning-load-pulse {
+  from { background-position: 100% 0; }
+  to { background-position: -80% 0; }
+}
+
+@media (max-width: 900px) {
+  .llm-data-load-progress-foot {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .llm-data-load-progress-foot > span {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .llm-data-load-progress-foot > div {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .llm-data-load-progress.running .llm-data-load-progress-track > i {
+    animation: none;
+  }
+}

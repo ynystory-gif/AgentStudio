@@ -17,3 +17,4 @@ google-credentials*.json
 .agentstudio/redis_scratch/
 .agentstudio/firestore_scratch/
 .agentstudio/preview/
+logs/llm_usage.jsonl
