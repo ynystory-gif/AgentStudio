@@ -1,0 +1,130 @@
+name: Package v5.498 Media Workflow Core
+
+on:
+  push:
+    branches: [fix/v5.498-media-workflow-core]
+    paths:
+      - .github/workflows/package-v5-498-media-workflow-core.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate integrated v5.498 backend contracts
+        shell: bash
+        run: |
+          python -m compileall -q backend/app
+          PYTHONPATH=backend python - <<'PY'
+          from pathlib import Path
+          from app.services.media_workflow_core import (
+              media_node_catalog,
+              is_media_port_connection_allowed,
+              normalize_workflow_media_extension,
+              validate_media_workflow_definition,
+          )
+          from app.services.media_agent_design import enforce_media_agent_design
+
+          app = Path('frontend/src/App.jsx').read_text(encoding='utf-8')
+          main = Path('backend/app/main.py').read_text(encoding='utf-8')
+          routes = Path('backend/app/api/routes.py').read_text(encoding='utf-8')
+          factory = Path('backend/app/services/agent_factory_workflow_design.py').read_text(encoding='utf-8')
+          assert "AGENTSTUDIO_FRONTEND_VERSION='5.498'" in app
+          assert "id:'MEDIA_CREATION'" in app
+          assert 'version="5.498"' in main
+          assert 'media_workflow_router' in main
+          assert '"version": "5.498"' in routes
+          assert 'media_agent_plan' in factory
+          assert 'preserve_media_specialization' in factory
+
+          catalog = media_node_catalog()
+          assert len(catalog) >= 33
+          types = {row['type'] for row in catalog}
+          for required in {
+              'IMAGE_INPUT','IMAGE_ANALYZER','PROMPT_GENERATOR','IMAGE_GENERATE',
+              'IMAGE_TO_IMAGE','BACKGROUND_REMOVE','RESIZE','CROP','TEXT_OVERLAY',
+              'OCR_VALIDATOR','IMAGE_QUALITY_VALIDATOR','HUMAN_APPROVAL','SAVE_IMAGE',
+              'TEXT_TO_VIDEO','IMAGE_TO_VIDEO','VIDEO_QUALITY_VALIDATOR',
+          }:
+              assert required in types, required
+          assert is_media_port_connection_allowed('TEXT', 'PROMPT')
+          assert is_media_port_connection_allowed('IMAGE', 'IMAGE')
+          assert not is_media_port_connection_allowed('VIDEO', 'IMAGE')
+
+          legacy = {'steps':[{'name':'legacy'}]}
+          normalized = normalize_workflow_media_extension(legacy)
+          assert normalized['steps'] == legacy['steps']
+          assert normalized['extensions']['media']['schema_version'] == 1
+          invalid = validate_media_workflow_definition({
+              'nodes':[{'id':'a','type':'IMAGE_INPUT'},{'id':'b','type':'SAVE_IMAGE'}],
+              'edges':[{'source':'a','target':'b','output_type':'VIDEO','input_type':'IMAGE'}],
+          })
+          assert invalid['valid'] is False
+
+          design = enforce_media_agent_design({}, 'ComfyUI로 상품 사진 배경을 바꾸고 제품 변형을 검증하는 이미지 생성 Agent를 만들어줘')
+          assert design['media_agent_plan']['type'] == 'MEDIA_CREATION'
+          assert design['design_runtime']['agent_specialization'] == 'MEDIA_CREATION'
+          steps = {row['name'] for row in design['target_agent_workflow']['steps']}
+          for required in {'resolve_media_provider','submit_media_job','validate_media_result','human_media_approval','save_media_output'}:
+              assert required in steps, required
+          print('v5.498 integrated backend contract PASS', len(catalog))
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend clean production build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build and validate clean distribution tree
+        shell: bash
+        run: |
+          rm -rf package
+          mkdir package
+          rsync -a ./ package/ \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'package' \
+            --exclude 'frontend/node_modules' \
+            --exclude 'frontend/dist' \
+            --exclude 'README_V5_*.md'
+          cp README_V5_498_MediaWorkflowCore.md package/
+          find package -type d -name '__pycache__' -prune -exec rm -rf {} +
+          find package -type f -name '*.pyc' -delete
+          python - <<'PY'
+          from pathlib import Path
+          root = Path('package')
+          assert (root/'README.md').exists()
+          release_readmes = sorted(p.name for p in root.glob('README_V5_*.md'))
+          assert release_readmes == ['README_V5_498_MediaWorkflowCore.md'], release_readmes
+          assert "AGENTSTUDIO_FRONTEND_VERSION='5.498'" in (root/'frontend/src/App.jsx').read_text(encoding='utf-8')
+          assert 'version="5.498"' in (root/'backend/app/main.py').read_text(encoding='utf-8')
+          assert '"version": "5.498"' in (root/'backend/app/api/routes.py').read_text(encoding='utf-8')
+          assert (root/'backend/app/services/media_workflow_core.py').exists()
+          assert (root/'backend/app/services/media_agent_design.py').exists()
+          assert (root/'backend/app/api/media_workflow_routes.py').exists()
+          assert not any(root.rglob('__pycache__'))
+          assert not any(root.rglob('*.pyc'))
+          assert not (root/'.github').exists()
+          print('v5.498 clean distribution PASS')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: THEANOVA_AgentStudio_v5_498_MediaWorkflowCore
+          path: package
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
