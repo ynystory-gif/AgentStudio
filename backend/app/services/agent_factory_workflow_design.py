@@ -18,7 +18,7 @@ from app.services.media_agent_design import enforce_media_agent_design, is_media
 
 
 def _enforce_specialized_agent_design(design: dict, request: str) -> dict:
-    design = _enforce_specialized_agent_design(design, request)
+    design = enforce_blender_3d_agent_design(design, request)
     return enforce_media_agent_design(design, request)
 
 
