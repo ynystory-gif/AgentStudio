@@ -20,7 +20,7 @@ jobs:
       - name: Decode patch helper
         shell: bash
         run: |
-          gzip -dc scripts/patch_v5500_dbfix.py.gz > /tmp/patch_v5500.py
+          cat scripts/v5500_patch.part01 scripts/v5500_patch.part02 scripts/v5500_patch.part03 scripts/v5500_patch.part04 scripts/v5500_patch.part05 | base64 -d | gzip -d > /tmp/patch_v5500.py
           python -m py_compile /tmp/patch_v5500.py
 
       - name: Apply v5.500 patch
