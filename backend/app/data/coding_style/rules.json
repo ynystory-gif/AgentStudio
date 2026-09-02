@@ -1,5 +1,5 @@
 {
-  "version": "1.8",
+  "version": "1.9",
   "description": "THEANOVA AgentStudio 에이전트 프로그램 생성용 코딩 스타일 규칙 저장소",
   "source_policy": {
     "raw_source_is_rule": false,
@@ -2155,6 +2155,142 @@
       "rule": ".env.example에는 Key 이름과 안전한 placeholder만 두고 실제 API Key/Password/Token을 저장하지 않는다.",
       "rationale": "예제 환경파일의 Secret 커밋을 방지한다.",
       "source": "agentstudio_settings_generator"
+    },
+    {
+      "id": "CS-154",
+      "category": "architecture",
+      "name": "단계가 보이는 데이터 처리 흐름",
+      "level": "recommended",
+      "applies_to": [
+        "python",
+        "data_pipeline",
+        "rag",
+        "document_loader",
+        "notebook"
+      ],
+      "rule": "설정/상수, 입력·로딩, 핵심 처리, 검증, 결과 반환·표시의 단계가 코드 흐름에서 분명히 보이게 구성하고 서로 다른 책임을 한 블록에 뒤섞지 않는다.",
+      "rationale": "데이터가 어디서 들어와 어떤 검증을 거쳐 결과가 되는지 위에서 아래로 추적하기 쉬워진다.",
+      "source": "document_loading_pdf_web_json_csv_notebook"
+    },
+    {
+      "id": "CS-155",
+      "category": "correctness",
+      "name": "핵심 경계 결과 즉시 검증",
+      "level": "recommended",
+      "applies_to": [
+        "python",
+        "data_pipeline",
+        "rag",
+        "document_loader",
+        "testing"
+      ],
+      "rule": "다음 단계가 전제로 삼는 문서 수, 필수 필드, 비어 있지 않은 결과, Shape/Schema 등은 생성 직후 검증한다. 개발·테스트 assert와 운영 Validation을 구분한다.",
+      "rationale": "후속 단계에서 모호한 오류가 발생하는 것을 줄인다.",
+      "source": "document_loading_pdf_web_json_csv_notebook"
+    },
+    {
+      "id": "CS-156",
+      "category": "reliability",
+      "name": "외부 HTTP/API 이중 상태 검증",
+      "level": "required",
+      "applies_to": [
+        "api",
+        "external_io",
+        "tool",
+        "data_pipeline"
+      ],
+      "rule": "외부 HTTP/API 호출은 Timeout과 HTTP 상태를 확인하고, 서비스가 별도 업무 상태 코드를 제공하면 그 상태도 함께 검증한다.",
+      "rationale": "HTTP 200이어도 업무 API가 실패 상태를 반환하는 경우를 놓치지 않는다.",
+      "source": "document_loading_pdf_web_json_csv_notebook"
+    },
+    {
+      "id": "CS-157",
+      "category": "reliability",
+      "name": "종료가 필요한 리소스 Context 관리",
+      "level": "recommended",
+      "applies_to": [
+        "python",
+        "data_pipeline",
+        "document_loader",
+        "db"
+      ],
+      "rule": "파일, PDF, DB Session/Transaction 등 종료가 필요한 리소스는 with/context manager, yield dependency 또는 try/finally 등 안전한 수명주기 패턴으로 관리한다.",
+      "rationale": "정상·예외 경로 모두에서 리소스 누수를 줄인다.",
+      "source": "document_loading_pdf_web_json_csv_notebook"
+    },
+    {
+      "id": "CS-158",
+      "category": "data_quality",
+      "name": "외부 데이터 경계 정규화",
+      "level": "recommended",
+      "applies_to": [
+        "data_pipeline",
+        "rag",
+        "document_loader",
+        "python"
+      ],
+      "rule": "외부 Text/CSV/JSON/OCR 데이터는 Domain Document/Model에 넣기 전에 필요한 범위에서 인코딩, 공백, None/빈 값을 정규화하되 원문 의미는 보존한다.",
+      "rationale": "검색·비교·Chunking 전 형식 편차를 줄인다.",
+      "source": "document_loading_pdf_web_json_csv_notebook"
+    },
+    {
+      "id": "CS-159",
+      "category": "traceability",
+      "name": "RAG Document 출처 Metadata 보존",
+      "level": "required",
+      "applies_to": [
+        "rag",
+        "document_loader",
+        "data_pipeline"
+      ],
+      "rule": "RAG/문서 적재 단계에서 page_content와 함께 source, page/pdf_page, id, date, tags 등 답변 근거와 재추적에 필요한 Metadata를 가능한 범위에서 보존한다.",
+      "rationale": "출처 표시, 보안 필터, 문서 제외, 재색인과 Fact Check의 근거를 유지한다.",
+      "source": "document_loading_pdf_web_json_csv_notebook"
+    },
+    {
+      "id": "CS-160",
+      "category": "performance",
+      "name": "대량 문서 Lazy Loading 우선 검토",
+      "level": "conditional",
+      "applies_to": [
+        "rag",
+        "document_loader",
+        "data_pipeline",
+        "performance"
+      ],
+      "rule": "대량 문서·CSV·검색 결과를 모두 메모리에 올릴 필요가 없으면 lazy_load, iterator 또는 streaming API를 우선 검토한다.",
+      "rationale": "대용량 데이터의 메모리 사용량과 첫 처리 지연을 줄인다.",
+      "source": "document_loading_pdf_web_json_csv_notebook"
+    },
+    {
+      "id": "CS-161",
+      "category": "reliability",
+      "name": "선택적 외부 연동 누락의 명시적 분기",
+      "level": "recommended",
+      "applies_to": [
+        "external_io",
+        "api",
+        "agent",
+        "tool",
+        "environment"
+      ],
+      "rule": "선택적 API Key나 외부 설정이 없으면 None을 흘려보내지 말고 명시적 Skip/비활성/대체 경로와 상태 메시지로 분기한다.",
+      "rationale": "선택 기능의 설정 누락이 Agent 전체 Workflow 실패로 번지는 것을 방지한다.",
+      "source": "document_loading_pdf_web_json_csv_notebook"
+    },
+    {
+      "id": "CS-162",
+      "category": "maintainability",
+      "name": "운영 코드 전역 Warning 숨김 금지",
+      "level": "recommended",
+      "applies_to": [
+        "python",
+        "production",
+        "agentstudio"
+      ],
+      "rule": "운영 코드에서 warnings.filterwarnings('ignore')처럼 모든 경고를 전역으로 숨기지 않고 필요한 경우 알려진 Warning category와 최소 Scope만 제한한다.",
+      "rationale": "교육 화면 정리용 패턴 때문에 Deprecation·Runtime 경고를 놓치는 것을 방지한다.",
+      "source": "document_loading_pdf_web_json_csv_notebook"
     }
   ]
 }

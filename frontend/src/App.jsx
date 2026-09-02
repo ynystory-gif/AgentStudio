@@ -33,7 +33,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.490'
+const AGENTSTUDIO_FRONTEND_VERSION='5.491'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_AGENT_CODING_STYLE={
@@ -47,6 +47,14 @@ const DEFAULT_AGENT_CODING_STYLE={
   refactor_repetition:true,
   labeled_outputs:true,
   avoid_magic_numbers:true,
+  staged_data_flow:true,
+  validate_key_results:true,
+  safe_resource_management:true,
+  external_io_validation:true,
+  preserve_source_metadata:true,
+  normalize_external_data:true,
+  prefer_lazy_loading:true,
+  avoid_global_warning_suppression:true,
 }
 const normalizeAgentCodingStyle=(value={})=>{
   const source=value&&typeof value==='object'?value:{}
@@ -3799,10 +3807,20 @@ function CodingStyleSettingsMenu({ value, busy=false, stage='', codeDocumentatio
     ['refactor_repetition','반복 로직 함수화','반복되는 처리 로직은 재사용 가능한 함수/메소드로 분리합니다.','구조 · Notebook'],
     ['labeled_outputs','실행 결과 단계 Label','Notebook/CLI 출력에 [PDF 로딩], [검색], [LLM]처럼 단계 Label을 사용합니다.','구조 · Notebook'],
     ['avoid_magic_numbers','Magic Number 최소화','반복되는 모델명·수치·경로·옵션은 상수나 설정으로 분리합니다.','구조 · Notebook'],
+    ['staged_data_flow','단계가 보이는 처리 흐름','설정 → 입력/로딩 → 처리 → 검증 → 결과 순서가 코드에서 드러나도록 구성합니다.','구조 · Notebook'],
+    ['validate_key_results','핵심 결과 검증','문서 수·필수 필드·비어 있지 않은 결과 등 중요한 경계 결과를 즉시 검증합니다.','데이터 · 안정성'],
+    ['safe_resource_management','리소스 안전 정리','파일·PDF·DB 등 종료가 필요한 리소스는 with/yield/finally 등 안전한 수명주기로 관리합니다.','데이터 · 안정성'],
+    ['preserve_source_metadata','출처 Metadata 보존','RAG/문서 적재 시 source·page·id·date 등 추적 가능한 메타데이터를 유지합니다.','데이터 · 안정성'],
+    ['normalize_external_data','외부 데이터 정규화','외부 텍스트/CSV/JSON을 Domain 객체로 넣기 전에 공백·None·인코딩 등 경계 데이터를 정리합니다.','데이터 · 안정성'],
+    ['external_io_validation','외부 I/O 검증','HTTP/API 호출은 Timeout·상태코드·업무 상태를 확인하고 선택적 설정 누락을 명시적으로 처리합니다.','외부 · 운영'],
+    ['prefer_lazy_loading','대용량 Lazy Loading','대량 문서/행 처리에서는 가능하면 lazy/streaming 로딩을 사용해 불필요한 전체 적재를 피합니다.','외부 · 운영'],
+    ['avoid_global_warning_suppression','경고 전체 숨김 금지',"운영 코드에서는 warnings.filterwarnings('ignore') 같은 전역 경고 숨김을 피하고 필요한 범위만 제한합니다.",'외부 · 운영'],
   ]
   const groups=[
     ['이름 · 타입','이름 · 타입','읽기 쉬운 이름과 타입 안정성을 유지합니다.'],
-    ['구조 · Notebook','구조 · Notebook','Notebook과 반복 로직의 구조를 일관되게 정리합니다.'],
+    ['구조 · Notebook','구조 · Notebook','처리 단계와 Notebook 흐름을 위에서 아래로 쉽게 읽도록 정리합니다.'],
+    ['데이터 · 안정성','데이터 · 안정성','문서·외부 데이터의 검증, 출처, 리소스 수명주기를 지킵니다.'],
+    ['외부 · 운영','외부 · 운영','외부 연동과 대용량 처리에서 실패·성능·경고를 안전하게 다룹니다.'],
   ]
   const update=(key,checked)=>onChange?.({...normalized,[key]:Boolean(checked)})
   return <details className="agent-coding-style-menu">

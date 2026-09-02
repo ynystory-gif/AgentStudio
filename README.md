@@ -1,3 +1,11 @@
+## v5.491
+
+### v5.491
+- 사용자 제공 문서 로딩 Notebook의 실제 코드 패턴을 분석해 Agent 생성용 Coding Style에 반영했습니다.
+- 기존 10개 선택 규칙에 처리 흐름, 결과 검증, 리소스 관리, 외부 I/O, Metadata, 정규화, Lazy Loading, Warning 정책 8개를 추가했습니다.
+- RAG/PDF/CSV/JSON/OCR/Web Loader 요청을 자동 감지해 문서 전용 Registry 규칙을 생성·재개발·수정 Prompt에 적용합니다.
+- 교육용 print/고정 파일명/전역 Warning 숨김은 운영 Agent 기본 스타일로 복사하지 않습니다.
+
 ## v5.490
 
 ### v5.490

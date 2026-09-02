@@ -148,6 +148,14 @@ USER_CODING_STYLE_DEFAULTS = {
     "refactor_repetition": True,
     "labeled_outputs": True,
     "avoid_magic_numbers": True,
+    "staged_data_flow": True,
+    "validate_key_results": True,
+    "safe_resource_management": True,
+    "external_io_validation": True,
+    "preserve_source_metadata": True,
+    "normalize_external_data": True,
+    "prefer_lazy_loading": True,
+    "avoid_global_warning_suppression": True,
 }
 
 
@@ -191,6 +199,22 @@ def _user_coding_style_instruction(state: AgentState) -> str:
         rules.append("Notebook/CLI의 주요 진행 출력에는 [PDF 로딩], [Chunking], [검색], [LLM]처럼 단계 Label을 사용해 실행 결과의 출처를 쉽게 식별할 수 있게 하십시오.")
     if policy.get("avoid_magic_numbers"):
         rules.append("반복되는 모델명·임계값·Chunk 크기·Top-K·경로·Timeout 등의 Magic Number/String은 상수, Settings 또는 환경설정으로 분리하십시오.")
+    if policy.get("staged_data_flow"):
+        rules.append("데이터 처리 코드는 설정/상수 → 입력·로딩 → 핵심 처리 → 검증 → 결과 반환·표시 순서가 위에서 아래로 드러나게 구성하고 서로 다른 단계의 책임을 한 블록에 뒤섞지 마십시오.")
+    if policy.get("validate_key_results"):
+        rules.append("문서 수, 필수 필드, 비어 있지 않은 결과, Shape/Schema 등 다음 단계가 전제로 삼는 핵심 결과는 경계 직후 검증하십시오. 개발·테스트 assert와 운영 Validator/예외 처리를 구분하십시오.")
+    if policy.get("safe_resource_management"):
+        rules.append("파일·PDF·DB Session·Transaction 등 종료가 필요한 리소스는 with/context manager, yield dependency, try/finally 등 안전한 수명주기로 관리하십시오.")
+    if policy.get("external_io_validation"):
+        rules.append("외부 HTTP/API/File I/O는 Timeout과 전송 상태를 확인하고 별도 업무 상태 코드가 있으면 함께 검증하십시오. 선택적 API Key/설정 누락은 명시적 Skip/대체 경로로 처리하십시오.")
+    if policy.get("preserve_source_metadata"):
+        rules.append("RAG·문서 수집·검색 데이터는 page_content만 남기지 말고 source, page/pdf_page, id, date, tags 등 답변 근거와 재추적에 필요한 Metadata를 가능한 범위에서 보존하십시오.")
+    if policy.get("normalize_external_data"):
+        rules.append("외부 Text/CSV/JSON/OCR 데이터는 Domain Document/Model에 넣기 전에 인코딩, 공백, None/빈 값 등 경계 데이터를 필요한 범위에서 정규화하되 원문의 의미를 바꾸지 마십시오.")
+    if policy.get("prefer_lazy_loading"):
+        rules.append("대량 문서·CSV·검색 결과처럼 전체 적재가 불필요한 경우 lazy_load/iterator/streaming 기능을 우선 검토하되 작은 데이터에 과도한 복잡성을 추가하지 마십시오.")
+    if policy.get("avoid_global_warning_suppression"):
+        rules.append("운영 코드에서 warnings.filterwarnings('ignore')처럼 모든 경고를 전역으로 숨기지 마십시오. 필요한 경우 알려진 Warning category와 최소 Scope만 제한하고 원인 해결을 우선하십시오.")
 
     if not rules:
         return ""

@@ -20,6 +20,19 @@ def infer_coding_tags(
     if path.lower().endswith(".py") or "python" in text or "파이썬" in text:
         tags.add("python")
 
+    if path.lower().endswith(".ipynb") or "notebook" in text or "노트북" in text:
+        tags.update({"python", "notebook", "data_pipeline"})
+
+    if any(token in text for token in (
+        "rag", "retrieval", "문서 로딩", "문서로딩", "document loader",
+        "pypdf", "pymupdf", "pdfplumber", "easyocr", "ocr", ".pdf",
+        ".csv", ".json", "csvloader", "jsonloader", "webbaseloader",
+    )):
+        tags.update({"rag", "data_pipeline", "document_loader"})
+
+    if any(token in text for token in ("requests", "httpx", "외부 api", "외부 연동", "web loader", "웹 로더")):
+        tags.add("external_io")
+
     if "langchain" in text or "랭체인" in text:
         tags.update({"langchain", "llm_app", "agent"})
 
