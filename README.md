@@ -1,3 +1,10 @@
+## v5.496
+
+- RAG 최소 파이프라인 Notebook 분석을 기반으로 Agent 생성 코딩 스타일에 운영형 RAG 전용 규칙 8개를 추가했습니다.
+- 색인/질의 Pipeline 분리, RAG 품질 설정값 중앙관리, Retrieval 관련도 Gate, Grounded Answer/Abstain, Context Budget, Idempotent Indexing, Retrieval Observability, Retrieved Context Prompt Injection Guard를 기본 ON으로 적용합니다.
+- Coding Style Registry를 2.1로 올리고 CS-170~CS-177을 추가했습니다.
+- RAG/VectorStore/Embedding/Retrieval/Indexing/Grounding 요청에서 새 규칙을 자동 선택하도록 Selector를 확장했습니다.
+
 ## v5.495 Resilient Agent Coding Style
 
 - `2-2. 문서_로딩_OCR.ipynb`의 실제 OCR/환경 검증 코드를 기준으로 Agent 생성 코딩 스타일을 추가 개선했습니다.

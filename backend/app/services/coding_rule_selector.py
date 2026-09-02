@@ -28,7 +28,7 @@ def infer_coding_tags(
         "pypdf", "pymupdf", "pdfplumber", "easyocr", "ocr", ".pdf",
         ".csv", ".json", "csvloader", "jsonloader", "webbaseloader",
     )):
-        tags.update({"rag", "data_pipeline", "document_loader"})
+        tags.update({"rag", "data_pipeline", "document_loader", "retrieval"})
 
     if any(token in text for token in (
         "ocr", "easyocr", "paddleocr", "paddlepaddle", "tesseract",
@@ -40,6 +40,35 @@ def infer_coding_tags(
         "fallback", "대체 경로", "대체경로", "품질 기준", "quality gate",
     )):
         tags.update({"quality_fallback", "reliability"})
+
+    if any(token in text for token in (
+        "vectorstore", "vector store", "벡터 저장소", "벡터스토어", "chroma",
+        "embedding", "임베딩", "retriever", "검색", "top-k", "top_k",
+        "chunk_size", "chunk overlap", "chunk_overlap", "청크",
+    )):
+        tags.update({"rag", "retrieval", "vectorstore", "embedding", "data_pipeline"})
+
+    if any(token in text for token in (
+        "index", "indexing", "색인", "재색인", "checksum", "document_id", "chunk_id",
+    )):
+        tags.update({"rag", "indexing", "retrieval", "data_pipeline"})
+
+    if any(token in text for token in (
+        "grounded", "근거", "출처", "abstain", "문서에 답이 없", "문서에서 찾을 수 없",
+        "relevance", "관련도", "threshold", "score",
+    )):
+        tags.update({"rag", "retrieval", "grounding", "quality_gate"})
+
+    if any(token in text for token in (
+        "context budget", "token budget", "context window", "컨텍스트", "문맥",
+    )):
+        tags.update({"rag", "retrieval", "context_budget", "llm_app"})
+
+    if any(token in text for token in (
+        "prompt injection", "프롬프트 인젝션", "retrieved context", "검색 문서 지시",
+        "문서 내 지시", "지시문",
+    )):
+        tags.update({"rag", "retrieval", "security", "prompt_injection"})
 
     if any(token in text for token in (
         "benchmark", "벤치마크", "성능 비교", "cpu/gpu", "cold start", "warm",

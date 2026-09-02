@@ -1,5 +1,5 @@
 {
-  "version": "2.0",
+  "version": "2.1",
   "description": "THEANOVA AgentStudio 에이전트 프로그램 생성용 코딩 스타일 규칙 저장소",
   "source_policy": {
     "raw_source_is_rule": false,
@@ -2405,6 +2405,131 @@
       "rule": "사용자에게 노출되는 오류는 실패 원인, 감지한 현재 상태, 변경하지 않고 보존한 항목, 다음에 수행할 구체적인 조치를 포함하고 Secret이나 불필요한 내부 Stack 정보는 노출하지 않는다.",
       "rationale": "단순 '실패' 메시지 대신 사용자가 스스로 복구할 수 있는 진단 정보를 제공한다.",
       "source": "document_loading_ocr_notebook"
+    },
+    {
+      "id": "CS-170",
+      "category": "architecture",
+      "name": "RAG 오프라인 색인과 온라인 질의 Pipeline 분리",
+      "level": "required",
+      "applies_to": [
+        "rag",
+        "retrieval",
+        "indexing",
+        "agent",
+        "production"
+      ],
+      "rule": "RAG Agent는 문서 Load/Normalize/Split/Embed/Index의 오프라인 색인 Pipeline과 Query/Retrieve/Validate/Context/Generate의 온라인 질의 Pipeline을 서로 다른 책임으로 분리하고 사용자 질문마다 재색인하지 않는다.",
+      "rationale": "색인 비용과 온라인 응답 지연을 분리하고 문서 추가·수정·삭제·재색인을 독립적으로 운영할 수 있다.",
+      "source": "rag_minimum_pipeline_notebook"
+    },
+    {
+      "id": "CS-171",
+      "category": "configuration",
+      "name": "RAG 품질 Parameter Settings 중앙관리",
+      "level": "required",
+      "applies_to": [
+        "rag",
+        "retrieval",
+        "embedding",
+        "vectorstore",
+        "production"
+      ],
+      "rule": "chunk_size, chunk_overlap, retrieval_top_k, relevance_threshold, embedding/model 선택, context token budget 등 RAG 품질 Parameter는 코드에 직접 흩어 두지 않고 Settings/Config에서 중앙 관리하며 값 범위를 검증한다.",
+      "rationale": "Notebook의 chunk_size·chunk_overlap·k가 검색 품질을 좌우하는 손잡이라는 구조를 운영 코드에서 재현 가능하게 관리한다.",
+      "source": "rag_minimum_pipeline_notebook"
+    },
+    {
+      "id": "CS-172",
+      "category": "correctness",
+      "name": "Retrieval 관련도 Quality Gate",
+      "level": "required",
+      "applies_to": [
+        "rag",
+        "retrieval",
+        "quality_gate",
+        "vectorstore"
+      ],
+      "rule": "Retriever가 반환한 Top-K Document를 개수만으로 신뢰하지 않고 가능한 경우 relevance/distance score, 필수 Metadata, security scope와 질문 적합성 기준을 통과한 근거만 Context로 전달한다.",
+      "rationale": "질문과 무관한 문서를 Top-K라는 이유만으로 LLM에 넣어 근거 없는 답변을 생성하는 것을 줄인다.",
+      "source": "rag_minimum_pipeline_notebook"
+    },
+    {
+      "id": "CS-173",
+      "category": "correctness",
+      "name": "Grounded Answer와 Abstain 계약",
+      "level": "required",
+      "applies_to": [
+        "rag",
+        "retrieval",
+        "grounding",
+        "llm_app"
+      ],
+      "rule": "품질 Gate를 통과한 검색 근거가 없으면 LLM의 일반 지식 추측에 맡기지 않고 Service 단계에서 명시적으로 Abstain하며 answer, grounded, sources/references, retrieved_count 같은 근거 상태를 구조화해 반환한다.",
+      "rationale": "Notebook의 '문서에서 찾을 수 없습니다' 원칙을 Prompt 지시만이 아니라 실행 계약으로 강화한다.",
+      "source": "rag_minimum_pipeline_notebook"
+    },
+    {
+      "id": "CS-174",
+      "category": "performance",
+      "name": "RAG Context Token Budget 관리",
+      "level": "recommended",
+      "applies_to": [
+        "rag",
+        "retrieval",
+        "context_budget",
+        "llm_app",
+        "production"
+      ],
+      "rule": "검색 Document를 무제한 join/stuff하지 않고 중복 제거·관련도 정렬·보안 필터 후 모델 Context Window와 출력 예약 Token을 고려한 Budget 안에서 Context를 구성한다.",
+      "rationale": "검색 문서가 늘어날 때 Context 초과, 비용 증가, 중요 근거 희석을 방지한다.",
+      "source": "rag_minimum_pipeline_notebook"
+    },
+    {
+      "id": "CS-175",
+      "category": "reliability",
+      "name": "RAG 색인 Idempotency와 문서 Version 추적",
+      "level": "required",
+      "applies_to": [
+        "rag",
+        "indexing",
+        "vectorstore",
+        "data_pipeline",
+        "production"
+      ],
+      "rule": "document_id/chunk_id와 content checksum 또는 version을 사용해 동일 입력의 반복 색인이 중복 Embedding/Vector를 만들지 않게 하고 수정·삭제·제외된 문서를 해당 ID로 재색인 또는 제거할 수 있게 한다.",
+      "rationale": "Notebook의 Chroma.from_documents 재실행 패턴을 운영 환경에서 중복 색인으로 가져오지 않고 문서 생명주기를 추적한다.",
+      "source": "rag_minimum_pipeline_notebook"
+    },
+    {
+      "id": "CS-176",
+      "category": "observability",
+      "name": "Retrieval 관찰 가능성",
+      "level": "recommended",
+      "applies_to": [
+        "rag",
+        "retrieval",
+        "observability",
+        "production"
+      ],
+      "rule": "RAG 검색에서 query/request id, retrieved_count, selected_count, source/document ids, score/threshold, latency, fallback 여부를 구조화된 로그·Trace·Result Metadata로 추적하되 민감 원문 전체를 로그에 저장하지 않는다.",
+      "rationale": "검색 실패와 생성 실패를 분리 진단하고 RAG 품질 개선에 필요한 검색 단계 근거를 남긴다.",
+      "source": "rag_minimum_pipeline_notebook"
+    },
+    {
+      "id": "CS-177",
+      "category": "security",
+      "name": "Retrieved Context Prompt Injection 격리",
+      "level": "required",
+      "applies_to": [
+        "rag",
+        "retrieval",
+        "security",
+        "prompt_injection",
+        "llm_app"
+      ],
+      "rule": "검색된 Document는 참고 데이터로 취급하고 문서 내부의 지시문·Tool 실행 요청·Secret 출력 요구를 System Instruction으로 승격하지 않도록 Prompt 경계를 분리하며 기존 Tool/Auth/보안 정책을 우회하지 않는다.",
+      "rationale": "RAG 데이터에 삽입된 악성 지시가 Agent 행동 규칙을 덮어쓰는 간접 Prompt Injection을 줄인다.",
+      "source": "rag_minimum_pipeline_notebook"
     }
   ]
 }

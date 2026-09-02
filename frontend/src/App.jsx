@@ -33,7 +33,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.495'
+const AGENTSTUDIO_FRONTEND_VERSION='5.496'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_AGENT_CODING_STYLE={
@@ -62,6 +62,14 @@ const DEFAULT_AGENT_CODING_STYLE={
   external_artifact_guard:true,
   controlled_benchmark:true,
   actionable_error_messages:true,
+  rag_index_query_separation:true,
+  rag_parameter_settings:true,
+  retrieval_relevance_gate:true,
+  grounded_answer_contract:true,
+  context_budget_management:true,
+  idempotent_indexing:true,
+  retrieval_observability:true,
+  retrieved_context_instruction_guard:true,
 }
 const normalizeAgentCodingStyle=(value={})=>{
   const source=value&&typeof value==='object'?value:{}
@@ -3833,6 +3841,14 @@ function CodingStyleSettingsMenu({ value, busy=false, stage='', codeDocumentatio
     ['non_destructive_environment','기존 환경 비파괴','충돌이 있어도 기존 패키지·설정·데이터를 자동 삭제/덮어쓰기보다 격리 환경·명시적 승인을 우선합니다.','환경 · 복구'],
     ['quality_gated_fallback','품질 기준 Fallback','기본 처리 결과가 명시한 품질 기준에 미달할 때만 OCR·대체 Loader·보조 경로로 전환합니다.','환경 · 복구'],
     ['actionable_error_messages','조치 가능한 오류 메시지','오류에는 원인·현재 상태·보존된 항목·다음 조치를 함께 제시합니다.','환경 · 복구'],
+    ['rag_index_query_separation','RAG 색인·질의 분리','문서 로드·분할·Embedding·Indexing과 온라인 검색·답변 생성을 서로 다른 Pipeline/Service로 분리합니다.','RAG · 검색'],
+    ['rag_parameter_settings','RAG 품질 설정값 관리','chunk size·overlap·Top-K·relevance threshold·embedding model 등 검색 품질 파라미터를 Settings로 관리합니다.','RAG · 검색'],
+    ['retrieval_relevance_gate','검색 관련도 Gate','Top-K 결과를 그대로 LLM에 넘기지 않고 Score·필수 근거·보안 조건으로 답변에 사용할 수 있는지 검증합니다.','RAG · 검색'],
+    ['grounded_answer_contract','근거 기반 Abstain 계약','검색 근거가 부족하면 LLM 추측에 맡기지 않고 grounded=false와 근거 없음 응답을 반환합니다.','RAG · 검색'],
+    ['context_budget_management','Context Budget 관리','검색 문서를 단순 결합하지 않고 중복 제거·관련도 정렬·Token Budget 안에서 Context를 구성합니다.','RAG · 검색'],
+    ['idempotent_indexing','중복 없는 재색인','document/chunk ID·checksum·version으로 변경 여부를 확인해 동일 문서를 반복 Embedding하지 않습니다.','RAG · 검색'],
+    ['retrieval_observability','검색 관찰 가능성','검색 문서 수·Score·Source·Latency·Fallback 여부를 추적할 수 있도록 결과와 로그를 구조화합니다.','RAG · 검색'],
+    ['retrieved_context_instruction_guard','검색 문서 지시문 격리','검색된 문서의 명령문·Prompt Injection을 System 지시로 취급하지 않고 참고 데이터로만 처리합니다.','RAG · 검색'],
   ]
   const groups=[
     ['이름 · 타입','이름 · 타입','읽기 쉬운 이름과 타입 안정성을 유지합니다.'],
@@ -3840,6 +3856,7 @@ function CodingStyleSettingsMenu({ value, busy=false, stage='', codeDocumentatio
     ['데이터 · 안정성','데이터 · 안정성','문서·외부 데이터의 검증, 출처, 리소스 수명주기를 지킵니다.'],
     ['외부 · 운영','외부 · 운영','외부 연동과 대용량 처리에서 실패·성능·경고를 안전하게 다룹니다.'],
     ['환경 · 복구','환경 · 복구','실행 전 조건을 확인하고 기존 환경을 보존하며 품질 기반 대체 경로를 사용합니다.'],
+    ['RAG · 검색','RAG · 검색','색인·검색·근거 검증·Context·재색인과 검색 보안을 운영형 RAG 구조로 관리합니다.'],
   ]
   const update=(key,checked)=>onChange?.({...normalized,[key]:Boolean(checked)})
   return <details className="agent-coding-style-menu">
