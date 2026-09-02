@@ -363,17 +363,13 @@ class ChromiumBrowserManager:
 
     @staticmethod
     def _default_profile_dir() -> Path:
-        # Persistent AgentStudio browser state lives here.  The actual Chrome
-        # user-data-dir is intentionally unique per Backend process so a stale
-        # Chrome singleton/profile lock can never prevent the CDP listener from
-        # starting after an AgentStudio restart.
-        root = os.getenv("LOCALAPPDATA") or str(Path.home() / ".theanova")
-        return Path(root) / "THEANOVA" / "AgentStudio" / "BrowserProfile"
+        from app.services.runtime_path_policy import resolve_cache_root
+        return resolve_cache_root() / "browser" / "profile"
 
     @staticmethod
     def _runtime_profile_root() -> Path:
-        root = os.getenv("LOCALAPPDATA") or str(Path.home() / ".theanova")
-        return Path(root) / "THEANOVA" / "AgentStudio" / "BrowserRuntime"
+        from app.services.runtime_path_policy import resolve_temp_root
+        return resolve_temp_root() / "browser" / "runtime"
 
     @staticmethod
     def _ensure_localhost_no_proxy() -> None:
@@ -717,6 +713,15 @@ class ChromiumBrowserManager:
         runtime = runtime_root / f"runtime-{os.getpid()}-{uuid.uuid4().hex[:10]}"
         runtime.mkdir(parents=True, exist_ok=True)
         self._runtime_profile_dir = runtime
+        try:
+            from app.services.runtime_path_policy import resolve_output_root
+            download_dir = resolve_output_root() / "browser-downloads"
+            download_dir.mkdir(parents=True, exist_ok=True)
+            default_dir = runtime / "Default"
+            default_dir.mkdir(parents=True, exist_ok=True)
+            (default_dir / "Preferences").write_text(json.dumps({"download": {"default_directory": str(download_dir), "prompt_for_download": False, "directory_upgrade": True}, "safebrowsing": {"enabled": True}}, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
         log_path = runtime / "chrome_startup.log"
         self._startup_log_path = log_path
         args = [

@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useState } from 'react'
+import { saveBlobToOutput } from '../../api'
 import type {
   DatabaseDiagramDocument,
   DatabaseDiagramRelationship,
@@ -268,18 +269,8 @@ export function DatabaseDiagramViewer({ value, filePath = '' }: DatabaseDiagramV
         const pngBlob = await new Promise<Blob>((resolve, reject) => {
           canvas.toBlob(result => result ? resolve(result) : reject(new Error('PNG Blob 생성에 실패했습니다.')), 'image/png')
         })
-        const pngUrl = URL.createObjectURL(pngBlob)
-        try {
-          const anchor = document.createElement('a')
-          anchor.href = pngUrl
-          anchor.download = safePngName(parsed.document)
-          document.body.appendChild(anchor)
-          anchor.click()
-          anchor.remove()
-        } finally {
-          URL.revokeObjectURL(pngUrl)
-        }
-        setMessage('PNG 내보내기 완료')
+        const saved = await saveBlobToOutput(pngBlob, safePngName(parsed.document), 'diagrams')
+        setMessage(`PNG 내보내기 완료 · ${saved.path}`)
       } finally {
         URL.revokeObjectURL(url)
       }

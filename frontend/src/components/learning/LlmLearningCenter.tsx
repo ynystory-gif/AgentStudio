@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { api } from '../../api'
+import { api, saveBlobToOutput } from '../../api'
 
 type CaseRow = Record<string, any>
 type DatasetRow = Record<string, any>
@@ -255,15 +255,9 @@ export function LlmLearningCenter() {
       const sql=String(item?.sql||'')
       if(!sql)throw new Error('다운로드할 SQL이 없습니다.')
       const blob=new Blob([sql],{type:'application/sql;charset=utf-8'})
-      const url=URL.createObjectURL(blob)
-      const link=document.createElement('a')
-      link.href=url
-      link.download=String(item?.file_name||'LLM_학습_화면_조회.sql')
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      window.setTimeout(()=>URL.revokeObjectURL(url),1000)
-      setMessage(`${link.download} 다운로드 · 화면 ${Number(item?.expected_count||0)}건과 동일한 ID 스냅샷 SQL입니다.`)
+      const fileName=String(item?.file_name||'LLM_학습_화면_조회.sql')
+      const saved=await saveBlobToOutput(blob,fileName,'sql')
+      setMessage(`${fileName} 저장 · ${saved.path} · 화면 ${Number(item?.expected_count||0)}건과 동일한 ID 스냅샷 SQL입니다.`)
     }catch(e){setMessage(`SQL 다운로드 실패: ${e instanceof Error?e.message:String(e)}`)}
   }
 

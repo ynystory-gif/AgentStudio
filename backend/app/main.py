@@ -1,6 +1,10 @@
 import asyncio
 import sys
 
+# v5.493: apply saved path roots before optional ML/browser imports.
+from app.services.runtime_path_policy import bootstrap_runtime_paths_from_env_file, apply_runtime_path_policy
+bootstrap_runtime_paths_from_env_file()
+
 # Windows + psycopg async requires SelectorEventLoop.
 if sys.platform == "win32":
     try:
@@ -64,6 +68,8 @@ async def lifespan(app: FastAPI):
         print(f"[완료되었습니다] DB 스키마 보정: {schema_migration.get('count', 0)}개")
         migration = await migrate_env_settings_to_db()
         runtime = await load_db_settings_into_runtime()
+        runtime_paths = apply_runtime_path_policy()
+        print(f"[완료되었습니다] Runtime 경로 적용: Temp={runtime_paths.get('temp_root', '')} · Cache={runtime_paths.get('cache_root', '')} · Output={runtime_paths.get('output_root', '')}")
         runtime_db = await apply_saved_database_provider()
         runtime_metadata = await ensure_runtime_metadata_tables()
         print("[완료되었습니다] PostgreSQL/pgvector 초기화")
@@ -135,7 +141,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.492", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.493", lifespan=lifespan)
 
 _PUBLIC_API_PATHS = {
     "/api/health",

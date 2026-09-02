@@ -3,7 +3,7 @@ import Editor, { DiffEditor } from '@monaco-editor/react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { api, apiFetch, connectJobs, runtimeInfo } from './api'
+import { api, apiFetch, connectJobs, runtimeInfo, saveBlobToOutput } from './api'
 import { NotebookEditor } from './components/notebook/NotebookEditor'
 import { ImageViewer, PdfViewer, PresentationViewer } from './components/viewers/DocumentViewers'
 import { MiniBadge, SectionTitle, StatusDot, StudioIcon } from './components/common/CommonUi'
@@ -33,7 +33,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.492'
+const AGENTSTUDIO_FRONTEND_VERSION='5.493'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_AGENT_CODING_STYLE={
@@ -2253,9 +2253,13 @@ function SystemPage() {
     }
   }
 
-  const downloadSupabaseSchemaScript=()=>{
-    const base=runtimeInfo().apiBase
-    window.open(`${base}/settings/database-runtime/supabase/schema-script`,'_blank','noopener,noreferrer')
+  const downloadSupabaseSchemaScript=async()=>{
+    try{
+      const response=await apiFetch('/settings/database-runtime/supabase/schema-script')
+      const blob=await response.blob()
+      const saved=await saveBlobToOutput(blob,'theanova_agentstudio_supabase_schema.sql','sql')
+      setMessage(`Supabase 스키마 SQL 저장 완료: ${saved.path}`)
+    }catch(e){ setError(`Supabase 스키마 SQL 저장 실패: ${e instanceof Error?e.message:String(e)}`) }
   }
 
   const saveMachineName=async()=>{
@@ -2902,7 +2906,7 @@ function SystemPage() {
       <section className="settings-panel settings-panel-wide">
         <h2>기본 경로 설정</h2>
         <div className="hint-box">
-          신규 에이전트 생성 시 개별 경로를 입력하지 않으면 아래 기본 경로를 사용합니다.
+          아래 경로는 신규 Agent뿐 아니라 AgentStudio 런타임에도 실제 적용됩니다. Temp는 임시 작업파일, Cache는 pip/Hugging Face/Torch/OCR/브라우저 캐시, Output은 다운로드·내보내기·녹음/Transcript 결과 파일의 기본 저장 위치입니다. C: 공간이 부족하면 다른 드라이브를 지정하세요.
         </div>
         <div className="two-col-fields">
           {renderPathField("프로젝트 기본 경로","DEFAULT_PROJECT_ROOT","Agent 프로젝트 기본 폴더")}
@@ -18769,14 +18773,8 @@ function IDE() {
           : `${safeProject}_${exportScope==='ALL'?'Agent_PPT_전체':label}.pptx`
       }
 
-      const url=URL.createObjectURL(blob)
-      const anchor=document.createElement('a')
-      anchor.href=url
-      anchor.download=filename
-      document.body.appendChild(anchor)
-      anchor.click()
-      anchor.remove()
-      window.setTimeout(()=>URL.revokeObjectURL(url),1500)
+      const saved=await saveBlobToOutput(blob,filename,'presentations',resolveWorkspaceRoot())
+      window.alert(`PPT 저장 완료\n${saved.path}`)
     }catch(error){
       const message=error instanceof Error?error.message:String(error||'알 수 없는 오류')
       setPptExportError(message)

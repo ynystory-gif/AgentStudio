@@ -75,3 +75,7 @@
 
 ## v5.492 Live Transcript Text File Save
 실시간 STT Transcript와 요약정리를 프로젝트 recordings 폴더에 UTF-8 TXT로 저장하고 실제 저장 경로를 UI에 표시합니다.
+
+
+## v5.493 Runtime Path Policy
+Temp/Cache/Output 기본 경로를 실제 런타임과 다운로드 저장 경로에 연결했습니다.

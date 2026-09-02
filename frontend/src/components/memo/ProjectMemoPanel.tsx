@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { api } from '../../api'
+import { api, saveBlobToOutput } from '../../api'
 import { useMediaSession } from '../media/MediaSessionProvider'
 
 type ProjectMemo = {
@@ -121,6 +121,8 @@ export function ProjectMemoPanel({ projectRoot, activeFile = '', projectFiles = 
   const [liveSummarySegmentCount, setLiveSummarySegmentCount] = useState(0)
   const [liveFileSaving, setLiveFileSaving] = useState<'' | 'TRANSCRIPT' | 'SUMMARY'>('')
   const [liveSavedFile, setLiveSavedFile] = useState<{ kind: 'TRANSCRIPT' | 'SUMMARY'; path: string; relativePath: string } | null>(null)
+  const [recordingFileSaving, setRecordingFileSaving] = useState(false)
+  const [recordingSavedPath, setRecordingSavedPath] = useState('')
   const [memos, setMemos] = useState<ProjectMemo[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [draftFile, setDraftFile] = useState('')
@@ -170,6 +172,8 @@ export function ProjectMemoPanel({ projectRoot, activeFile = '', projectFiles = 
     setLiveSummarySegmentCount(0)
     setLiveFileSaving('')
     setLiveSavedFile(null)
+    setRecordingFileSaving(false)
+    setRecordingSavedPath('')
     setSelectedId('')
     setDraftFile(normalizedActiveFile)
     setDraftTitle('')
@@ -386,6 +390,21 @@ export function ProjectMemoPanel({ projectRoot, activeFile = '', projectFiles = 
     } finally {
       setLiveFileSaving('')
     }
+  }
+
+  const saveRecordingFileToOutput = async () => {
+    if (!mediaSession.recordingUrl || recordingFileSaving) return
+    setRecordingFileSaving(true)
+    try {
+      const response = await fetch(mediaSession.recordingUrl)
+      const blob = await response.blob()
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '_')
+      const saved = await saveBlobToOutput(blob, `recording_${stamp}.webm`, 'recordings', projectRoot)
+      setRecordingSavedPath(saved.path)
+      setStatus(`녹음 파일을 Output 경로에 저장했습니다: ${saved.path}`)
+    } catch (saveError) {
+      setStatus(`녹음 파일 저장 실패: ${String((saveError as Error)?.message || saveError)}`)
+    } finally { setRecordingFileSaving(false) }
   }
 
   const visibleMemos = useMemo(() => {
@@ -656,7 +675,10 @@ export function ProjectMemoPanel({ projectRoot, activeFile = '', projectFiles = 
       )}
 
       {mediaSession.recordingUrl && (
-        <a className="project-live-recording-download" href={mediaSession.recordingUrl} download="agentstudio-recording.webm">녹음 파일 저장</a>
+        <button type="button" className="project-live-recording-download" onClick={() => void saveRecordingFileToOutput()} disabled={recordingFileSaving}>{recordingFileSaving ? '녹음 파일 저장 중…' : '녹음 파일 저장'}</button>
+      )}
+      {recordingSavedPath && (
+        <div className="project-live-save-path" title={recordingSavedPath}><strong>녹음 파일 저장 경로</strong><code>{recordingSavedPath}</code></div>
       )}
       {mediaSession.error && <div className="project-memo-status error">{mediaSession.error}</div>}
       {status && <div className="project-memo-status">{status}</div>}

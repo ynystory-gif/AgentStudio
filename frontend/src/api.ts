@@ -48,5 +48,11 @@ export async function api<T=unknown>(path:string,options:RequestInit={}):Promise
   const res=await apiFetch(path,options)
   return res.json() as Promise<T>
 }
+export async function saveBlobToOutput(blob:Blob,filename:string,category='downloads',projectRoot=''):Promise<{ok:boolean;path:string;output_root:string;relative_path:string;bytes:number}>{
+  const params=new URLSearchParams({filename:String(filename||'download.bin'),category:String(category||'downloads')})
+  if(projectRoot)params.set('project_root',projectRoot)
+  const res=await apiFetch(`/output/save?${params.toString()}`,{method:'POST',headers:{'Content-Type':blob.type||'application/octet-stream'},body:blob})
+  return res.json()
+}
 export function connectJobs(onEvent:(event:JobEvent)=>void):WebSocket{const token=getAuthToken();const ws=new WebSocket(`${getWsBase()}${token?`?access_token=${encodeURIComponent(token)}`:''}`);ws.onmessage=event=>onEvent(JSON.parse(event.data) as JobEvent);ws.onopen=()=>ws.send('connected');return ws}
 export function runtimeInfo():RuntimeInfo{return {apiBase:getApiBase(),wsBase:getWsBase(),config:getRuntimeConfig()}}

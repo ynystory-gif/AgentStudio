@@ -109,6 +109,27 @@ $DbHealthLog = Join-Path $LogDir "database_health.log"
 $BackendStartupLog = Join-Path $LogDir "backend_startup.log"
 $BackendEnvPath = Join-Path $BackendDir ".env"
 
+# v5.493: apply saved Temp/Cache/Output roots before pip/npm/backend processes start.
+function Get-AgentStudioEnvValue {
+    param([string]$Key)
+    if (-not (Test-Path $BackendEnvPath)) { return "" }
+    try {
+        $Line = Get-Content -Path $BackendEnvPath -Encoding UTF8 | Where-Object { $_ -match ("^" + [regex]::Escape($Key) + "=") } | Select-Object -Last 1
+        if (-not $Line) { return "" }
+        return [string]($Line.Substring($Key.Length + 1).Trim())
+    } catch { return "" }
+}
+$ConfiguredTempRoot = Get-AgentStudioEnvValue "DEFAULT_TEMP_ROOT"
+$ConfiguredCacheRoot = Get-AgentStudioEnvValue "DEFAULT_CACHE_ROOT"
+$ConfiguredOutputRoot = Get-AgentStudioEnvValue "DEFAULT_OUTPUT_ROOT"
+if ($ConfiguredTempRoot) { New-Item -ItemType Directory -Force -Path $ConfiguredTempRoot | Out-Null; $env:TEMP=$ConfiguredTempRoot; $env:TMP=$ConfiguredTempRoot; $env:TMPDIR=$ConfiguredTempRoot; $env:AGENTSTUDIO_TEMP_ROOT=$ConfiguredTempRoot }
+if ($ConfiguredCacheRoot) {
+    New-Item -ItemType Directory -Force -Path $ConfiguredCacheRoot | Out-Null
+    $env:AGENTSTUDIO_CACHE_ROOT=$ConfiguredCacheRoot; $env:PIP_CACHE_DIR=Join-Path $ConfiguredCacheRoot "pip"; $env:NPM_CONFIG_CACHE=Join-Path $ConfiguredCacheRoot "npm"; $env:HF_HOME=Join-Path $ConfiguredCacheRoot "huggingface"; $env:TORCH_HOME=Join-Path $ConfiguredCacheRoot "torch"; $env:EASYOCR_MODULE_PATH=Join-Path $ConfiguredCacheRoot "easyocr"
+    @($env:PIP_CACHE_DIR,$env:NPM_CONFIG_CACHE,$env:HF_HOME,$env:TORCH_HOME,$env:EASYOCR_MODULE_PATH) | ForEach-Object { New-Item -ItemType Directory -Force -Path $_ | Out-Null }
+}
+if ($ConfiguredOutputRoot) { New-Item -ItemType Directory -Force -Path $ConfiguredOutputRoot | Out-Null; $env:AGENTSTUDIO_OUTPUT_ROOT=$ConfiguredOutputRoot }
+
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 function Write-Log {

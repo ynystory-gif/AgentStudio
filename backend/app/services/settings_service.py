@@ -527,6 +527,11 @@ def _apply_runtime_values(values: dict[str, str]) -> None:
 
     get_settings.cache_clear()
 
+    # v5.493: path settings are operational immediately, not cosmetic.
+    if any(key in values for key in {"DEFAULT_TEMP_ROOT", "DEFAULT_CACHE_ROOT", "DEFAULT_OUTPUT_ROOT"}):
+        from app.services.runtime_path_policy import apply_runtime_path_policy
+        apply_runtime_path_policy()
+
 
 async def load_db_settings_into_runtime() -> dict:
     """
