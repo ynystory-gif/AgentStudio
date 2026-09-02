@@ -1,0 +1,183 @@
+name: v5.501 DB Checkbox Requirement State Retry
+
+on:
+  push:
+    branches:
+      - fix/v5.501-db-checkbox-requirement-state
+
+permissions:
+  contents: write
+
+jobs:
+  apply-validate-package:
+    if: contains(github.event.head_commit.message, '[v5501-retry]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply v5.501 product patch
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          app = Path('frontend/src/App.jsx')
+          text = app.read_text(encoding='utf-8')
+
+          replacements = [
+            (
+              "postgresql:{...base.postgresql,...(source.postgresql||{}),enabled:Boolean(source?.postgresql?.use_in_agent??source?.postgresql?.enabled),password:String(source?.postgresql?.password||'')}",
+              "postgresql:{...base.postgresql,...(source.postgresql||{}),enabled:Boolean(source?.postgresql?.enabled??source?.postgresql?.use_in_agent),use_in_agent:Boolean(source?.postgresql?.enabled??source?.postgresql?.use_in_agent),password:String(source?.postgresql?.password||'')}"
+            ),
+            (
+              "firestore:{...base.firestore,...(source.firestore||{}),enabled:Boolean(source?.firestore?.use_in_agent??source?.firestore?.enabled),service_account_path:String(source?.firestore?.service_account_path||'')}",
+              "firestore:{...base.firestore,...(source.firestore||{}),enabled:Boolean(source?.firestore?.enabled??source?.firestore?.use_in_agent),use_in_agent:Boolean(source?.firestore?.enabled??source?.firestore?.use_in_agent),service_account_path:String(source?.firestore?.service_account_path||'')}"
+            ),
+            (
+              "redis:{...base.redis,...(source.redis||{}),enabled:Boolean(source?.redis?.use_in_agent??source?.redis?.enabled),password:String(source?.redis?.password||''),tls:Boolean(source?.redis?.tls??source?.redis?.ssl)}",
+              "redis:{...base.redis,...(source.redis||{}),enabled:Boolean(source?.redis?.enabled??source?.redis?.use_in_agent),use_in_agent:Boolean(source?.redis?.enabled??source?.redis?.use_in_agent),password:String(source?.redis?.password||''),tls:Boolean(source?.redis?.tls??source?.redis?.ssl)}"
+            ),
+          ]
+          for old, new in replacements:
+            if old not in text:
+              raise SystemExit(f'DB normalization source contract not found: {old[:24]}')
+            text = text.replace(old, new, 1)
+
+          old = "  const patchProvider=(provider,patch)=>onChange?.({...setup,mode:setup.mode==='PENDING'?'CONFIGURE':setup.mode,[provider]:{...setup[provider],...patch}})\n"
+          new = """  const patchProvider=(provider,patch)=>{
+            const normalizedPatch={...patch}
+            if(Object.prototype.hasOwnProperty.call(normalizedPatch,'enabled')){
+              normalizedPatch.enabled=Boolean(normalizedPatch.enabled)
+              normalizedPatch.use_in_agent=Boolean(normalizedPatch.enabled)
+            }
+            onChange?.({...setup,mode:setup.mode==='PENDING'?'CONFIGURE':setup.mode,[provider]:{...setup[provider],...normalizedPatch}})
+          }
+          """
+          if old not in text:
+            raise SystemExit('patchProvider source contract not found')
+          text = text.replace(old, new, 1)
+
+          old = "    if(['NO_DB','SKIP','LATER_EDITOR'].includes(mode)) for(const key of ['postgresql','firestore','redis']) next[key]={...next[key],enabled:false,auto_provision:false}\n"
+          new = "    if(['NO_DB','SKIP','LATER_EDITOR'].includes(mode)) for(const key of ['postgresql','firestore','redis']) next[key]={...next[key],enabled:false,use_in_agent:false,auto_provision:false}\n"
+          if old not in text:
+            raise SystemExit('database setMode source contract not found')
+          text = text.replace(old, new, 1)
+
+          pattern = re.compile(
+            r"(return requirementKeywordDefinitions\.map\(def=>\{\s*)"
+            r"let collected=def\.keywords\.some\(keyword=>\s*"
+            r"text\.includes\(String\(keyword\)\.toLowerCase\(\)\)\s*\)"
+          )
+          replacement = (
+            "\\1// v5.501: keyword mention alone is not a completed requirement. A slot is\n"
+            "      // complete only when a concrete value, confirmed state, manual override,\n"
+            "      // or explicit structured selection exists.\n"
+            "      let collected=false"
+          )
+          text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+            raise SystemExit(f'requirement collected source contract count={count}')
+
+          if "const AGENTSTUDIO_FRONTEND_VERSION='5.500'" not in text:
+            raise SystemExit('frontend version contract not found')
+          text = text.replace("const AGENTSTUDIO_FRONTEND_VERSION='5.500'", "const AGENTSTUDIO_FRONTEND_VERSION='5.501'", 1)
+          app.write_text(text, encoding='utf-8')
+
+          main = Path('backend/app/main.py')
+          value = main.read_text(encoding='utf-8')
+          if 'version="5.500"' not in value:
+            raise SystemExit('FastAPI version contract not found')
+          main.write_text(value.replace('version="5.500"', 'version="5.501"', 1), encoding='utf-8')
+
+          routes = Path('backend/app/api/routes.py')
+          value = routes.read_text(encoding='utf-8')
+          if '"version": "5.500"' not in value:
+            raise SystemExit('health version contract not found')
+          routes.write_text(value.replace('"version": "5.500"', '"version": "5.501"', 1), encoding='utf-8')
+
+          readme = Path('README.md')
+          value = readme.read_text(encoding='utf-8').rstrip()
+          section = """
+
+## v5.501 DB Checkbox & Requirement Completion State Fix
+- `지금 DB 설정`의 PostgreSQL/Firestore/Redis 사용 상태를 `enabled`와 `use_in_agent` 양쪽에 동시에 기록하고, 과거 저장값을 읽을 때도 `enabled`를 우선해 체크 직후 원상복귀되는 문제를 차단했습니다.
+- `DB 없이 생성`/`건너뛰기`/`나중에 설정` 선택 시 두 사용 상태를 함께 해제해 다시 열었을 때 체크 상태가 일치합니다.
+- 요구사항 수집 현황은 단순 키워드 언급만으로 완료 처리하지 않습니다. 실제 값·확정값·사용자 선택·수동 재정의가 있는 경우에만 완료 표시합니다.
+- v5.500의 정보 질문 즉답, 첨부 분석 1회 캐시, Event-driven Save, 상단 높이 조절/접기, Tool/Prompt 단계, UI Framework/Layout 분리, 인터뷰 timeout 보호를 그대로 유지합니다.
+"""
+          if '## v5.501 DB Checkbox & Requirement Completion State Fix' not in value:
+            value += section
+          readme.write_text(value.rstrip() + '\n', encoding='utf-8')
+
+          Path('README_V5_501_DBCheckboxRequirementCompletionFix.md').write_text("""# THEANOVA AgentStudio v5.501
+
+- `지금 DB 설정`에서 PostgreSQL/Firestore/Redis 사용 체크 상태를 `enabled`와 `use_in_agent`에 함께 반영해 클릭 후 즉시 원상복귀되는 상태 충돌을 수정했습니다.
+- 과거 저장 Snapshot을 정규화할 때 `enabled` 값을 우선하고 두 상태를 동기화합니다.
+- DB 미사용/건너뛰기/나중에 설정 시 `enabled=false`, `use_in_agent=false`를 함께 저장합니다.
+- 요구사항 수집 현황은 키워드가 문서나 대화에 단순 등장했다는 이유만으로 완료 처리하지 않고 실제 값/확정 상태가 있을 때만 완료합니다.
+- v5.500의 사용자 질문 즉답, 첨부파일 1회 분석/Memory 재사용, 사용자 액션 기반 저장, Tool/Prompt 단계, UI Framework/Layout 분리, 첨부 정리 패널 상단 조절/접기 기능을 유지합니다.
+""", encoding='utf-8')
+
+      - name: Validate backend
+        run: python -m compileall -q backend/app
+
+      - name: Validate v5.501 contracts
+        shell: python
+        run: |
+          from pathlib import Path
+          app = Path('frontend/src/App.jsx').read_text(encoding='utf-8')
+          main = Path('backend/app/main.py').read_text(encoding='utf-8')
+          routes = Path('backend/app/api/routes.py').read_text(encoding='utf-8')
+          assert "AGENTSTUDIO_FRONTEND_VERSION='5.501'" in app
+          assert 'version="5.501"' in main
+          assert '"version": "5.501"' in routes
+          assert "enabled:Boolean(source?.postgresql?.enabled??source?.postgresql?.use_in_agent)" in app
+          assert "normalizedPatch.use_in_agent=Boolean(normalizedPatch.enabled)" in app
+          assert "enabled:false,use_in_agent:false,auto_provision:false" in app
+          assert "let collected=false" in app
+          assert 'providerEnabledToggle' in app
+          assert 'ToolPromptSettingsPanel' in app
+          assert 'interview_turn_type' in routes
+          assert 'attachment-ai-summary-collapse-button' in app
+          print('v5.501 source contracts PASS')
+
+      - name: Validate frontend production build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Commit product source
+        run: |
+          git config user.name "ynystory-gif"
+          git config user.email "ynystory@gmail.com"
+          git add frontend/src/App.jsx backend/app/main.py backend/app/api/routes.py README.md README_V5_501_DBCheckboxRequirementCompletionFix.md
+          git commit -m "fix: release v5.501 DB checkbox and requirement completion state"
+          git push origin HEAD:fix/v5.501-db-checkbox-requirement-state
+
+      - name: Build distribution zip
+        shell: bash
+        run: |
+          rm -rf /tmp/agentstudio-dist
+          mkdir -p /tmp/agentstudio-dist/THEANOVA_AgentStudio_v5_501_DBCheckboxRequirementCompletionFix
+          rsync -a ./ /tmp/agentstudio-dist/THEANOVA_AgentStudio_v5_501_DBCheckboxRequirementCompletionFix/ \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'frontend/node_modules' \
+            --exclude 'frontend/dist' \
+            --exclude '__pycache__' \
+            --exclude '*.pyc' \
+            --exclude 'README_V5_*.md'
+          cp README_V5_501_DBCheckboxRequirementCompletionFix.md /tmp/agentstudio-dist/THEANOVA_AgentStudio_v5_501_DBCheckboxRequirementCompletionFix/
+          cd /tmp/agentstudio-dist
+          zip -qr "$GITHUB_WORKSPACE/THEANOVA_AgentStudio_v5_501_DBCheckboxRequirementCompletionFix.zip" THEANOVA_AgentStudio_v5_501_DBCheckboxRequirementCompletionFix
+          unzip -t "$GITHUB_WORKSPACE/THEANOVA_AgentStudio_v5_501_DBCheckboxRequirementCompletionFix.zip" >/dev/null
+          sha256sum "$GITHUB_WORKSPACE/THEANOVA_AgentStudio_v5_501_DBCheckboxRequirementCompletionFix.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: THEANOVA_AgentStudio_v5_501_DBCheckboxRequirementCompletionFix
+          path: THEANOVA_AgentStudio_v5_501_DBCheckboxRequirementCompletionFix.zip
+          if-no-files-found: error
