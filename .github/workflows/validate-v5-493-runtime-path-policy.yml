@@ -22,9 +22,9 @@ jobs:
           import base64, gzip
           from pathlib import Path
           encoded = Path('.github/scripts/apply_v5493_runtime_path_policy.py.gz.b64').read_text(encoding='utf-8').strip()
-          Path('/tmp/apply_v5493.py').write_bytes(gzip.decompress(base64.b64decode(encoded)))
+          Path('.github/scripts/apply_v5493_runtime_path_policy.py').write_bytes(gzip.decompress(base64.b64decode(encoded)))
           PY
-          python /tmp/apply_v5493.py
+          python .github/scripts/apply_v5493_runtime_path_policy.py
 
       - name: Validate backend and runtime path contract
         run: |
@@ -49,7 +49,7 @@ jobs:
           git config user.name "ynystory-gif"
           git config user.email "ynystory@gmail.com"
           git add -A
-          git reset -- .github/workflows/validate-v5-493-runtime-path-policy.yml .github/scripts/apply_v5493_runtime_path_policy.py.gz.b64
+          git reset -- .github/workflows/validate-v5-493-runtime-path-policy.yml .github/scripts/apply_v5493_runtime_path_policy.py.gz.b64 .github/scripts/apply_v5493_runtime_path_policy.py
           git commit -m "feat: apply runtime temp cache output paths for v5.493"
           git push origin HEAD:fix/v5.493-runtime-path-policy
 
