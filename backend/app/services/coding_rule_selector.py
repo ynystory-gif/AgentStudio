@@ -31,6 +31,14 @@ def infer_coding_tags(
         tags.update({"rag", "data_pipeline", "document_loader", "retrieval"})
 
     if any(token in text for token in (
+        "pii", "개인정보", "개인 정보", "민감정보", "민감 정보", "privacy",
+        "마스킹", "masking", "redact", "redaction", "비식별", "익명화",
+        "주민등록번호", "주민번호", "전화번호", "연락처", "계좌번호",
+        "sanitize", "sanitization", "개인정보 보호", "privacy boundary",
+    )):
+        tags.update({"privacy", "pii", "security", "sanitization", "data_pipeline", "audit", "testing"})
+
+    if any(token in text for token in (
         "ocr", "easyocr", "paddleocr", "paddlepaddle", "tesseract",
         "doclayout", "opencv", "cuda", "nvidia-smi", "gpu",
     )):

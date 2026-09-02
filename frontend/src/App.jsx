@@ -33,7 +33,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.496'
+const AGENTSTUDIO_FRONTEND_VERSION='5.497'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_AGENT_CODING_STYLE={
@@ -70,6 +70,13 @@ const DEFAULT_AGENT_CODING_STYLE={
   idempotent_indexing:true,
   retrieval_observability:true,
   retrieved_context_instruction_guard:true,
+  pii_processing_boundary:true,
+  content_metadata_dual_sanitization:true,
+  fail_closed_sensitive_data:true,
+  raw_sanitized_data_separation:true,
+  pii_safe_logging_audit:true,
+  pii_policy_versioning_minimization:true,
+  pii_detection_regression_testing:true,
 }
 const normalizeAgentCodingStyle=(value={})=>{
   const source=value&&typeof value==='object'?value:{}
@@ -3849,6 +3856,13 @@ function CodingStyleSettingsMenu({ value, busy=false, stage='', codeDocumentatio
     ['idempotent_indexing','중복 없는 재색인','document/chunk ID·checksum·version으로 변경 여부를 확인해 동일 문서를 반복 Embedding하지 않습니다.','RAG · 검색'],
     ['retrieval_observability','검색 관찰 가능성','검색 문서 수·Score·Source·Latency·Fallback 여부를 추적할 수 있도록 결과와 로그를 구조화합니다.','RAG · 검색'],
     ['retrieved_context_instruction_guard','검색 문서 지시문 격리','검색된 문서의 명령문·Prompt Injection을 System 지시로 취급하지 않고 참고 데이터로만 처리합니다.','RAG · 검색'],
+    ['pii_processing_boundary','PII 처리 경계','LLM·Embedding·Vector DB·외부 API로 보내기 전에 개인정보를 탐지·정리·검증합니다.','개인정보 · 보안'],
+    ['content_metadata_dual_sanitization','본문·Metadata 동시 Sanitization','page_content뿐 아니라 Metadata의 민감 필드도 함께 탐지하고 안전한 값만 남깁니다.','개인정보 · 보안'],
+    ['fail_closed_sensitive_data','민감정보 Fail-closed','Sanitization 뒤 개인정보가 남으면 색인·전송·외부 호출을 중단합니다.','개인정보 · 보안'],
+    ['raw_sanitized_data_separation','Raw·Sanitized 데이터 분리','원본과 외부 사용 가능한 정리 데이터를 타입·상태·저장 경계로 구분합니다.','개인정보 · 보안'],
+    ['pii_safe_logging_audit','PII 안전 로그·Audit','로그·Trace·오류·리포트에 실제 개인정보 값 대신 유형·개수·필드명·상태만 기록합니다.','개인정보 · 보안'],
+    ['pii_policy_versioning_minimization','PII 정책 버전·최소수집','정책 버전과 처리 상태는 남기되 업무에 불필요한 민감 Metadata는 보존하지 않습니다.','개인정보 · 보안'],
+    ['pii_detection_regression_testing','PII 탐지 회귀검사','정상 탐지뿐 아니라 누락·오탐·표기 변형 Case를 함께 자동 테스트합니다.','개인정보 · 보안'],
   ]
   const groups=[
     ['이름 · 타입','이름 · 타입','읽기 쉬운 이름과 타입 안정성을 유지합니다.'],
@@ -3857,6 +3871,7 @@ function CodingStyleSettingsMenu({ value, busy=false, stage='', codeDocumentatio
     ['외부 · 운영','외부 · 운영','외부 연동과 대용량 처리에서 실패·성능·경고를 안전하게 다룹니다.'],
     ['환경 · 복구','환경 · 복구','실행 전 조건을 확인하고 기존 환경을 보존하며 품질 기반 대체 경로를 사용합니다.'],
     ['RAG · 검색','RAG · 검색','색인·검색·근거 검증·Context·재색인과 검색 보안을 운영형 RAG 구조로 관리합니다.'],
+    ['개인정보 · 보안','개인정보 · 보안','개인정보를 외부 처리 전에 정리·검증하고 원문 노출 없이 추적·테스트합니다.'],
   ]
   const update=(key,checked)=>onChange?.({...normalized,[key]:Boolean(checked)})
   return <details className="agent-coding-style-menu">

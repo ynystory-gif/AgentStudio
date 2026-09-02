@@ -147,7 +147,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.496", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.497", lifespan=lifespan)
 
 _PUBLIC_API_PATHS = {
     "/api/health",

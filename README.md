@@ -1,3 +1,10 @@
+## v5.497
+
+- 개인정보 보호 PII 마스킹 Notebook 분석을 기반으로 Agent 생성 코딩 스타일에 Privacy 전용 규칙 7개를 추가했습니다.
+- PII 처리 경계, 본문+Metadata 이중 Sanitization, Fail-closed, Raw/Sanitized 분리, PII-safe 로그/Audit, 정책 버전·Data Minimization, 누락·오탐 회귀검사를 기본 ON으로 적용합니다.
+- Coding Style Registry를 2.2로 올리고 CS-178~CS-184를 추가했습니다.
+- 기존 CS-159 Metadata 보존은 Privacy Sanitization/Allowlist 이후 안전한 Metadata만 보존하도록, CS-176 Retrieval Observability는 Query·Context·Snippet의 원문 PII/Secret을 기록하지 않도록 강화했습니다.
+
 ## v5.496
 
 - RAG 최소 파이프라인 Notebook 분석을 기반으로 Agent 생성 코딩 스타일에 운영형 RAG 전용 규칙 8개를 추가했습니다.
