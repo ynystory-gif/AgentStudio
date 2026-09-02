@@ -1,3 +1,11 @@
+## v5.499 Media Workflow Editor UI
+
+- 기존 그룹형 Target Agent Workflow를 유지하면서 Media Agent에 Node Palette · 편집 Canvas · Node 설정 · Preview/Job 상태 UI를 추가했습니다.
+- Backend Media Node Catalog를 직접 읽고 Typed Port 연결을 `/api/media/workflow/validate-port`로 검증합니다.
+- Canvas에서 Node 추가/이동/삭제, Output→Input 연결, Provider/Model/크기/Retry 설정, Workflow JSON 가져오기/내보내기를 지원합니다.
+- `/api/media/workflow/validate`와 `/normalize`로 전체 Workflow를 검증·정규화한 뒤 Agent 설계 Draft/Checkpoint에 반영합니다.
+- Editor 실행/정지는 설계 단계임을 명시하고 실제 Provider 실행은 생성 대상 Agent Adapter Runtime의 책임으로 유지합니다.
+
 ## v5.498 Media Workflow Core
 
 - Agent Creator/Editor 정체성을 유지하면서 미디어 생성·처리 Agent 설계용 고수준 Workflow Core를 추가했습니다.

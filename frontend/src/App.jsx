@@ -22,6 +22,7 @@ import { CodexPanel } from './components/codex/CodexPanel'
 import { CodexSettingsPanel } from './components/codex/CodexSettingsPanel'
 import { ProjectMemoPanel } from './components/memo/ProjectMemoPanel'
 import { useMediaSession } from './components/media/MediaSessionProvider'
+import { MediaWorkflowEditor } from './components/media/MediaWorkflowEditor'
 import { TemporaryMediaViewer } from './components/media/TemporaryMediaViewer'
 import { AiAttachmentPicker } from './components/ai/AiAttachmentPicker'
 import { AgentActivityProgress } from './components/ai/AgentActivityProgress'
@@ -33,7 +34,7 @@ import { formatNotebookSqlResult, looksLikeNotebookSqlCode, normalizeNotebookSql
 import { browserTitleForUrl, extractLocalDevelopmentUrls, normalizeBrowserUrl, usesBackendBrowserProxy } from './utils/browser'
 import { AgentWorkCenterPanel, GlobalCommandPalette, HelpCenterPanel } from './components/global/GlobalStudioOverlays'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.498'
+const AGENTSTUDIO_FRONTEND_VERSION='5.499'
 const formatMediaElapsed=(value=0)=>{const total=Math.max(0,Math.floor(Number(value||0)));const hh=String(Math.floor(total/3600)).padStart(2,'0');const mm=String(Math.floor((total%3600)/60)).padStart(2,'0');const ss=String(total%60).padStart(2,'0');return `${hh}:${mm}:${ss}`}
 
 const DEFAULT_AGENT_CODING_STYLE={
@@ -3493,8 +3494,9 @@ function DevelopmentStageWorkflowDiagram({workflow}){
   </div>
 }
 
-function TargetWorkflowDiagram({workflow}){
+function TargetWorkflowDiagram({workflow,onWorkflowChange}){
   const [selectedGroup,setSelectedGroup]=useState(null)
+  const [workflowMode,setWorkflowMode]=useState('GROUPS')
 
   const rawSteps=(workflow?.steps||[]).map((step,index)=>{
     if(typeof step==='string'){
@@ -3516,6 +3518,10 @@ function TargetWorkflowDiagram({workflow}){
       icon:step?.icon||workflowIconFor(step),
     }
   })
+
+  const mediaStepTypes=new Set(['media_input','media_analysis','media_plan','media_process','media_generate','media_validate','approval','preview'])
+  const hasMediaWorkflow=rawSteps.some(step=>mediaStepTypes.has(String(step?.type||'').toLowerCase()))
+    ||(Array.isArray(workflow?.nodes)&&workflow.nodes.some(node=>String(node?.type||'').toUpperCase().includes('IMAGE')||String(node?.type||'').toUpperCase().includes('VIDEO')))
 
   if(!rawSteps.length){
     return <div className="target-empty">
@@ -3712,6 +3718,12 @@ function TargetWorkflowDiagram({workflow}){
 
   const activeGroup=groups.find(x=>x.id===selectedGroup)
 
+  if(workflowMode==='MEDIA_EDITOR'&&hasMediaWorkflow){
+    return <div className="media-workflow-editor-back-shell">
+      <MediaWorkflowEditor workflow={workflow} onChange={onWorkflowChange} onClose={()=>setWorkflowMode('GROUPS')} />
+    </div>
+  }
+
   if(activeGroup){
     return <div className="grouped-workflow-detail">
       <div className="grouped-detail-head">
@@ -3775,7 +3787,10 @@ function TargetWorkflowDiagram({workflow}){
         <small>TARGET AGENT WORKFLOW</small>
         <strong>{workflow?.name||'Agent Workflow'}</strong>
       </div>
-      <span>그룹을 클릭하면 상세 단계가 표시됩니다.</span>
+      <div className="media-workflow-editor-actions">
+        <span>그룹을 클릭하면 상세 단계가 표시됩니다.</span>
+        {hasMediaWorkflow&&<button type="button" className="media-workflow-editor-open" onClick={()=>setWorkflowMode('MEDIA_EDITOR')}>▧ Media Workflow Editor</button>}
+      </div>
     </div>
 
     <div className="grouped-workflow-track">
@@ -19783,7 +19798,14 @@ function IDE() {
             </div>}
 
             <DevelopmentStageWorkflowDiagram workflow={targetWorkflowPreview?.development_workflow}/>
-            <TargetWorkflowDiagram workflow={targetWorkflowPreview?.target_agent_workflow||(selectedProjectId?loadedProjectAnalysis?.adaptive_report?.workflow:null)}/>
+            <TargetWorkflowDiagram
+              workflow={targetWorkflowPreview?.target_agent_workflow||(selectedProjectId?loadedProjectAnalysis?.adaptive_report?.workflow:null)}
+              onWorkflowChange={(nextWorkflow)=>{
+                setTargetWorkflowPreview(prev=>prev?{...prev,target_agent_workflow:nextWorkflow}:prev)
+                setPreviousTargetWorkflowPreview(prev=>prev?{...prev,target_agent_workflow:nextWorkflow}:prev)
+                setAgentBuildMessage('Media Workflow Editor 변경사항을 설계에 반영했습니다. Draft/Checkpoint에 자동 저장됩니다.')
+              }}
+            />
           </div>}
         </div>}
 
