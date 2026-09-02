@@ -76,7 +76,9 @@ jobs:
           git config user.email "ynystory@gmail.com"
           git add README.md README_V5_496_RagProductionCodingStyle.md frontend/src/App.jsx backend/app/main.py backend/app/api/routes.py backend/app/services/agent_workflow.py backend/app/services/coding_rule_selector.py
           git add -f backend/app/data/coding_style/rules.json backend/app/data/coding_style/sources/rag_minimum_pipeline_notebook.md
-          git commit -m "feat: add production RAG coding style for v5.496"
+          if ! git diff --cached --quiet; then
+            git commit -m "feat: add production RAG coding style for v5.496"
+          fi
           git push origin HEAD:fix/v5.496-rag-production-coding-style
 
       - name: Build clean distribution tree
@@ -84,8 +86,10 @@ jobs:
         run: |
           rm -rf package
           mkdir package
-          rsync -a ./ package/ --exclude '.git' --exclude '.github' --exclude 'package' --exclude 'frontend/node_modules' --exclude 'frontend/dist' --exclude 'backend/app/**/__pycache__' --exclude '*.pyc' --exclude 'README_V5_*.md'
+          rsync -a ./ package/ --exclude '.git' --exclude '.github' --exclude 'package' --exclude 'frontend/node_modules' --exclude 'frontend/dist' --exclude 'README_V5_*.md'
           cp README_V5_496_RagProductionCodingStyle.md package/
+          find package -type d -name '__pycache__' -prune -exec rm -rf {} +
+          find package -type f -name '*.pyc' -delete
           python - <<'PY'
           import json
           from pathlib import Path
@@ -100,6 +104,7 @@ jobs:
           assert all(any(r.get('id') == f'CS-{n}' for r in registry['rules']) for n in range(170, 178))
           assert (root/'backend/app/data/coding_style/sources/rag_minimum_pipeline_notebook.md').exists()
           assert not any(root.rglob('__pycache__'))
+          assert not any(root.rglob('*.pyc'))
           print('v5.496 distribution contract PASS')
           PY
 
