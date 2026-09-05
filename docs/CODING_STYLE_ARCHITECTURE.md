@@ -223,3 +223,22 @@ AgentStudio의 정체성을 일반 코드 편집기가 아닌 **에이전트를 
 
 교육용 팀 제출/스크린샷/특정 포트·모델·Python 버전 예시는 고정 규칙으로 만들지 않고
 설정 가능한 값으로 일반화합니다.
+
+
+## v5.519 추가 규칙 — RAG Chunking Strategy & Evaluation
+
+입력 자료: 청킹 전략 비교 Notebook
+
+추가 적용:
+- 문서 구조 기반 Chunking 전략 선택
+- 일반 PDF Recursive baseline
+- Markdown/HTML 구조 우선 + 2차 Recursive
+- Token-aware Recursive 우선 검토
+- 한국어 Separator 확장 가능 구조
+- source/page/start_index Chunk Provenance
+- Chunking 품질 평가 가능 구조
+- 전략 비교 조건 통제
+- Semantic Chunking 조건부 적용
+- 빈 Retrieval 결과 안전 처리
+
+기존 RAG 규칙(CS-170~CS-177)과 중복하지 않고 Chunking 단계의 전략 선택·평가 규칙을 보강합니다.

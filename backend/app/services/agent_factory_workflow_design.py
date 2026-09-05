@@ -13,11 +13,24 @@ from app.services.agent_factory_policy_planner import (
 from app.services.model_router import LLMTask, model_for_task
 from app.services.database_schema_design import build_database_plan
 from app.services.frontend_theme_registry import detect_frontend_theme_target, frontend_test_environment_files
+from app.services.blender_3d_agent_design import enforce_blender_3d_agent_design, is_blender_3d_agent_request, is_blender_3d_design
+from app.services.media_agent_design import enforce_media_agent_design, is_media_agent_design
+
+
+def _enforce_specialized_agent_design(design: dict, request: str) -> dict:
+    design = enforce_blender_3d_agent_design(design, request)
+    return enforce_media_agent_design(design, request)
 
 
 SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니다.
 
 사용자의 자연어 요구사항을 실행 가능한 Agent 프로그램 제작 계획으로 변환합니다.
+
+추가 설계 규칙:
+- 요구사항 Context에 `[요구사항 분석 AI 추천 구성]`이 있으면 사용자가 적용한 추천 기능·추천 메뉴·추천 Tool을 확정 요구사항으로 취급합니다. 체크 해제된 추천 항목을 다시 강제로 추가하지 않습니다.
+- `LLM Tool 분류`가 사용이면 1차 Intent/Capability 분류 → 2차 Tool Registry 후보 선택 구조를 Agent Architecture/Workflow에 반영합니다. 1차는 Category/Capability를 좁히고, 2차는 실제 Registry의 name/description/input_schema/capability/risk/permission을 검증합니다.
+- Tool Registry에 미등록된 추천 Capability는 존재하는 Tool처럼 꾸며내지 말고 `required capability / setup needed`로 명확히 계획합니다.
+- Tool 실행 전 enabled/permission/risk/confirmation 검증을 우회하지 않습니다.
 
 반드시 JSON 하나만 반환하세요.
 
@@ -83,7 +96,7 @@ SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니�
         "name": "machine_readable_step_name",
         "label": "사용자에게 보일 단계명",
         "description": "이 단계가 실제로 수행하는 일",
-        "type": "input|validation|mcp_client|transport|mcp_server|tool|llm|ui|storage|decision|complete"
+        "type": "input|validation|mcp_client|transport|mcp_server|tool|llm|ui|storage|decision|complete|media_input|media_analysis|media_plan|media_process|media_generate|media_validate|approval|preview"
       }
     ],
     "branches": [
@@ -235,6 +248,8 @@ SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니�
 - AgentStudio 자체 제작 Workflow와 생성 대상 Agent의 업무 Workflow를 구분합니다.
 - 기능을 무조건 MCP/Tool로 만들지 말고 필요성을 판단합니다.
 - 기존 프로젝트라면 기존 구조를 최대한 유지합니다.
+- Media Agent는 ComfyUI 저수준 그래프를 복제하지 않고 고수준 Media Node → Provider Adapter → 외부 Engine 구조를 사용합니다.
+- Media Workflow는 기존 Workflow Schema를 additive extension으로 확장하고 Typed Port/Artifact/Async Job/Provider Capability/Validator/Approval 계약을 유지합니다.
 - 신규 파일은 필요한 경우에만 계획합니다.
 - 실행, 테스트, 실패 복구까지 고려합니다.
 - 교육 예제의 특정 모델/포트/제한값을 근거 없이 고정하지 않습니다.
@@ -282,6 +297,10 @@ SYSTEM = """당신은 THEANOVA AgentStudio의 Agent Factory 설계 엔진입니�
 - file_plan에 등록된 required 파일은 실제 동작 가능한 구현으로 생성되어야 하며 TODO/placeholder/stub 문자열만 남긴 파일은 완료로 인정하지 않습니다.
 - 테스트는 최소 문법/Import 검증뿐 아니라 핵심 Workflow 계약(Root 제한, 확장자, MCP 호출, LLM Provider, 저장 정책 등)을 확인하도록 계획합니다.
 - .env.example에는 필요한 Key만 기록하고 실제 Secret은 절대 넣지 않습니다.
+- Blender/3D 제작 Agent 요구가 있으면 Blender MCP는 도구 실행 계층으로만 취급하고, Agent가 3D 요구사항 구조화, Scene State, Validator, LangGraph orchestration, Viewport/Render QA, bounded repair, Render/Export를 책임지게 설계합니다.
+- Blender/3D 제작 Agent는 MCP success 응답만으로 완료 처리하지 않고 가능하면 Viewport Screenshot 또는 Render 결과를 Vision QA로 검증합니다.
+- Blender/3D 제작 Agent의 Scene State에는 최소 scene_objects, selected_objects, materials, textures, camera, lights, current_step, completed_steps, failed_steps, render_status, output_files를 포함합니다.
+- Blender MCP Tool은 Registry에서 name/description/input schema/capability/risk를 분석한 뒤 선택하고, 임의 Python/Script 실행은 고위험 Tool로 취급합니다.
 """
 
 
@@ -528,44 +547,42 @@ def _enforce_workflow_requirement_coverage(
         )
         mark("허용 파일 확장자 제한", ["validate_file_extension"])
 
-    # MCP responsibility chain.
-    if "mcp" in req:
+    # MCP responsibility chain. 3D/Blender requests are handled by the dedicated
+    # contract below so a generic MCP requirement is never mis-described as a File Tool.
+    if "mcp" in req and not is_blender_3d_agent_request(request):
+        file_mcp_signal = any(token in req for token in ("파일", "file", ".txt", ".md", ".py", "문서"))
+        tool_name = "file_read_tool" if file_mcp_signal else "mcp_tool_execute"
+        tool_label = "File MCP Tool 실행" if file_mcp_signal else "MCP Tool 실행"
+        tool_description = (
+            "검증된 파일 경로의 내용을 읽어 다음 AI 처리 단계에 전달합니다."
+            if file_mcp_signal
+            else "Registry에서 선택한 MCP Tool을 검증된 input schema와 승인 정책에 따라 실행합니다."
+        )
         _ensure_step(
             workflow,
             "mcp_client_request",
             "MCP Client 요청",
-            "선택 파일 읽기 요청을 MCP Client가 구성하여 Transport 계층으로 전달합니다.",
+            "Agent가 필요한 Tool 요청을 MCP Client 형식으로 구성하여 Transport 계층으로 전달합니다.",
             "mcp_client",
         )
         _ensure_step(
             workflow,
             "mcp_transport",
             "MCP Transport",
-            "설정된 MCP Transport를 사용합니다. 로컬 stdio를 기본으로 하고 확장 가능한 Transport 계층을 유지합니다.",
+            "설정된 MCP Transport를 사용하여 Server와 통신합니다.",
             "transport",
         )
         _ensure_step(
             workflow,
             "mcp_server_dispatch",
             "MCP Server 처리",
-            "MCP Server가 파일 읽기 요청을 수신하고 등록된 File Tool로 전달합니다.",
+            "MCP Server가 요청을 수신하고 Registry에서 승인된 Tool로 전달합니다.",
             "mcp_server",
         )
-        _ensure_step(
-            workflow,
-            "file_read_tool",
-            "File MCP Tool 실행",
-            "검증된 파일 경로의 내용을 읽어 다음 AI 처리 단계에 전달합니다.",
-            "tool",
-        )
+        _ensure_step(workflow, tool_name, tool_label, tool_description, "tool")
         mark(
-            "MCP 기반 파일 읽기",
-            [
-                "mcp_client_request",
-                "mcp_transport",
-                "mcp_server_dispatch",
-                "file_read_tool",
-            ],
+            "MCP Tool 연동",
+            ["mcp_client_request", "mcp_transport", "mcp_server_dispatch", tool_name],
         )
 
     # Provider/model switching.
@@ -883,6 +900,7 @@ def build_safe_agent_factory_design(request: str, *, reason: str = "") -> dict:
     _sanitize_requirement_spec(fallback, request)
     fallback["database_plan"] = build_database_plan(request, fallback)
     fallback = _enforce_generated_test_environment_plan(fallback, request)
+    fallback = _enforce_specialized_agent_design(fallback, request)
     runtime = fallback.setdefault("design_runtime", {})
     runtime.update({
         "workflow_provider": "deterministic_safe_fallback",
@@ -1009,6 +1027,7 @@ async def design_agent_factory(
                 parsed["design_runtime"]["database_provider"] = "deterministic_fallback"
                 parsed["design_runtime"]["database_error"] = f"{type(db_exc).__name__}: {db_exc}"
         parsed = _enforce_generated_test_environment_plan(parsed, request)
+        parsed = _enforce_specialized_agent_design(parsed, request)
         return parsed
 
     except Exception:
@@ -1020,6 +1039,7 @@ async def design_agent_factory(
         _sanitize_requirement_spec(fallback, request)
         fallback["database_plan"] = build_database_plan(request, fallback)
         fallback = _enforce_generated_test_environment_plan(fallback, request)
+        fallback = _enforce_specialized_agent_design(fallback, request)
         return fallback
 
 # v5.345: Incremental design revision. Reuse the previous design unless the
@@ -1027,7 +1047,7 @@ async def design_agent_factory(
 _DESIGN_SECTION_KEYS = (
     "requirement_spec", "capability_plan", "tool_mcp_plan",
     "agent_architecture", "database_plan", "target_agent_workflow",
-    "file_plan", "settings_plan", "test_environment_plan", "environment_plan",
+    "file_plan", "settings_plan", "test_environment_plan", "three_d_agent_plan", "media_agent_plan", "environment_plan",
 )
 
 
@@ -1085,7 +1105,9 @@ def _impact_sections(changed_groups: list[str], delta_text: str) -> list[str]:
         "llm": {"requirement_spec", "capability_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "environment_plan"},
         "file_access": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan"},
         "mcp": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "environment_plan"},
-        "database": {"requirement_spec", "capability_plan", "agent_architecture", "database_plan", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "environment_plan"},
+        "agent_specialization": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan", "three_d_agent_plan", "media_agent_plan", "environment_plan"},
+        "recommendation_settings": {"requirement_spec", "capability_plan", "tool_mcp_plan", "agent_architecture", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan"},
+        "database": {"requirement_spec", "capability_plan", "agent_architecture", "database_plan", "target_agent_workflow", "file_plan", "settings_plan", "test_environment_plan"},
         "result": {"requirement_spec", "target_agent_workflow", "file_plan", "settings_plan"},
         "processing": {"requirement_spec", "target_agent_workflow", "settings_plan", "environment_plan"},
         "runtime": {"requirement_spec", "file_plan", "settings_plan", "environment_plan"},
@@ -1111,7 +1133,7 @@ def _needs_full_redesign(changed_groups: list[str], delta_text: str) -> bool:
         "처음부터 다시", "전체 구조 변경", "아키텍처 전체", "목적을 변경",
         "새 에이전트", "완전히 다른", "workflow 전체 변경",
     ))
-    structural = {"original_request", "backend", "mcp", "database", "auth", "manual_overrides"}
+    structural = {"original_request", "backend", "mcp", "database", "auth", "agent_specialization", "manual_overrides"}
     structural_count = len(structural.intersection(changed_groups))
     return explicit or structural_count >= 3
 
@@ -1126,6 +1148,8 @@ async def design_agent_factory_incremental(
     interview_messages: list[dict] | None = None,
 ) -> dict:
     previous_sections = _preview_design_sections(previous_design)
+    preserve_blender_specialization = is_blender_3d_design(previous_design, request)
+    preserve_media_specialization = is_media_agent_design(previous_design, request)
     if not any(previous_sections.values()):
         result = await design_agent_factory(request, project_context, provider)
         result.setdefault("design_runtime", {})["incremental_revision"] = {
@@ -1152,10 +1176,17 @@ async def design_agent_factory_incremental(
             "reused_sections": list(_DESIGN_SECTION_KEYS),
         }
         result["design_runtime"] = runtime
+        result = _enforce_specialized_agent_design(result, request)
         return result
 
     if _needs_full_redesign(changed_groups, delta_text):
         result = await design_agent_factory(request, project_context, provider)
+        if preserve_blender_specialization:
+            result.setdefault("design_runtime", {})["agent_specialization"] = "BLENDER_3D"
+            result = _enforce_specialized_agent_design(result, request)
+        if preserve_media_specialization:
+            result.setdefault("design_runtime", {})["agent_specialization"] = "MEDIA_CREATION"
+            result = _enforce_specialized_agent_design(result, request)
         result.setdefault("design_runtime", {})["incremental_revision"] = {
             "mode": "FULL_REDESIGN",
             "llm_called": True,
@@ -1241,6 +1272,7 @@ async def design_agent_factory_incremental(
                     runtime["database_provider"] = "deterministic_fallback"
                     runtime["database_error"] = f"{type(db_exc).__name__}: {db_exc}"
         result = _enforce_generated_test_environment_plan(result, request)
+        result = _enforce_specialized_agent_design(result, request)
         runtime["workflow_provider"] = getattr(llm, "last_provider", "")
         runtime["incremental_revision"] = {
             "mode": "PARTIAL_REVISE",
@@ -1258,6 +1290,12 @@ async def design_agent_factory_incremental(
     except Exception as exc:
         # Correctness wins over reuse when the focused revision cannot be parsed.
         result = await design_agent_factory(request, project_context, provider)
+        if preserve_blender_specialization:
+            result.setdefault("design_runtime", {})["agent_specialization"] = "BLENDER_3D"
+            result = _enforce_specialized_agent_design(result, request)
+        if preserve_media_specialization:
+            result.setdefault("design_runtime", {})["agent_specialization"] = "MEDIA_CREATION"
+            result = _enforce_specialized_agent_design(result, request)
         result.setdefault("design_runtime", {})["incremental_revision"] = {
             "mode": "FULL_REDESIGN_FALLBACK",
             "llm_called": True,

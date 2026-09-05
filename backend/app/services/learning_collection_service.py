@@ -16,6 +16,7 @@ from app.services.llm_learning_service import (
     _dataset_dict,
     _generate_problem_batch,
     analyze_learning_scope,
+    ensure_dataset_problem_storage,
     sync_misjudgment_candidates,
 )
 
@@ -140,7 +141,10 @@ def _hidden_by_applied_family(item: dict, applied_families: list[dict]) -> bool:
 
 
 async def list_aggregated_misjudgment_cases(provider: str = "", status: str = "", limit: int = 500) -> dict:
-    sync_result = await sync_misjudgment_candidates()
+    # v5.445: list GET is read-only with respect to history synchronization.
+    # History scanning runs once at AgentStudio startup and on the explicit `오판 수집` action.
+    # Auto-confirm remains inexpensive and keeps the 75% eligibility policy consistent.
+    sync_result = {"ok": True, "skipped": True, "reason": "read_only_list"}
     auto_confirmed = await _auto_confirm_high_confidence()
     applied_families = await _current_pc_applied_families()
     async with SessionLocal() as session:
@@ -228,8 +232,49 @@ async def _generate_candidate_dataset(case_row: LlmMisjudgmentCase, target_count
     return dataset
 
 
-async def _select_problem_sources(max_cases: int) -> list[LlmMisjudgmentCase]:
+async def _select_problem_sources(
+    max_cases: int,
+    source_case_ids: list[str] | None = None,
+) -> list[LlmMisjudgmentCase]:
+    """Resolve problem-generation sources.
+
+    v5.442 identity rule:
+    - When the Learning Center sends visible ``source_case_ids``, those exact case IDs
+      are authoritative and are preserved in the same order.
+    - The legacy automatic selector is used only when no explicit IDs were supplied.
+
+    This prevents an aggregated UI row from silently being replaced by another
+    same-family raw case, which previously broke Dataset -> misjudgment -> PC learning
+    traceability after applying a Dataset.
+    """
+    explicit_ids: list[str] = []
+    seen: set[str] = set()
+    for value in list(source_case_ids or []):
+        case_id = str(value or "").strip()
+        if case_id and case_id not in seen:
+            explicit_ids.append(case_id)
+            seen.add(case_id)
+        if len(explicit_ids) >= max_cases:
+            break
+
     async with SessionLocal() as session:
+        if explicit_ids:
+            rows = (
+                await session.execute(
+                    select(LlmMisjudgmentCase).where(LlmMisjudgmentCase.id.in_(explicit_ids))
+                )
+            ).scalars().all()
+            by_id = {str(row.id): row for row in rows}
+            selected: list[LlmMisjudgmentCase] = []
+            for case_id in explicit_ids:
+                row = by_id.get(case_id)
+                if row is None:
+                    continue
+                if str(row.status or "").lower() != "confirmed":
+                    continue
+                selected.append(row)
+            return selected[:max_cases]
+
         confirmed = (
             await session.execute(
                 select(LlmMisjudgmentCase)
@@ -251,12 +296,17 @@ async def _select_problem_sources(max_cases: int) -> list[LlmMisjudgmentCase]:
         return selected
 
 
-async def collect_learning_problems(target_per_case: int = 100, max_cases: int = 20, provider: str = "ollama") -> dict:
+async def collect_learning_problems(
+    target_per_case: int = 100,
+    max_cases: int = 20,
+    provider: str = "ollama",
+    source_case_ids: list[str] | None = None,
+) -> dict:
     await sync_misjudgment_candidates()
     await _auto_confirm_high_confidence()
     target_per_case = max(10, min(int(target_per_case or 100), 500))
     max_cases = max(1, min(int(max_cases or 20), 20))
-    selected = await _select_problem_sources(max_cases)
+    selected = await _select_problem_sources(max_cases, source_case_ids)
 
     created: list[dict] = []
     errors: list[dict] = []
@@ -267,7 +317,10 @@ async def collect_learning_problems(target_per_case: int = 100, max_cases: int =
                 session.add(dataset)
                 await session.commit()
                 await session.refresh(dataset)
-            created.append(_dataset_dict(dataset))
+            persisted = await ensure_dataset_problem_storage(str(dataset.id))
+            if int(persisted.get("problem_count") or 0) <= 0:
+                raise RuntimeError("Dataset 저장 후 학습 문제를 확인하지 못했습니다.")
+            created.append(dict(persisted.get("dataset") or _dataset_dict(dataset)))
         except Exception as exc:
             errors.append({"case_id": row.id, "message": str(exc) or type(exc).__name__})
 
@@ -275,6 +328,8 @@ async def collect_learning_problems(target_per_case: int = 100, max_cases: int =
         "ok": not errors,
         "created": len(created),
         "datasets": created,
+        "requested_source_case_ids": [str(row.id) for row in selected],
+        "created_source_case_ids": [str(item.get("source_case_id") or "") for item in created],
         "errors": errors,
         "message": (
             f"확정 오판 주제 {len(created)}개에서 후보 학습 문제를 수집했습니다. Dataset 검증 전에는 학습에 사용되지 않습니다."
@@ -295,12 +350,22 @@ def _set_problem_job(job_id: str, progress: int, stage: str, message: str, **ext
     })
 
 
-async def _run_problem_collection_job(job_id: str, target_per_case: int, max_cases: int, provider: str) -> None:
+async def _run_problem_collection_job(
+    job_id: str,
+    target_per_case: int,
+    max_cases: int,
+    provider: str,
+    source_case_ids: list[str] | None = None,
+) -> None:
     try:
         _set_problem_job(job_id, 5, "sync", "오판 수집 기록을 공용 DB와 동기화 중...", status="running")
         await sync_misjudgment_candidates()
         await _auto_confirm_high_confidence()
-        selected = await _select_problem_sources(max_cases)
+        selected = await _select_problem_sources(max_cases, source_case_ids)
+        if source_case_ids and len(selected) != len({str(value) for value in source_case_ids if str(value or "").strip()}):
+            resolved_ids = {str(row.id) for row in selected}
+            missing_ids = [str(value) for value in source_case_ids if str(value or "").strip() and str(value) not in resolved_ids]
+            raise ValueError("요청한 오판 ID를 정확히 찾지 못했습니다: " + ", ".join(missing_ids))
         if not selected:
             _set_problem_job(job_id, 100, "done", "새로 문제를 수집할 확정 오판 주제가 없습니다.", status="completed", result={"created": 0, "datasets": []})
             return
@@ -325,7 +390,10 @@ async def _run_problem_collection_job(job_id: str, target_per_case: int, max_cas
                     session.add(dataset)
                     await session.commit()
                     await session.refresh(dataset)
-                created.append(_dataset_dict(dataset))
+                persisted = await ensure_dataset_problem_storage(str(dataset.id))
+                if int(persisted.get("problem_count") or 0) <= 0:
+                    raise RuntimeError("Dataset 저장 후 학습 문제를 확인하지 못했습니다.")
+                created.append(dict(persisted.get("dataset") or _dataset_dict(dataset)))
             except Exception as exc:
                 errors.append({"case_id": row.id, "message": str(exc) or type(exc).__name__})
             end_progress = 10 + int((index / total) * 80)
@@ -339,23 +407,40 @@ async def _run_problem_collection_job(job_id: str, target_per_case: int, max_cas
                 total_topics=total,
             )
 
-        result = {"created": len(created), "datasets": created, "errors": errors}
-        if created:
+        generated_problem_count = sum(int(item.get("problem_count") or len(item.get("problems") or [])) for item in created)
+        result = {
+            "created": len(created),
+            "datasets": created,
+            "requested_source_case_ids": [str(row.id) for row in selected],
+            "created_source_case_ids": [str(item.get("source_case_id") or "") for item in created],
+            "source_mapping_verified": [str(item.get("source_case_id") or "") for item in created] == [str(row.id) for row in selected],
+            "errors": errors,
+            "generated_problem_count": generated_problem_count,
+            "persistence_verified": bool(created) and generated_problem_count > 0,
+        }
+        if created and generated_problem_count > 0 and result["source_mapping_verified"]:
             _set_problem_job(
                 job_id,
                 100,
                 "done",
-                f"문제 수집 완료 · Dataset {len(created)}개를 생성했습니다.",
+                f"문제 수집 완료 · Dataset {len(created)}개 / 문제 {generated_problem_count}개 DB 저장 확인.",
                 status="completed" if not errors else "completed",
                 result=result,
             )
         else:
-            _set_problem_job(job_id, 100, "failed", "문제 Dataset을 생성하지 못했습니다.", status="failed", error="; ".join(x["message"] for x in errors), result=result)
+            mapping_error = "오판 ID와 Dataset source_case_id 매핑 검증에 실패했습니다." if created and not result["source_mapping_verified"] else ""
+            error_text = "; ".join(x["message"] for x in errors) or mapping_error or "문제 Dataset을 생성하지 못했습니다."
+            _set_problem_job(job_id, 100, "failed", error_text, status="failed", error=error_text, result=result)
     except Exception as exc:
         _set_problem_job(job_id, int(_PROBLEM_JOBS.get(job_id, {}).get("progress") or 0), "failed", str(exc) or type(exc).__name__, status="failed", error=str(exc) or type(exc).__name__)
 
 
-async def start_problem_collection_job(target_per_case: int = 100, max_cases: int = 20, provider: str = "ollama") -> dict:
+async def start_problem_collection_job(
+    target_per_case: int = 100,
+    max_cases: int = 20,
+    provider: str = "ollama",
+    source_case_ids: list[str] | None = None,
+) -> dict:
     target = max(10, min(int(target_per_case or 100), 500))
     maximum = max(1, min(int(max_cases or 20), 20))
     for job in _PROBLEM_JOBS.values():
@@ -370,9 +455,10 @@ async def start_problem_collection_job(target_per_case: int = 100, max_cases: in
         status="running",
         target_per_topic=target,
         max_topics=maximum,
+        source_case_ids=[str(value) for value in list(source_case_ids or []) if str(value or "").strip()][:maximum],
         created_at=datetime.utcnow().isoformat(),
     )
-    asyncio.create_task(_run_problem_collection_job(job_id, target, maximum, provider))
+    asyncio.create_task(_run_problem_collection_job(job_id, target, maximum, provider, source_case_ids))
     return dict(_PROBLEM_JOBS[job_id])
 
 

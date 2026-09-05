@@ -5,7 +5,7 @@ from sqlalchemy import select
 from app.core.database import SessionLocal
 from app.core.config import get_settings
 from app.models.entities import MCPServer, ToolRecord
-from app.services.mcp_manager import discover_streamable_http
+from app.services.mcp_manager import discover_streamable_http, discover_stdio
 
 class MCPRegistryMonitor:
     def __init__(self):
@@ -21,7 +21,13 @@ class MCPRegistryMonitor:
                 return {"server_id": server_id, "status": "DISABLED"}
 
             try:
-                result = await discover_streamable_http(server.endpoint)
+                transport = str(server.transport or "streamable_http").strip().casefold()
+                if transport == "stdio":
+                    result = await discover_stdio(server.command, server.args or [], server_hint=server.name)
+                else:
+                    if not str(server.endpoint or "").strip():
+                        raise ValueError("streamable_http MCP endpoint가 비어 있습니다.")
+                    result = await discover_streamable_http(server.endpoint, server_hint=server.name)
                 server.last_status = "CONNECTED"
                 server.protocol_version = result.get("protocol_version", "")
                 server.supports_tool_list_changed = bool(result.get("supports_tool_list_changed"))
@@ -78,21 +84,26 @@ class MCPRegistryMonitor:
                 await db.commit()
                 return {"server_id": server.id, "status": "ERROR", "error": str(e)}
 
-    async def sync_all(self) -> list[dict]:
+    async def sync_all(self, *, auto_refresh: bool = False) -> list[dict]:
         async with SessionLocal() as db:
-            ids = (
-                await db.execute(select(MCPServer.id).where(MCPServer.enabled == True))  # noqa: E712
+            servers = (
+                await db.execute(select(MCPServer).where(MCPServer.enabled == True))  # noqa: E712
             ).scalars().all()
         results = []
-        for server_id in ids:
-            results.append(await self.sync_server(server_id))
+        for server in servers:
+            # A stdio registry sync launches a local command. Never execute that
+            # command from the background monitor. Registration/manual Tool sync is
+            # the explicit user action that is allowed to start the stdio server.
+            if auto_refresh and str(server.transport or '').casefold() == 'stdio':
+                continue
+            results.append(await self.sync_server(server.id))
         return results
 
     async def _loop(self):
         interval = max(5, get_settings().mcp_registry_refresh_seconds)
         while not self._stop.is_set():
             try:
-                await self.sync_all()
+                await self.sync_all(auto_refresh=True)
             except Exception:
                 pass
             try:

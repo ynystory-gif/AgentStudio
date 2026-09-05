@@ -8,8 +8,9 @@ from pathlib import Path
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-ENV_PATH = BACKEND_ROOT / ".env"
-ENV_EXAMPLE_PATH = BACKEND_ROOT / ".env.example"
+PROJECT_ROOT = BACKEND_ROOT.parent
+ENV_PATH = PROJECT_ROOT / ".env"
+ENV_EXAMPLE_PATH = PROJECT_ROOT / ".env.example"
 PC_NAME_KEY = "AGENTSTUDIO_PC_NAME"
 SYSTEM_HOST_KEY = "AGENTSTUDIO_SYSTEM_HOST_NAME"
 PENDING_PC_NAME_KEY = "AGENTSTUDIO_PC_NAME_PENDING"
@@ -179,7 +180,7 @@ def clear_pending_pc_name_env() -> None:
 
 def ensure_pc_name_env() -> dict:
     """
-    Ensure an editable AgentStudio PC name exists in backend/.env.
+    Ensure an editable AgentStudio PC name exists in the project-root .env.
 
     The user-managed AGENTSTUDIO_PC_NAME is preserved. On first run it defaults
     to the physical Windows/OS host name. The physical host name is stored
@@ -215,7 +216,7 @@ def ensure_pc_name_env() -> dict:
 
 
 def set_pc_name_env(pc_name: str) -> dict:
-    """Persist a validated user-managed AgentStudio PC name to backend/.env."""
+    """Persist a validated user-managed AgentStudio PC name to the project-root .env."""
     normalized = validate_pc_name(pc_name)
     system_host_name = detect_system_pc_name()
     previous = _write_identity_env(normalized, system_host_name)

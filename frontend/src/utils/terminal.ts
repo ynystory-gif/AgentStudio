@@ -17,7 +17,7 @@ export const parseTerminalServerMessage = (raw: unknown): TerminalServerMessage 
 export const serializeTerminalClientMessage = (message: TerminalClientMessage): string =>
   JSON.stringify(message)
 
-export const terminalCellWidth = (text = ''): number => {
+export const terminalCellWidth = (text: LegacyValue = ''): number => {
   const clean = String(text || '').replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '')
   let width = 0
 
@@ -47,7 +47,7 @@ export const terminalCellWidth = (text = ''): number => {
   return width
 }
 
-export const terminalLongestLineWidth = (text = ''): number => Math.max(
+export const terminalLongestLineWidth = (text: LegacyValue = ''): number => Math.max(
   0,
   ...String(text || '')
     .replace(/\r\n/g, '\n')

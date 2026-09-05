@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.services.learning_apply_job_service import (
     get_learning_apply_job,
@@ -35,6 +35,7 @@ from app.services.ollama_model_manager_service import (
     start_recommended_model_job,
 )
 from app.services.learning_weight_model_status_service import get_active_weight_model_status
+from app.services.learning_sql_export_service import build_learning_list_sql
 
 router = APIRouter(prefix="/learning", tags=["LLM Learning"])
 
@@ -73,6 +74,9 @@ class ProblemCollectionRequest(BaseModel):
     target_per_case: int = 100
     max_cases: int = 20
     provider: str = "ollama"
+    # Exact visible misjudgment IDs selected by the Learning Center.
+    # Empty keeps backward compatibility for older callers.
+    source_case_ids: list[str] = Field(default_factory=list)
 
 
 class DatasetValidationRequest(BaseModel):
@@ -98,13 +102,20 @@ class PcApplicationEnableRequest(BaseModel):
     enabled: bool
 
 
+class LearningSqlExportRequest(BaseModel):
+    kind: str
+    provider: str = ""
+    case_ids: list[str] = Field(default_factory=list)
+    dataset_ids: list[str] = Field(default_factory=list)
+
+
 @router.get("/summary")
 async def summary():
     result = await learning_summary()
-    applications = await list_pc_applications(include_all_pcs=True)
+    applications = await list_pc_applications(include_all_pcs=False)
     recommended = await get_recommended_model_status()
     result["pc_applications"] = applications.get("items", [])
-    result["application_scope"] = "per_pc"
+    result["application_scope"] = "current_pc_summary"
     result["recommended_ollama"] = recommended
     # The PC-specific model selection is the runtime truth. learning_summary's
     # cached Settings value may still represent an older bootstrap default.
@@ -133,6 +144,21 @@ async def recommended_ollama_download_job_status(job_id: str):
         return await get_recommended_model_job(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+
+
+@router.post("/sql-export")
+async def learning_sql_export(req: LearningSqlExportRequest):
+    try:
+        return build_learning_list_sql(
+            req.kind,
+            case_ids=req.case_ids,
+            dataset_ids=req.dataset_ids,
+            provider=req.provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/misjudgments/sync")
@@ -168,7 +194,7 @@ async def review_case(case_id: str, req: MisjudgmentReviewRequest):
 async def collect_problems(req: ProblemCollectionRequest):
     """Backward-compatible synchronous collection endpoint."""
     try:
-        return await collect_learning_problems(req.target_per_case, req.max_cases, req.provider)
+        return await collect_learning_problems(req.target_per_case, req.max_cases, req.provider, req.source_case_ids)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc) or type(exc).__name__) from exc
 
@@ -176,7 +202,7 @@ async def collect_problems(req: ProblemCollectionRequest):
 @router.post("/problems/collect-job")
 async def collect_problems_job(req: ProblemCollectionRequest):
     try:
-        return await start_problem_collection_job(req.target_per_case, req.max_cases, req.provider)
+        return await start_problem_collection_job(req.target_per_case, req.max_cases, req.provider, req.source_case_ids)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:

@@ -81,7 +81,7 @@ export function LearningFullApplyEnhancer() {
         {running ? `↻ ${title}` : '⇄ 모두 학습 적용'}
       </button>
       {(running || error) && (
-        <span style={{marginLeft: 8, fontSize: 12, opacity: 0.9}}>
+        <span style={{marginLeft: 8, fontSize: 13, opacity: 0.9}}>
           {error || `${job?.message || '전체 재학습 적용 중...'} · ${progress}%`}
         </span>
       )}

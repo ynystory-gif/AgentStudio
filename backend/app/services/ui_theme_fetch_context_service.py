@@ -18,17 +18,10 @@ _MAX_HTML_BYTES = 1_000_000
 _MAX_CSS_BYTES = 500_000
 _MAX_STYLESHEETS = 6
 _CSS_FETCH_CONCURRENCY = 3
-<<<<<<< HEAD
 # v5.429: token extraction is critical-path work, so it may use the full backend
 # 5-minute hard deadline. Owning-job cancellation still kills the worker process tree
 # immediately when 300 seconds is reached.
 _STATIC_WORKER_TIMEOUT_SECONDS = 300
-=======
-# Linear/modern Next.js sites can legitimately need more than 28 seconds for the
-# regex/token pass. Keep this below the 100-second per-URL budget so Layout/CDP still
-# has time to run, while the worker remains killable on timeout.
-_STATIC_WORKER_TIMEOUT_SECONDS = 45
->>>>>>> d0e40bd86a999808d857b8acca8a9a6f14259c81
 
 
 def _stylesheet_urls(html: str, final_url: str) -> list[str]:
@@ -49,7 +42,7 @@ async def fetch_theme_source_context(url: str) -> dict:
     """Fetch one HTML document and only its stylesheet links."""
     target = await validate_public_theme_url(url)
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36 THEANOVA-AgentStudio-ThemeImporter/5.435",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36 THEANOVA-AgentStudio-ThemeImporter/5.450",
         "Accept": "text/html,application/xhtml+xml,text/css,*/*;q=0.6",
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
         "Cache-Control": "no-cache",

@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from urllib.parse import quote
 from pathlib import Path
@@ -8,12 +9,22 @@ from app.services.ollama_runtime_manager import get_ollama_runtime_status, start
 from app.services.gpu_runtime_manager import get_gpu_runtime_status, set_gpu_runtime_enabled, gpu_recommendation
 import asyncio
 import json
+import mimetypes
 from app.models.entities import Project, ProjectAnalysis, AgentDesignProject, AgentDesignProjectVersion, UITheme
 from app.services.project_paths import resolve_project_paths
+from app.services.runtime_path_policy import apply_runtime_path_policy, save_output_bytes, save_output_text
 from app.services.ui_theme_service import analyze_theme_from_url, build_rules, merge_theme_analyses
 from app.services.frontend_theme_registry import list_frontend_theme_targets
 from app.services.database_provisioning import provision_agentstudio_database
 from app.services.database_schema_design import build_database_plan, finalize_database_plan, materialize_database_plan
+from app.services.generated_database_provision_service import (
+    test_agent_database_setup,
+    provision_agent_databases,
+    build_database_resource_plan,
+    analyze_existing_database,
+    create_postgresql_schema_resource,
+    create_firestore_database_resource,
+)
 from app.services.db_erd_service import build_project_db_erd, build_agentstudio_db_erd
 from app.core.config import get_settings
 from app.services.pgvector_installer import install_pgvector_windows18, latest_pg18_windows_release, detect_postgresql18_root, validate_postgresql18_root
@@ -31,6 +42,7 @@ from app.services.database_runtime_service import (
     schema_script_path as get_supabase_schema_script_path,
 )
 from app.services.weather_service import build_weather_dashboard, weather_config
+from app.services.ai_trends.service import build_ai_trends_dashboard
 from app.services.llm_catalog_service import build_llm_catalog
 from app.services.project_root_registry import adopt_legacy_projects_for_current_pc, ensure_persisted_project_root
 from app.services.terminal_completion_service import complete_terminal_input
@@ -45,6 +57,16 @@ from app.services.presentation_export_service import (
     PPTX_MIME,
     build_agentstudio_presentation,
 )
+from app.services.account_setting_service import (
+    append_project_history as append_account_project_history,
+    delete_account_database_profile,
+    get_account_database_profile,
+    list_account_database_profiles,
+    sync_design_snapshot as sync_account_design_snapshot,
+    upsert_account_database_profile,
+    upsert_project_setting as upsert_account_project_setting,
+)
+from app.services.auth_service import authenticate_token
 from app.services.sql_workspace_service import (
     get_profile as get_sql_workspace_profile,
     list_profiles as list_sql_workspace_profiles,
@@ -78,9 +100,9 @@ from app.services.sql_workspace_service import (
     create_postgresql_admin_script as create_sql_workspace_postgresql_admin_script,
 )
 import uuid
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request, Query
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Request, Query, Header
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from langgraph.types import Command
 from sqlalchemy import select, func
 from app.core.database import SessionLocal, ensure_runtime_metadata_tables, migrate_agentstudio_schema, verify_project_schema, current_event_loop_name
@@ -89,7 +111,12 @@ from app.models.entities import MCPServer, ToolRecord
 from app.services.ws_hub import hub
 from app.services.job_manager import job_manager
 from app.services.system_status import get_status
-from app.services.port_service import recommend_agentstudio_ports
+from app.services.port_service import (
+    recommend_agentstudio_ports,
+    recommend_generated_agent_ports,
+    resolve_generated_agent_runtime_setup,
+    write_generated_agent_runtime_config,
+)
 from app.services.browser_proxy_service import (
     BrowserProxyError,
     fetch_external_page,
@@ -101,6 +128,7 @@ from app.services.chromium_browser_service import (
     chromium_browser_manager,
 )
 from app.services.codex_app_server_service import codex_app_server_manager
+from app.services.live_stt_service import LiveSttSession, live_stt_runtime_status
 from app.services.ai_attachment_service import (
     register_selected_files,
     release_attachments,
@@ -111,8 +139,12 @@ from app.services.ai_attachment_service import (
     redact_sensitive_text,
 )
 from app.services.local_control import list_files, list_directories, read_file, write_file, run_command, register_runtime_project_root, get_runtime_project_roots, create_folder, rename_path, create_file, delete_files, project_file_snapshot, get_file_meta, get_file_hash_states, validate_project_root, watch_project_changes, search_project_text, active_command_processes, ExternalFileChangedError, InvalidNotebookContentError
+from app.services.code_intelligence_service import resolve_code_intelligence
 from app.services.tavily_service import web_search
-from app.services.requirements_agent import next_interview_message, summarize_attachment_requirements, build_attachment_requirements_display_summary
+from app.services.requirements_agent import next_interview_message, summarize_attachment_requirements, build_attachment_requirements_display_summary, interview_turn_type
+from app.services.prompt_tool_studio_service import analyze_prompt_tool_input, run_prompt_tool_studio_test
+from app.services.requirement_recommendation_service import build_requirement_recommendations, apply_recommendation_settings_to_design
+from app.services.development_stage_planner import recommend_development_stage_plan, approve_development_stage_plan, apply_development_stage_plan_to_design
 from app.services.attachment_requirement_mining import extract_attachment_requirement_registry, format_requirement_registry_memory
 from app.services.llm_usage_service import usage_context, read_usage_summary, read_llm_history
 from app.services.agent_builder import build_plan
@@ -392,6 +424,25 @@ def _normalize_project_analysis(project_root: str, summary, scan) -> dict:
 
 router = APIRouter()
 
+def _auth_bearer(value: str) -> str:
+    return value[7:].strip() if str(value or '').lower().startswith('bearer ') else ''
+
+
+async def _optional_current_member(authorization: str) -> dict | None:
+    token = _auth_bearer(authorization)
+    return await authenticate_token(token) if token else None
+
+
+async def _required_current_member(authorization: str) -> dict:
+    member = await _optional_current_member(authorization)
+    if not member:
+        raise HTTPException(status_code=401, detail='로그인이 필요합니다.')
+    return member
+
+
+_PROJECT_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif"}
+
+
 class ChatRequest(BaseModel):
     message: str
     history: list[dict] = []
@@ -399,12 +450,36 @@ class ChatRequest(BaseModel):
     project_root: str = ""
     attachment_ids: list[str] = []
     attachment_memory: str = ""
+    agent_specialization: str = ""
+
+
+class PromptToolStudioAnalyzeRequest(BaseModel):
+    message: str
+    pending_question: dict | None = None
+    state: list[dict] = Field(default_factory=list)
+    provider: str = ""
+
+
+class PromptToolStudioTestRequest(BaseModel):
+    message: str = ""
+    mode: str = "FULL"
+    compiled_prompt: str = ""
+    routes: list[dict] = Field(default_factory=list)
+    tools: list[dict] = Field(default_factory=list)
+    intents: list[str] = Field(default_factory=list)
+    provider: str = ""
+    execute_tool: bool = False
+    tool_name: str = ""
+    tool_arguments: dict = Field(default_factory=dict)
+    confirmation: bool = False
+    project_root: str = ""
 
 class AttachmentRequirementsSummaryRequest(BaseModel):
     attachment_ids: list[str] = []
     attachment_memory: str = ""
     provider: str | None = None
     project_root: str = ""
+    deep_analysis: bool = False
 
 class CodexStartRequest(BaseModel):
     root: str = ""
@@ -441,6 +516,11 @@ class CodexApprovalRequest(BaseModel):
     payload: dict = {}
 
 
+class MediaSttSummaryRequest(BaseModel):
+    root: str = ""
+    transcript: str = Field(..., min_length=1, max_length=500_000)
+
+
 class FileRequest(BaseModel):
     path: str
 
@@ -475,7 +555,10 @@ class MCPDiscoverRequest(BaseModel):
 
 class MCPServerCreate(BaseModel):
     name: str
-    endpoint: str
+    transport: str = "streamable_http"
+    endpoint: str = ""
+    command: str = ""
+    args: list[str] = []
     trust_level: str = "UNTRUSTED"
     allow_read_without_prompt: bool = False
     allow_write_without_prompt: bool = False
@@ -501,6 +584,8 @@ class WorkflowRedevelopRequest(BaseModel):
     test_command: str = "python -m compileall ."
     provider: str | None = None
     agent_name: str = ""
+    code_documentation: dict = {}
+    user_coding_style: dict = {}
 
 class WorkflowResumeRequest(BaseModel):
     thread_id: str
@@ -519,12 +604,16 @@ class PresentationExportRequest(BaseModel):
     project_root: str = ""
     generated_at: str = ""
     workflow_request: str = ""
-    workflow_definition: dict = {}
-    report: dict = {}
-    coding_style_report: dict = {}
-    llm_usage_summary: dict = {}
-    db_erd: dict = {}
-    ui_layout: dict = {}
+    workflow_definition: dict | None = None
+    report: dict | None = None
+    coding_style_report: dict | None = None
+    llm_usage_summary: dict | None = None
+    db_erd: dict | None = None
+    ui_layout: dict | None = None
+
+class PresentationOpenRequest(BaseModel):
+    path: str = ""
+
 
 class FolderCreateRequest(BaseModel):
     root: str
@@ -549,6 +638,7 @@ class CodeEditRequest(BaseModel):
     content: str = ""
     active_cell_index: int | None = None
     attachment_ids: list[str] = []
+    reference_texts: list[dict] = Field(default_factory=list)
 
 
 class ProjectCodeEditRequest(BaseModel):
@@ -556,6 +646,73 @@ class ProjectCodeEditRequest(BaseModel):
     instruction: str
     max_context_files: int = 10
     attachment_ids: list[str] = []
+    reference_texts: list[dict] = Field(default_factory=list)
+
+
+def _build_llm_code_reference_prompt(items: list[dict] | None) -> tuple[str, list[dict]]:
+    """Normalize explicit editor selections into bounded LLM reference context.
+
+    These snippets are not attachments and they are not inferred by the model.
+    They originate from ranges the user selected in the editor through the
+    ``LLM 참조 문구`` context-menu action, and the user may edit the snippet
+    text before sending the prompt. The edited text is the authoritative LLM
+    reference context for that request.
+    """
+    normalized: list[dict] = []
+    total_limit = 60000
+    per_item_limit = 24000
+    used = 0
+
+    for raw in items or []:
+        if not isinstance(raw, dict):
+            continue
+        text = str(raw.get("text") or "").replace("\x00", "")
+        if not text.strip():
+            continue
+        remaining = max(total_limit - used, 0)
+        if remaining <= 0:
+            break
+        allowed = min(per_item_limit, remaining)
+        clipped = text[:allowed]
+        used += len(clipped)
+        item = {
+            "path": str(raw.get("path") or "").strip(),
+            "text": clipped,
+            "start_line": max(1, int(raw.get("start_line") or 1)),
+            "start_column": max(1, int(raw.get("start_column") or 1)),
+            "end_line": max(1, int(raw.get("end_line") or raw.get("start_line") or 1)),
+            "end_column": max(1, int(raw.get("end_column") or raw.get("start_column") or 1)),
+            "cell_index": int(raw.get("cell_index")) if isinstance(raw.get("cell_index"), int) and int(raw.get("cell_index")) >= 0 else None,
+            "truncated": bool(raw.get("truncated")) or len(clipped) < len(text),
+            "original_chars": int(raw.get("original_chars") or len(text)),
+            "edited": bool(raw.get("edited")),
+        }
+        normalized.append(item)
+        if len(normalized) >= 12:
+            break
+
+    if not normalized:
+        return "(선택된 LLM 참조 문구 없음)", []
+
+    blocks: list[str] = []
+    for index, item in enumerate(normalized, start=1):
+        path = item["path"] or "현재 파일"
+        if item["start_line"] == item["end_line"]:
+            location = f"L{item['start_line']}:C{item['start_column']}-C{item['end_column']}"
+        else:
+            location = (
+                f"L{item['start_line']}:C{item['start_column']}"
+                f"-L{item['end_line']}:C{item['end_column']}"
+            )
+        if item.get("cell_index") is not None:
+            location = f"Cell {int(item['cell_index']) + 1} · {location}"
+        truncated = " · 일부만 포함" if item["truncated"] else ""
+        edited = " · 사용자 편집" if item.get("edited") else ""
+        blocks.append(
+            f"### 참조 {index} · {path} · {location}{edited}{truncated}\n"
+            f"```text\n{item['text']}\n```"
+        )
+    return "\n\n".join(blocks), normalized
 
 
 class CodingStyleAnalyzeRequest(BaseModel):
@@ -591,9 +748,24 @@ class WorkflowPreviewRequest(BaseModel):
     safe_mode: bool = False
 
 
+class PromptModuleRecommendRequest(BaseModel):
+    module_id: str = ""
+    label: str = ""
+    description: str = ""
+    workflow_node: str = ""
+    current_prompt: str = ""
+    agent_context: str = ""
 
 
+class DevelopmentStageRecommendRequest(BaseModel):
+    request: str
+    interview_messages: list[dict] = []
+    confirmed_requirements: dict = {}
+    attachment_memory: str = ""
 
+
+class DevelopmentStageApproveRequest(BaseModel):
+    plan: dict = {}
 
 
 class DatabaseDesignPreviewRequest(BaseModel):
@@ -609,6 +781,24 @@ class GpuRecommendationRequest(BaseModel):
 
 class DatabaseDesignFinalizeRequest(BaseModel):
     database_plan: dict = {}
+
+
+class AgentDatabaseSetupRequest(BaseModel):
+    database_setup: dict = {}
+    database_plan: dict = {}
+    provider: str = ""
+
+
+class AgentDatabaseProvisionRequest(BaseModel):
+    project_root: str = ""
+    database_setup: dict = {}
+    database_plan: dict = {}
+    database_resource_plan: dict = {}
+
+
+class AgentRuntimePortRequest(BaseModel):
+    project_root: str = ""
+    runtime_setup: dict = {}
 
 
 class DatabaseErdRequest(BaseModel):
@@ -640,6 +830,12 @@ class MemorySearchRequest(BaseModel):
 class FolderPickerRequest(BaseModel):
     title: str = "폴더를 선택하세요."
     initial_path: str = ""
+
+
+class FilePickerRequest(BaseModel):
+    title: str = "파일을 선택하세요."
+    initial_path: str = ""
+    file_filter: str = "모든 파일 (*.*)|*.*"
 
 
 class AiAttachmentPickRequest(BaseModel):
@@ -810,6 +1006,11 @@ class SqlWorkspaceConnectionRequest(BaseModel):
     connection_id: str = ""
 
 
+
+class SqlWorkspaceAccountProfileApplyRequest(BaseModel):
+    root: str
+    account_profile_id: int
+
 class ChromiumBrowserNavigateRequest(BaseModel):
     url: str
     viewport_width: int = 1280
@@ -911,7 +1112,10 @@ class AgentProjectCreateRequest(BaseModel):
     venv_path: str = ""
     models_path: str = ""
     force_recreate: bool = False
+    runtime_setup: dict = {}
     database_plan: dict = {}
+    database_setup: dict = {}
+    database_resource_plan: dict = {}
 
 
 
@@ -961,6 +1165,15 @@ async def system_pick_folder(req: FolderPickerRequest):
     return await pick_folder(
         title=req.title,
         initial_path=req.initial_path,
+    )
+
+
+@router.post("/system/pick-file")
+async def system_pick_file(req: FilePickerRequest):
+    return await pick_file(
+        title=req.title,
+        initial_path=req.initial_path,
+        file_filter=req.file_filter or "모든 파일 (*.*)|*.*",
     )
 
 @router.post("/ai/attachments/pick")
@@ -1109,27 +1322,88 @@ async def ai_attachments(attachment_ids: str = Query(default="")):
 @router.get("/system/ports/recommend")
 async def system_port_recommendations(
     request: Request,
-    backend_port: int = Query(default=8000, ge=1024, le=65535),
-    frontend_port: int = Query(default=5173, ge=1024, le=65535),
+    backend_port: int | None = Query(default=None, ge=1024, le=65535),
+    frontend_port: int | None = Query(default=None, ge=1024, le=65535),
     current_frontend_port: int | None = Query(default=None, ge=1024, le=65535),
 ):
-    current_backend_port = request.url.port or 8000
+    settings = get_settings()
+    configured_backend = backend_port or settings.agentstudio_backend_port
+    configured_frontend = frontend_port or settings.agentstudio_frontend_port
+    if not configured_backend or not configured_frontend:
+        raise HTTPException(status_code=400, detail="프로젝트 루트 .env의 AGENTSTUDIO_BACKEND_PORT / AGENTSTUDIO_FRONTEND_PORT 설정이 필요합니다.")
+    current_backend_port = request.url.port or configured_backend
     return recommend_agentstudio_ports(
-        backend_port,
-        frontend_port,
+        configured_backend,
+        configured_frontend,
         current_backend_port=current_backend_port,
         current_frontend_port=current_frontend_port,
     )
 
+async def _registered_generated_agent_ports(exclude_root: str = "") -> list[int]:
+    """Collect ports already assigned to AgentStudio projects by v5.462+ runtime config files."""
+    exclude = str(exclude_root or "").strip().lower()
+    ports: set[int] = set()
+    try:
+        async with SessionLocal() as session:
+            roots = (await session.execute(select(Project.root_path))).scalars().all()
+        for root_value in roots:
+            root_text = str(root_value or "").strip()
+            if not root_text or (exclude and root_text.lower() == exclude):
+                continue
+            path = Path(root_text).expanduser() / "backend" / "config" / "runtime_ports.generated.json"
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            for key in ("frontend", "backend", "api"):
+                row = payload.get(key) if isinstance(payload.get(key), dict) else {}
+                try:
+                    port = int(row.get("port") or 0)
+                except Exception:
+                    port = 0
+                if 1024 <= port <= 65535:
+                    ports.add(port)
+    except Exception:
+        return sorted(ports)
+    return sorted(ports)
+
+
+@router.post("/agent-runtime/ports/recommend")
+async def generated_agent_port_recommendations(req: AgentRuntimePortRequest):
+    setup = req.runtime_setup if isinstance(req.runtime_setup, dict) else {}
+    front = setup.get("frontend") if isinstance(setup.get("frontend"), dict) else {}
+    back = setup.get("backend") if isinstance(setup.get("backend"), dict) else {}
+    api_cfg = setup.get("api") if isinstance(setup.get("api"), dict) else {}
+    reserved = await _registered_generated_agent_ports(req.project_root)
+    return recommend_generated_agent_ports(
+        frontend_technology=str(front.get("technology") or "React + Vite"),
+        backend_technology=str(back.get("technology") or "FastAPI"),
+        frontend_port=front.get("port"),
+        backend_port=back.get("port"),
+        api_port=api_cfg.get("port"),
+        api_share_backend=bool(api_cfg.get("share_backend", True)),
+        frontend_user_fixed=bool(front.get("user_fixed", False)),
+        backend_user_fixed=bool(back.get("user_fixed", False)),
+        api_user_fixed=bool(api_cfg.get("user_fixed", False)),
+        reserved_ports=reserved,
+    )
+
+
 @router.get("/settings/default-paths")
 async def get_default_paths():
     s = get_settings()
+    runtime_paths = apply_runtime_path_policy()
     return {
         "project_root": s.default_project_root,
         "cache_root": s.default_cache_root,
         "temp_root": s.default_temp_root,
         "output_root": s.default_output_root,
         "common_models_root": s.common_models_root,
+        "effective_temp_root": runtime_paths.get("temp_root", ""),
+        "effective_cache_root": runtime_paths.get("cache_root", ""),
+        "effective_output_root": runtime_paths.get("output_root", ""),
     }
 
 @router.get("/settings")
@@ -1178,7 +1452,7 @@ async def settings_migrate_to_db():
 
 @router.post("/settings/database-env")
 async def save_database_environment(req: DatabaseEnvSettingsRequest):
-    """DB 연결 bootstrap 값은 PostgreSQL이 아니라 backend/.env에만 저장합니다."""
+    """DB 연결 bootstrap 값은 PostgreSQL이 아니라 프로젝트 루트 .env에만 저장합니다."""
     try:
         return await save_database_env_settings({
             "DATABASE_URL": req.database_url,
@@ -1289,6 +1563,11 @@ async def weather_dashboard(
         longitude=longitude,
         force_refresh=force_refresh,
     )
+
+
+@router.get("/ai-trends")
+async def ai_trends(force_refresh: bool = Query(default=False)):
+    return await build_ai_trends_dashboard(force_refresh=force_refresh)
 
 
 @router.get("/llm/history")
@@ -1825,7 +2104,7 @@ async def get_agent_design_project(design_project_id: int):
 
 
 @router.post("/agent-design-projects/save")
-async def save_agent_design_project(req: AgentDesignProjectSaveRequest):
+async def save_agent_design_project(req: AgentDesignProjectSaveRequest, authorization: str = Header(default='')):
     now = datetime.utcnow()
     async with SessionLocal() as session:
         row = None
@@ -1838,6 +2117,26 @@ async def save_agent_design_project(req: AgentDesignProjectSaveRequest):
                     )
                 )
             ).scalar_one_or_none()
+        if row is not None:
+            existing_root = str(row.project_root or "").strip()
+            requested_root = str(req.project_root or "").strip()
+
+            def _project_identity(value: str) -> str:
+                return os.path.normcase(os.path.normpath(value)) if value else ""
+
+            if (
+                existing_root
+                and requested_root
+                and _project_identity(existing_root) != _project_identity(requested_root)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "다른 프로젝트의 Agent 설계 기록을 덮어쓰는 저장을 차단했습니다. "
+                        f"기존 경로={existing_root} / 요청 경로={requested_root}"
+                    ),
+                )
+
         if row is None:
             row = AgentDesignProject(
                 pc_name=current_pc_name(),
@@ -1874,7 +2173,18 @@ async def save_agent_design_project(req: AgentDesignProjectSaveRequest):
         await session.commit()
         await session.refresh(row)
 
-    return {"ok": True, "project": _design_project_payload(row, include_snapshot=True)}
+    member = await _optional_current_member(authorization)
+    synced_setting_count = 0
+    if member and str(row.project_root or '').strip():
+        synced_setting_count = await sync_account_design_snapshot(member["id"], row.project_root, row.snapshot or {}, title_prefix="Agent 설계 저장")
+        if req.create_version:
+            await append_account_project_history(
+                member["id"], row.project_root, category="AGENT_DESIGN", action="VERSION",
+                title=f"Agent 설계 v{row.version_no} 저장", summary=req.version_label or "수동 저장",
+                after={"design_project_id": row.id, "version_no": row.version_no, "status": row.status, "progress": row.progress},
+            )
+
+    return {"ok": True, "project": _design_project_payload(row, include_snapshot=True), "synced_project_settings": synced_setting_count}
 
 
 @router.post("/agent-design-projects/{design_project_id}/version")
@@ -2208,9 +2518,26 @@ async def create_agent_project(req: AgentProjectCreateRequest):
     # 신규 생성 프로젝트도 현재 실행 세션의 허용 루트로 등록
     register_runtime_project_root(paths["project_root"])
 
+    reserved_runtime_ports = await _registered_generated_agent_ports(paths["project_root"])
+    runtime_resolution = resolve_generated_agent_runtime_setup(req.runtime_setup or {}, reserved_ports=reserved_runtime_ports)
+    if not runtime_resolution.get("ok", True):
+        return {
+            "ok": False,
+            "conflict": True,
+            "conflict_type": "AGENT_RUNTIME_PORT_CONFLICT",
+            "message": runtime_resolution.get("message") or "실행 환경 PORT 충돌이 확인되었습니다.",
+            "runtime_resolution": runtime_resolution,
+        }
+    resolved_runtime_setup = runtime_resolution.get("runtime_setup") or req.runtime_setup or {}
+
     # v5.308 이전의 미귀속 row가 이 PC의 실제 경로와 일치하면 먼저
     # 현재 PC 소유로 승격해 중복 Project row를 만들지 않습니다.
     await adopt_legacy_projects_for_current_pc()
+
+    database_mode = str((req.database_setup or {}).get("mode") or "PENDING").upper()
+    effective_database_plan = req.database_plan or {}
+    if database_mode == "NO_DB":
+        effective_database_plan = {"enabled": False, "finalized": True, "confirmed": True, "engine": "none", "tables": [], "modules": [], "relationships": []}
 
     async with SessionLocal() as session:
         # 같은 프로젝트 경로가 이미 등록되어 있으면 중복 생성하지 않음
@@ -2252,13 +2579,36 @@ async def create_agent_project(req: AgentProjectCreateRequest):
             await session.commit()
             await session.refresh(existing)
 
-            database_files = materialize_database_plan(paths["project_root"], req.database_plan or {})
+            database_files = materialize_database_plan(paths["project_root"], effective_database_plan)
+            database_provision = await asyncio.to_thread(
+                provision_agent_databases,
+                paths["project_root"],
+                effective_database_plan,
+                req.database_setup or {},
+                req.database_resource_plan or {},
+            )
+            if database_provision.get("config_file"):
+                database_files = [*database_files, str(database_provision["config_file"])]
+            if database_provision.get("resource_plan_file"):
+                database_files = [*database_files, str(database_provision["resource_plan_file"])]
+            runtime_config_file = write_generated_agent_runtime_config(paths["project_root"], resolved_runtime_setup)
 
             return {
-                "ok": True,
+                "ok": bool(database_provision.get("ok", True)),
                 "recreated": True,
+                "partial_project_created": not bool(database_provision.get("ok", True)),
                 "database_files": database_files,
-                "message": "기존 등록 프로젝트를 재사용하여 재생성 준비가 완료되었습니다.",
+                "runtime_config_file": runtime_config_file,
+                "runtime_setup": resolved_runtime_setup,
+                "runtime_resolution": runtime_resolution,
+                "database_provision": database_provision,
+                "message": (
+                    "기존 등록 프로젝트를 재사용하여 DB 구조 자동 생성까지 완료했습니다."
+                    if database_provision.get("ok", True) and not database_provision.get("skipped")
+                    else "기존 등록 프로젝트를 재사용하여 재생성 준비가 완료되었습니다."
+                    if database_provision.get("ok", True)
+                    else "프로젝트 재사용 준비는 완료했지만 일부 DB 구조 자동 생성에 실패했습니다."
+                ),
                 "project_id": existing.id,
                 "name": existing.name,
                 "project_root": existing.root_path,
@@ -2284,12 +2634,35 @@ async def create_agent_project(req: AgentProjectCreateRequest):
         await session.commit()
         await session.refresh(project)
 
-    database_files = materialize_database_plan(paths["project_root"], req.database_plan or {})
+    database_files = materialize_database_plan(paths["project_root"], effective_database_plan)
+    database_provision = await asyncio.to_thread(
+        provision_agent_databases,
+        paths["project_root"],
+        effective_database_plan,
+        req.database_setup or {},
+        req.database_resource_plan or {},
+    )
+    if database_provision.get("config_file"):
+        database_files = [*database_files, str(database_provision["config_file"])]
+    if database_provision.get("resource_plan_file"):
+        database_files = [*database_files, str(database_provision["resource_plan_file"])]
+    runtime_config_file = write_generated_agent_runtime_config(paths["project_root"], resolved_runtime_setup)
 
     return {
-        "ok": True,
-        "message": "신규 Agent 프로젝트 생성 및 DB 저장 완료",
+        "ok": bool(database_provision.get("ok", True)),
+        "partial_project_created": not bool(database_provision.get("ok", True)),
+        "message": (
+            "신규 Agent 프로젝트 생성 및 DB 구조 자동 생성 완료"
+            if database_provision.get("ok", True) and not database_provision.get("skipped")
+            else "신규 Agent 프로젝트 생성 및 DB 저장 완료"
+            if database_provision.get("ok", True)
+            else "프로젝트는 생성했지만 일부 DB 구조 자동 생성에 실패했습니다."
+        ),
         "database_files": database_files,
+        "runtime_config_file": runtime_config_file,
+        "runtime_setup": resolved_runtime_setup,
+        "runtime_resolution": runtime_resolution,
+        "database_provision": database_provision,
         "project_id": project.id,
         "name": project.name,
         "project_root": project.root_path,
@@ -2580,17 +2953,39 @@ async def db_runtime_info():
     }
 
 @router.get("/sql/status")
-async def sql_workspace_status(root: str = Query(...)):
+async def sql_workspace_status(root: str = Query(...), authorization: str = Header(default='')):
     try:
-        return await asyncio.to_thread(get_sql_workspace_status, root, verify=True)
+        member = await _required_current_member(authorization)
+        result = await asyncio.to_thread(get_sql_workspace_status, root, verify=True)
+        for legacy_profile in result.get("connections") or []:
+            try:
+                await upsert_account_database_profile(member["id"], legacy_profile)
+            except Exception:
+                pass
+        result["account_connections"] = await list_account_database_profiles(member["id"])
+        result["project_has_saved_connections"] = bool(result.get("connections"))
+        return result
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/sql/connections")
-async def sql_workspace_connections(root: str = Query(...)):
+async def sql_workspace_connections(root: str = Query(...), authorization: str = Header(default='')):
     try:
-        return await asyncio.to_thread(list_sql_workspace_profiles, root)
+        member = await _required_current_member(authorization)
+        result = await asyncio.to_thread(list_sql_workspace_profiles, root)
+        for legacy_profile in result.get("connections") or []:
+            try:
+                await upsert_account_database_profile(member["id"], legacy_profile)
+            except Exception:
+                pass
+        result["account_connections"] = await list_account_database_profiles(member["id"])
+        result["project_has_saved_connections"] = bool(result.get("connections"))
+        return result
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2645,39 +3040,97 @@ async def sql_workspace_import_connection_file(req: SqlWorkspaceConnectionFileIm
 
 
 @router.post("/sql/profile")
-async def sql_workspace_profile(req: SqlWorkspaceProfileRequest):
+async def sql_workspace_profile(req: SqlWorkspaceProfileRequest, authorization: str = Header(default='')):
     try:
+        member = await _required_current_member(authorization)
         profile = req.model_dump(exclude={"password"})
         profile.pop("root", None)
         saved = await asyncio.to_thread(
             save_sql_workspace_profile, req.root, profile, req.password or None
         )
+        account_profile = await upsert_account_database_profile(member["id"], saved)
+        await upsert_account_project_setting(
+            member["id"], req.root, "CODE_EDITOR_DB", "active_connection",
+            {"connection_id": saved.get("connection_id"), "account_profile_id": account_profile.get("account_profile_id"), "profile": saved},
+            source_profile_id=account_profile.get("account_profile_id"),
+            history_title="코드 편집 DB 연결 저장",
+            history_summary=f"{saved.get('name') or saved.get('db_type')} 연결을 프로젝트 DB 설정으로 저장했습니다.",
+        )
         connections = await asyncio.to_thread(list_sql_workspace_profiles, req.root)
-        return {"ok": True, "profile": saved, **connections}
+        account_connections = await list_account_database_profiles(member["id"])
+        return {"ok": True, "profile": saved, **connections, "account_connections": account_connections}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/sql/profile/rename")
-async def sql_workspace_profile_rename(req: SqlWorkspaceRenameRequest):
+async def sql_workspace_profile_rename(req: SqlWorkspaceRenameRequest, authorization: str = Header(default='')):
     try:
-        return await asyncio.to_thread(rename_sql_workspace_profile, req.root, req.connection_id, req.name)
+        member = await _required_current_member(authorization)
+        result = await asyncio.to_thread(rename_sql_workspace_profile, req.root, req.connection_id, req.name)
+        profile = result.get("profile") or {}
+        if profile.get("connection_id"):
+            await upsert_account_database_profile(member["id"], profile)
+        await append_account_project_history(member["id"], req.root, category="CODE_EDITOR_DB", action="RENAME", title="DB 연결 이름 변경", summary=req.name, after=profile)
+        return result
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/sql/profile/delete")
-async def sql_workspace_profile_delete(req: SqlWorkspaceConnectionRequest):
+async def sql_workspace_profile_delete(req: SqlWorkspaceConnectionRequest, authorization: str = Header(default='')):
     try:
-        return await asyncio.to_thread(delete_sql_workspace_profile, req.root, req.connection_id)
+        member = await _required_current_member(authorization)
+        result = await asyncio.to_thread(delete_sql_workspace_profile, req.root, req.connection_id)
+        await append_account_project_history(member["id"], req.root, category="CODE_EDITOR_DB", action="DELETE", title="프로젝트 DB 연결 삭제", summary="계정 저장 DB 설정은 유지됩니다. · " + req.connection_id)
+        result["account_connections"] = await list_account_database_profiles(member["id"])
+        return result
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/sql/activate")
-async def sql_workspace_activate(req: SqlWorkspaceConnectionRequest):
+async def sql_workspace_activate(req: SqlWorkspaceConnectionRequest, authorization: str = Header(default='')):
     try:
-        return await asyncio.to_thread(activate_sql_workspace_profile, req.root, req.connection_id)
+        member = await _required_current_member(authorization)
+        result = await asyncio.to_thread(activate_sql_workspace_profile, req.root, req.connection_id)
+        await upsert_account_project_setting(member["id"], req.root, "CODE_EDITOR_DB", "active_connection", {"connection_id": req.connection_id, "profile": result.get("profile") or {}}, history_title="프로젝트 DB 연결 선택", history_summary=req.connection_id)
+        result["account_connections"] = await list_account_database_profiles(member["id"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/sql/account-profile/apply")
+async def sql_workspace_apply_account_profile(req: SqlWorkspaceAccountProfileApplyRequest, authorization: str = Header(default='')):
+    member = await _required_current_member(authorization)
+    profile = await get_account_database_profile(member["id"], req.account_profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="계정 DB 설정을 찾을 수 없습니다.")
+    try:
+        profile.pop("account_database_profiles_id", None)
+        profile.pop("account_profile_id", None)
+        profile.pop("credential_storage", None)
+        saved = await asyncio.to_thread(save_sql_workspace_profile, req.root, profile, None)
+        await upsert_account_project_setting(
+            member["id"], req.root, "CODE_EDITOR_DB", "active_connection",
+            {"connection_id": saved.get("connection_id"), "account_profile_id": req.account_profile_id, "profile": saved},
+            source_profile_id=req.account_profile_id,
+            history_title="계정 DB 설정을 프로젝트에 적용",
+            history_summary=saved.get("name") or saved.get("db_type") or "DB 연결",
+            history_action="APPLY",
+        )
+        status = await asyncio.to_thread(get_sql_workspace_status, req.root, verify=False)
+        status["account_connections"] = await list_account_database_profiles(member["id"])
+        return status
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -3283,7 +3736,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.435", "build": "GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering+SchedulerWorkspace+ParallelRenderedThemeFallback+AuthenticatedPptExportCors+InteractiveThemePagePreview+RenderedMenuMotionProbe"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.600", "build": "DatabaseWorkflowCodexFeatureSeparation+EditorProjectNotebookFeatureSeparation+EnvAuthoritativeDatabaseProviderAuthFix+RootEnvRuntimeConfigNoPortHardcode+LegacyAppCleanup+RootEnvDbOnly+IncrementalEditorFeatureSeparation+IncrementalAppFeatureSeparation+StaleTypeShimAutoCleanup+ReactTypeDeclarationCollisionFix+TypeScriptStrictStabilization+EnvDatabaseSourceOfTruthFix+ReactTypeScriptFrontendMigrationComplete+GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering+SchedulerWorkspace+ParallelRenderedThemeFallback+AuthenticatedPptExportCors+InteractiveThemePagePreview+RenderedMenuMotionProbe+UILayoutSidebarHeaderIconOptions+Blender3DAgentTemplate+RequirementRecommendationToolRouting+AuthenticatedBinaryDocumentPreview+LearningProblemPersistenceRepair+LearningDatasetTopicScrollLayout+LearningExactMisjudgmentTraceSqlExport+LearningCenterLoadProgressHeartbeat+LearningSqlListParityCurrentPcFastRead+LearningSchemaDeadlockGuard+CodeEditorSelectionLlmReference+EditableLlmReferenceCompactChat+LlmComposerBottomDock+CodeSaveLabelClarification+TopSaveToolbar+ReferenceHeaderSummaryRelocation+InlineDirtySaveButton+PdfPreviewHeadingRemoval+AdaptiveDevelopmentStagePlannerApprovalWorkflow+NewAgentDevelopmentPlanUXStageEditor+DatabaseResourceProvisionPlanApprovalFlow+RuntimeDatabaseFinalPreviewTablePolicyPortRecommendationUX+CodeDocumentationOption+SmartPairTypingEscapedQuoteCaretGuard+CodeDocumentationCssLiteralNewlineFix+CodeDocumentationToggleTitleRelocation+CodeIntelligenceDefinitionHoverSignatureNavigation+NotebookNameErrorDiagnostic+DocumentWideLlmReferenceSelection+StaleReferenceSelectionGuard+FrontendBuildFailureDetail+ElevatedFailureWindowHold+PowerShellNpmStderrGuard+CtrlSpaceSymbolCompletion+ManualLlmReferenceEntry+UnifiedSaveDirtyDot+SelectedTextExactReplacePairTyping+ContextAwareCallArgumentCompletion+CodexCodeResponseAiProposalRouting+CtrlSpaceCompletionNavigationSeparation+NotebookLongRunProgressHeartbeat+ProjectFileMemoTab+SingleMemoPerFileResizableMemoSplit+SaveButtonEventGuard+GlobalMediaSessionBackgroundRecording+LiveTranscriptPersistence+TemporaryExternalMediaTab+UserCodingStyleProfile+BackendFasterWhisperStreamingStt+SttOverlapVad+StopTimeTranscriptRefinement+MediaSessionLastSegmentUndefinedGuard+CodingStylePopoverLayout+LiveTranscriptSummary+ScreenAudioTrackGuard+AttachmentSummaryFileOpen+ManualDatabaseResourceCreate+Global13pxTextFloor+CodingStylePanelPolish+LiveTranscriptProvisionalImmediateRender+TimeRangeRefinedReplacement+TranscriptCollectionRefineCompleteStatus+NotebookStreamingRecovery+PackageInstallProtectedExecution+ExternalPythonWorkerRuntime+BackendPackageExecution+WindowsRuntimeRegression+NotebookWarningOutputClassification+DocumentDrivenAgentCodingStyle+ResilientAgentCodingStyle+PromptToolStudioRuntimeExecutorLangGraphTraceVersioning+PromptToolStudioUnifiedExecutorExecutionTraceDiffReports+PromptToolStudioReadabilityRoleSeparationToolbarPolish+RagStudioPhase1KnowledgeSkeleton+RagStudioPhase2Indexing+RagStudioPhase3Retrieval+RagStudioPhase4AgentIntegration+RagStudioPhase4StrictTypeSafetyBuildFix+RagStudioPhase5Intelligence+RagStudioPhase6OperationSecurityEvaluation+TableSpecificPrimaryKeyNamingPolicy+TablePkUiBuildFix+RagLegacyPkPreCreateMigrationFix+RagStudioApiBaseSourcePickerDarkUiFix+AccountProjectSettingsDbHistory+ProjectHistoryStrictTypeSafetyBuildFix"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():
@@ -3319,6 +3772,34 @@ def _merge_interview_attachment_memory(previous: str, current: str, limit: int =
     return merged[-max(2_000, int(limit)):]
 
 
+@router.post("/prompt-tool-studio/analyze")
+async def prompt_tool_studio_analyze(req: PromptToolStudioAnalyzeRequest):
+    return await analyze_prompt_tool_input(
+        req.message,
+        pending_question=req.pending_question,
+        state=req.state,
+        provider=req.provider or None,
+    )
+
+
+@router.post("/prompt-tool-studio/test")
+async def prompt_tool_studio_test(req: PromptToolStudioTestRequest):
+    return await run_prompt_tool_studio_test(
+        req.message,
+        mode=req.mode,
+        compiled_prompt=req.compiled_prompt,
+        routes=req.routes,
+        tools=req.tools,
+        intents=req.intents,
+        provider=req.provider or None,
+        execute_tool=req.execute_tool,
+        tool_name=req.tool_name,
+        tool_arguments=req.tool_arguments,
+        confirmation=req.confirmation,
+        project_root=req.project_root,
+    )
+
+
 @router.post("/chat/interview/attachments/summary")
 async def interview_attachment_summary(req: AttachmentRequirementsSummaryRequest):
     attachment_context = build_requirements_attachment_context(
@@ -3338,15 +3819,21 @@ async def interview_attachment_summary(req: AttachmentRequirementsSummaryRequest
     requirement_registry = extract_attachment_requirement_registry(context_text)
     registry_memory = format_requirement_registry_memory(requirement_registry)
 
-    with usage_context(
-        project_root=req.project_root,
-        operation="requirements_attachment_summary",
-    ):
-        summary = await summarize_attachment_requirements(
-            context_text,
-            previous_summary=redact_sensitive_text(req.attachment_memory or ""),
-            provider=req.provider,
-        )
+    # v5.500: file selection performs one deterministic requirement extraction
+    # immediately after Context preparation. Repeated interview turns reuse the
+    # stored attachment_memory. A slower LLM deep summary is opt-in only.
+    if req.deep_analysis:
+        with usage_context(
+            project_root=req.project_root,
+            operation="requirements_attachment_summary_deep",
+        ):
+            summary = await summarize_attachment_requirements(
+                context_text,
+                previous_summary=redact_sensitive_text(req.attachment_memory or ""),
+                provider=req.provider,
+            )
+    else:
+        summary = build_attachment_requirements_display_summary(context_text)
 
     summary = redact_sensitive_text(summary).strip()
     current_memory_parts = []
@@ -3356,9 +3843,16 @@ async def interview_attachment_summary(req: AttachmentRequirementsSummaryRequest
         current_memory_parts.append("[첨부 파일에서 파악한 사용자 요구사항 요약]\n" + summary)
     current_memory = "\n\n".join(current_memory_parts)
     memory = _merge_interview_attachment_memory(req.attachment_memory, current_memory, limit=18_000)
+    development_stage_plan = recommend_development_stage_plan(
+        summary or context_text,
+        [],
+        {},
+        memory,
+    )
     return {
         "ok": bool(summary or requirement_registry.get("requirements")),
         "summary": summary,
+        "development_stage_plan": development_stage_plan,
         "attachment_memory": memory,
         "attachments": attachment_context.get("files") or [],
         "attachment_warnings": attachment_context.get("warnings") or [],
@@ -3370,12 +3864,14 @@ async def interview_attachment_summary(req: AttachmentRequirementsSummaryRequest
 
 @router.post("/chat/interview")
 async def interview(req: ChatRequest):
+    turn_type = interview_turn_type(req.message)
+    effective_attachment_ids = [] if turn_type == 'QUESTION' else req.attachment_ids
     with usage_context(
         project_root=req.project_root,
         operation="requirements_interview",
     ):
         attachment_context = build_requirements_attachment_context(
-            req.attachment_ids,
+            effective_attachment_ids,
             purpose="Agent 설계 인터뷰 요구사항/참고자료 분석",
         )
         fresh_attachment_text = str(attachment_context.get("text") or "").strip()
@@ -3397,17 +3893,77 @@ async def interview(req: ChatRequest):
             req.provider,
             attachment_context=fresh_attachment_text,
             attachment_memory=attachment_memory,
+            agent_specialization=req.agent_specialization,
+        )
+
+        if turn_type == 'QUESTION':
+            return {
+                "answer": answer,
+                "requirement_recommendations": None,
+                "development_stage_plan": None,
+                "attachments": [],
+                "attachment_warnings": [],
+                "attachment_memory": redact_sensitive_text(req.attachment_memory or ""),
+                "attachment_summary": "",
+                "attachment_requirements": [],
+                "attachment_requirement_coverage": {},
+                "attachments_consumed": False,
+                "turn_type": "QUESTION",
+                "requirement_state_changed": False,
+            }
+
+        registered_tools = []
+        try:
+            async with SessionLocal() as db:
+                rows = (await db.execute(
+                    select(ToolRecord).where(ToolRecord.enabled == True)  # noqa: E712
+                )).scalars().all()
+                registered_tools = [
+                    {
+                        "provider": row.provider,
+                        "name": row.name,
+                        "description": row.description,
+                        "category": row.category,
+                        "subcategory": row.subcategory,
+                        "capability": row.capability,
+                        "risk_level": row.risk_level,
+                        "requires_confirmation": row.requires_confirmation,
+                        "enabled": row.enabled,
+                    }
+                    for row in rows
+                ]
+        except Exception:
+            # Recommendation must never make the interview fail when the Tool Registry
+            # database is unavailable. Standard capability recommendations remain useful.
+            registered_tools = []
+
+        recommendation_bundle = build_requirement_recommendations(
+            req.message,
+            req.history,
+            attachment_memory=attachment_memory,
+            agent_specialization=req.agent_specialization,
+            registered_tools=registered_tools,
+        )
+        development_stage_plan = recommend_development_stage_plan(
+            req.message,
+            req.history,
+            {},
+            attachment_memory,
         )
 
     return {
         "answer": answer,
+        "requirement_recommendations": recommendation_bundle,
+        "development_stage_plan": development_stage_plan,
         "attachments": attachment_context.get("files") or [],
         "attachment_warnings": attachment_context.get("warnings") or [],
         "attachment_memory": attachment_memory,
         "attachment_summary": attachment_summary,
         "attachment_requirements": requirement_registry.get("requirements") or [],
         "attachment_requirement_coverage": requirement_registry.get("coverage") or {},
-        "attachments_consumed": bool(req.attachment_ids),
+        "attachments_consumed": bool(effective_attachment_ids),
+        "turn_type": turn_type,
+        "requirement_state_changed": turn_type != "QUESTION",
     }
 
 @router.post("/agent/plan")
@@ -3712,6 +4268,66 @@ async def project_file_raw(root: str = Query(...), relative_path: str = Query(..
     )
 
 
+@router.get("/files/image")
+async def project_image_view(root: str = Query(...), relative_path: str = Query(...)):
+    """등록 프로젝트 안의 이미지 파일을 인증된 inline binary 응답으로 전송합니다."""
+    project_root = Path(str(root or "")).expanduser().resolve()
+    relative = str(relative_path or "").strip()
+    if not relative:
+        raise HTTPException(status_code=400, detail="relative_path가 필요합니다.")
+
+    try:
+        await get_file_meta(str(project_root), relative)
+    except PermissionError as exc:
+        restored = await ensure_persisted_project_root(str(project_root))
+        if not restored.get("registered"):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "PROJECT_ROOT_NOT_ALLOWED",
+                    "message": str(exc),
+                    "project_root": str(project_root),
+                    "recovery": restored,
+                },
+            ) from exc
+        await get_file_meta(str(project_root), relative)
+
+    target = (project_root / Path(relative.replace("\\", "/"))).resolve()
+    try:
+        target.relative_to(project_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="프로젝트 밖의 이미지는 열 수 없습니다.") from exc
+
+    suffix = target.suffix.casefold()
+    if suffix not in _PROJECT_IMAGE_SUFFIXES:
+        raise HTTPException(status_code=415, detail="지원하는 이미지 형식이 아닙니다.")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail=f"이미지 파일을 찾을 수 없습니다: {target}")
+
+    media_type = mimetypes.guess_type(target.name)[0] or {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+        ".ico": "image/x-icon",
+        ".avif": "image/avif",
+    }.get(suffix, "application/octet-stream")
+
+    return FileResponse(
+        path=str(target),
+        media_type=media_type,
+        filename=target.name,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 @router.get("/files/pdf")
 async def project_pdf_view(root: str = Query(...), relative_path: str = Query(...)):
     """등록 프로젝트 안의 PDF를 브라우저 내장 PDF Viewer용으로 inline 전송합니다.
@@ -3798,6 +4414,74 @@ async def analyze_database_erd(payload: DatabaseErdRequest):
     )
 
 
+@router.post("/presentation/open")
+async def presentation_open(req: PresentationOpenRequest):
+    """Open a generated PPT/PPTX with the OS default presentation application.
+
+    The file must already exist on the AgentStudio machine and must be a
+    presentation file. This endpoint is intentionally limited to PPT/PPTX.
+    """
+    import os
+    import platform
+    import subprocess
+    from pathlib import Path
+
+    raw_path = str(req.path or "").strip()
+    if not raw_path:
+        raise HTTPException(status_code=422, detail="열 PPT 파일 경로가 필요합니다.")
+
+    target = Path(raw_path).expanduser()
+    try:
+        target = target.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"PPT 파일을 찾을 수 없습니다: {raw_path}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"PPT 파일 경로를 확인할 수 없습니다: {raw_path} / {exc}") from exc
+
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail=f"PPT 파일이 아닙니다: {target}")
+    if target.suffix.casefold() not in {".ppt", ".pptx"}:
+        raise HTTPException(status_code=415, detail=f"PPT/PPTX 파일만 열 수 있습니다: {target.name}")
+
+    system = platform.system().casefold()
+    try:
+        if system == "windows":
+            os.startfile(str(target))  # type: ignore[attr-defined]
+            method = "os.startfile"
+        elif system == "darwin":
+            subprocess.Popen(
+                ["open", str(target)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            method = "open"
+        else:
+            subprocess.Popen(
+                ["xdg-open", str(target)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            method = "xdg-open"
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": f"PPT 문서를 실행하지 못했습니다: {target.name}",
+                "path": str(target),
+                "error": str(exc),
+            },
+        ) from exc
+
+    return {
+        "ok": True,
+        "path": str(target),
+        "method": method,
+        "message": "PPT 문서 실행을 요청했습니다.",
+    }
+
+
 @router.post("/presentation/export")
 async def export_agentstudio_presentation(payload: PresentationExportRequest):
     """워크플로우/실행결과/분석리포트/아키텍처/DB ERD를 편집 가능한 PPTX로 내보냅니다.
@@ -3818,6 +4502,19 @@ async def export_agentstudio_presentation(payload: PresentationExportRequest):
     data = payload.model_dump()
     data["scope"] = scope
     data["deck_type"] = deck_type
+
+    # v5.570: old/completed projects may have null optional snapshots.
+    # Normalize them here so every PPT scope can generate from partial data.
+    for dict_key in (
+        "workflow_definition",
+        "report",
+        "coding_style_report",
+        "llm_usage_summary",
+        "db_erd",
+        "ui_layout",
+    ):
+        if not isinstance(data.get(dict_key), dict):
+            data[dict_key] = {}
     if not data.get("generated_at"):
         data["generated_at"] = datetime.now().isoformat(timespec="seconds")
 
@@ -3879,7 +4576,7 @@ async def export_agentstudio_presentation(payload: PresentationExportRequest):
         content, filename = await asyncio.to_thread(
             build_agentstudio_presentation,
             data,
-            "5.435",
+            "5.570",
         )
     except Exception as exc:
         raise HTTPException(
@@ -4071,6 +4768,494 @@ async def project_text_search(payload: dict):
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
+
+
+@router.post("/code-intelligence/resolve")
+async def code_intelligence_resolve(payload: dict):
+    """Resolve editor symbols without executing user project code.
+
+    v5.473 strictly separates completion from navigation: Ctrl+Space only opens
+    context-aware completion at the current caret, while Ctrl+Click handles definition navigation. Python uses static AST/import analysis, including Notebook
+    code cells and project virtualenv site-packages. Other source languages use
+    a conservative project-local declaration fallback while Monaco keeps its
+    native TypeScript/JavaScript intelligence.
+    """
+    root = str(payload.get("root") or "").strip()
+    if not root:
+        raise HTTPException(status_code=400, detail="프로젝트 root가 필요합니다.")
+    try:
+        normalized_root = validate_project_root(root)
+    except PermissionError as exc:
+        restored = await ensure_persisted_project_root(root)
+        if not restored.get("registered"):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "PROJECT_ROOT_NOT_ALLOWED",
+                    "message": str(exc),
+                    "project_root": root,
+                    "recovery": restored,
+                },
+            ) from exc
+        normalized_root = validate_project_root(root)
+    request_payload = dict(payload)
+    request_payload["root"] = normalized_root
+    return await asyncio.to_thread(resolve_code_intelligence, request_payload)
+
+
+def _project_memo_store_path(project_root: Path) -> Path:
+    return project_root / ".agentstudio" / "file_memos.json"
+
+
+def _normalize_project_memo_items(items) -> list[dict]:
+    """Normalize project memo payload and enforce exactly one memo per file path.
+
+    Older versions allowed multiple memo records for the same file.  v5.475 keeps
+    only the most recently updated record for each normalized path so the rule is
+    enforced on both read and write, not only in the React UI.
+    """
+    if not isinstance(items, list):
+        return []
+    by_file: dict[str, dict] = {}
+    for item in items[:1000]:
+        if not isinstance(item, dict):
+            continue
+        memo_id = str(item.get("id") or "").strip()
+        file_path = str(item.get("filePath") or "").replace("\\", "/").strip()[:2000]
+        if not memo_id or not file_path:
+            continue
+        normalized = {
+            "id": memo_id[:160],
+            "filePath": file_path,
+            "title": str(item.get("title") or "")[:500],
+            "content": str(item.get("content") or "")[:200000],
+            "createdAt": str(item.get("createdAt") or "")[:80],
+            "updatedAt": str(item.get("updatedAt") or "")[:80],
+        }
+        key = file_path.casefold()
+        previous = by_file.get(key)
+        if previous is None or normalized["updatedAt"] >= str(previous.get("updatedAt") or ""):
+            by_file[key] = normalized
+    return list(by_file.values())
+
+
+async def _validated_memo_project_root(root: str) -> Path:
+    raw = str(root or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="프로젝트 root가 필요합니다.")
+    try:
+        normalized = validate_project_root(raw)
+    except PermissionError as exc:
+        restored = await ensure_persisted_project_root(raw)
+        if not restored.get("registered"):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "PROJECT_ROOT_NOT_ALLOWED",
+                    "message": str(exc),
+                    "project_root": raw,
+                    "recovery": restored,
+                },
+            ) from exc
+        normalized = validate_project_root(raw)
+    return Path(normalized).expanduser().resolve()
+
+
+@router.get("/project-memos")
+async def project_memos(root: str = Query(...)):
+    """프로젝트의 .agentstudio/file_memos.json에 저장된 파일별 메모 목록을 반환합니다."""
+    project_root = await _validated_memo_project_root(root)
+    store = _project_memo_store_path(project_root)
+    if not store.exists():
+        return {"ok": True, "root": str(project_root), "memos": []}
+    try:
+        payload = json.loads(await asyncio.to_thread(store.read_text, encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"프로젝트 메모 읽기 실패: {exc}") from exc
+    return {
+        "ok": True,
+        "root": str(project_root),
+        "memos": _normalize_project_memo_items(payload.get("memos") if isinstance(payload, dict) else payload),
+    }
+
+
+@router.post("/project-memos")
+async def save_project_memos(payload: dict):
+    """프로젝트별 파일 메모를 .agentstudio 아래 JSON으로 원자적으로 저장합니다."""
+    project_root = await _validated_memo_project_root(str(payload.get("root") or ""))
+    memos = _normalize_project_memo_items(payload.get("memos"))
+    store = _project_memo_store_path(project_root)
+    await asyncio.to_thread(store.parent.mkdir, parents=True, exist_ok=True)
+    body = json.dumps({"version": 1, "memos": memos}, ensure_ascii=False, indent=2)
+    temp = store.with_name(f".{store.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        await asyncio.to_thread(temp.write_text, body, encoding="utf-8")
+        await asyncio.to_thread(temp.replace, store)
+    finally:
+        if temp.exists():
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+    return {"ok": True, "root": str(project_root), "count": len(memos)}
+
+
+def _project_live_transcript_store_path(project_root: Path) -> Path:
+    return project_root / ".agentstudio" / "live_transcript.json"
+
+
+def _normalize_live_transcript_session(value) -> dict:
+    session = value if isinstance(value, dict) else {}
+    normalized_segments = []
+    segments = session.get("segments")
+    if isinstance(segments, list):
+        for item in segments[-5000:]:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            try:
+                offset_ms = max(0, int(item.get("offsetMs") or 0))
+            except (TypeError, ValueError):
+                offset_ms = 0
+            try:
+                end_offset_ms = max(offset_ms, int(item.get("endOffsetMs") or offset_ms))
+            except (TypeError, ValueError):
+                end_offset_ms = offset_ms
+            try:
+                confidence = float(item.get("confidence")) if item.get("confidence") is not None else None
+            except (TypeError, ValueError):
+                confidence = None
+            if confidence is not None:
+                confidence = max(0.0, min(1.0, confidence))
+            normalized_segments.append({
+                "id": str(item.get("id") or uuid.uuid4().hex)[:160],
+                "text": text[:10000],
+                "createdAt": str(item.get("createdAt") or "")[:80],
+                "offsetMs": offset_ms,
+                "endOffsetMs": end_offset_ms,
+                "confidence": confidence,
+                "source": str(item.get("source") or "")[:80],
+                "refined": item.get("refined") is True,
+            })
+    return {
+        "sourceType": "SCREEN" if str(session.get("sourceType") or "").upper() == "SCREEN" else "MICROPHONE",
+        "enableStt": session.get("enableStt") is not False,
+        "startedAt": str(session.get("startedAt") or "")[:80],
+        "stoppedAt": str(session.get("stoppedAt") or "")[:80],
+        "status": str(session.get("status") or "IDLE")[:40],
+        "updatedAt": str(session.get("updatedAt") or "")[:80],
+        "sttEngine": str(session.get("sttEngine") or "")[:80],
+        "refineStatus": str(session.get("refineStatus") or "IDLE")[:40],
+        "segments": normalized_segments,
+    }
+
+
+@router.get("/project-live-transcript")
+async def project_live_transcript(root: str = Query(...)):
+    """Return the most recently persisted live recording transcript for a project."""
+    project_root = await _validated_memo_project_root(root)
+    store = _project_live_transcript_store_path(project_root)
+    if not store.exists():
+        return {"ok": True, "root": str(project_root), "session": {"segments": []}}
+    try:
+        payload = json.loads(await asyncio.to_thread(store.read_text, encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"실시간 기록 읽기 실패: {exc}") from exc
+    raw_session = payload.get("session") if isinstance(payload, dict) else {}
+    return {
+        "ok": True,
+        "root": str(project_root),
+        "session": _normalize_live_transcript_session(raw_session),
+    }
+
+
+@router.post("/project-live-transcript")
+async def save_project_live_transcript(payload: dict):
+    """Persist transcript snapshots without coupling recording lifetime to the memo React view."""
+    project_root = await _validated_memo_project_root(str(payload.get("root") or ""))
+    session = _normalize_live_transcript_session(payload.get("session"))
+    store = _project_live_transcript_store_path(project_root)
+    await asyncio.to_thread(store.parent.mkdir, parents=True, exist_ok=True)
+    body = json.dumps({"version": 1, "session": session}, ensure_ascii=False, indent=2)
+    temp = store.with_name(f".{store.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        await asyncio.to_thread(temp.write_text, body, encoding="utf-8")
+        await asyncio.to_thread(temp.replace, store)
+    finally:
+        if temp.exists():
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+    return {"ok": True, "root": str(project_root), "segment_count": len(session["segments"])}
+
+
+@router.post("/media-stt/summarize")
+async def media_stt_summarize(req: MediaSttSummaryRequest):
+    """Summarize live transcript with provider fallback and local safe fallback."""
+    import re
+    import traceback
+    from datetime import datetime
+    from pathlib import Path
+    from app.services.model_router import model_for_task, LLMTask
+
+    transcript = str(req.transcript or "").strip()
+    if not transcript:
+        raise HTTPException(status_code=400, detail="요약할 실시간 Transcript가 없습니다.")
+
+    # Timestamp/UI metadata is useful for navigation, but it is not lecture
+    # content. Remove it before every summary/analysis path so values such as
+    # 00:15:46 cannot bias the LLM or leak into the generated summary.
+    transcript = re.sub(r"(?m)^\s*\[?\d{1,2}:\d{2}:\d{2}\]?\s*", "", transcript)
+    transcript = re.sub(r"(?m)^\s*(?:보정 완료|정밀 완료|수집됨|수집 중)\s*$", "", transcript)
+    transcript = re.sub(r"\n{3,}", "\n\n", transcript).strip()
+    if not transcript:
+        raise HTTPException(status_code=400, detail="분석 가능한 Transcript 본문이 없습니다.")
+
+    backend_root = Path(__file__).resolve().parents[3]
+    log_dir = backend_root.parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "media_stt_summary.log"
+
+    def write_failure_log(exc: Exception | None, *, provider_errors: list[str] | None = None) -> None:
+        stamp = datetime.now().astimezone().isoformat()
+        detail = [
+            f"[{stamp}] live transcript summary",
+            f"project_root={str(req.root or '')}",
+            f"transcript_length={len(transcript)}",
+        ]
+        if provider_errors:
+            detail.append("provider_errors=" + " | ".join(provider_errors))
+        if exc is not None:
+            detail.append(f"exception={type(exc).__name__}: {exc}")
+            detail.append(traceback.format_exc())
+        detail.append("-" * 80)
+        try:
+            with log_path.open("a", encoding="utf-8") as fp:
+                fp.write("\n".join(detail) + "\n")
+        except Exception:
+            pass
+
+    def local_safe_summary(text: str) -> str:
+        """Deterministic fallback when every configured AI provider fails.
+
+        This is intentionally extractive: it only reuses transcript text and
+        never invents facts. It keeps the Memo workflow usable even when Ollama
+        returns an empty response or an external provider is unavailable.
+        """
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        if not cleaned:
+            return ""
+        raw_sentences = [
+            part.strip(" -•\t")
+            for part in re.split(r"(?<=[.!?。！？])\s+|\n+", text)
+            if part and part.strip()
+        ]
+        if not raw_sentences:
+            raw_sentences = [cleaned]
+        unique: list[str] = []
+        seen: set[str] = set()
+        for sentence in raw_sentences:
+            normalized = re.sub(r"\s+", " ", sentence).strip()
+            if len(normalized) < 3:
+                continue
+            key = normalized.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(normalized[:420])
+            if len(unique) >= 12:
+                break
+        if not unique:
+            unique = [cleaned[:420]]
+
+        words = re.findall(r"[가-힣A-Za-z0-9_]{2,}", cleaned)
+        stop = {"그래서","그리고","그런데","그러면","이것","저것","우리","제가","저희","대한","하는","있는","없는","한다","합니다","테스트"}
+        freq: dict[str,int] = {}
+        for word in words:
+            key = word.casefold()
+            if key in stop or len(key) < 2:
+                continue
+            freq[key] = freq.get(key,0)+1
+        keywords = [item[0] for item in sorted(freq.items(), key=lambda item:(-item[1], item[0]))[:10]]
+
+        summary_lines = unique[:8]
+        return (
+            "[요약]\n"
+            + "\n".join(f"- {item}" for item in summary_lines[:6])
+            + "\n\n[핵심 포인트]\n"
+            + "\n".join(f"- {item}" for item in summary_lines[6:10] or summary_lines[:4])
+            + "\n\n[결정/할 일]\n- Transcript에서 명시적으로 확인된 결정/할 일은 자동 추정하지 않았습니다."
+            + "\n\n[키워드]\n- "
+            + (", ".join(keywords) if keywords else "Transcript 원문 참조")
+        )
+
+    chunk_size = 12_000
+    max_chunks = 6
+    all_chunks = [transcript[i:i + chunk_size] for i in range(0, len(transcript), chunk_size)]
+    truncated = len(all_chunks) > max_chunks
+    chunks = [*all_chunks[:3], *all_chunks[-3:]] if truncated else all_chunks
+    llm = model_for_task(LLMTask.SIMPLE_QUESTION)
+
+    async def summarize_piece(text: str, index: int, total: int) -> str:
+        prompt = f"""
+다음은 실시간 음성 인식 Transcript의 {index}/{total} 구간입니다.
+음성 인식 오류나 반복 문장이 있을 수 있습니다.
+원문에 있는 내용만 사용하고 추측하지 마세요.
+
+[Transcript]
+{text}
+
+한국어로 핵심 내용만 4~8개의 짧은 항목으로 요약하세요.
+반복되는 동일 단어나 테스트 발화는 한 항목으로 합치세요.
+"""
+        result = await llm.ainvoke(prompt)
+        content = str(getattr(result, "content", result) or "").strip()
+        if not content:
+            raise RuntimeError("요약 Provider가 빈 응답을 반환했습니다.")
+        return content
+
+    try:
+        with usage_context(project_root=str(req.root or ""), operation="live_transcript_summary"):
+            if len(chunks) == 1:
+                source_summary = await summarize_piece(chunks[0], 1, 1)
+            else:
+                partials = []
+                for index, chunk in enumerate(chunks, start=1):
+                    partials.append(await summarize_piece(chunk, index, len(chunks)))
+                source_summary = "\n\n".join(
+                    f"[구간 {index}]\n{item}" for index, item in enumerate(partials, start=1)
+                )
+
+            final_prompt = f"""
+아래는 실시간 음성 Transcript의 1차 요약입니다.
+중복 표현을 제거하고 원문에 있는 사실만 사용해 최종 요약하세요.
+
+[1차 정리]
+{source_summary}
+
+반드시 아래 형식을 사용하세요.
+[요약]
+- 4~8개 항목
+
+[핵심 포인트]
+- 중요한 개념/설명
+
+[결정/할 일]
+- 실제 언급이 있을 때만 작성. 없으면 "없음"
+
+[키워드]
+- 5~10개
+"""
+            final_result = await llm.ainvoke(final_prompt)
+        summary = str(getattr(final_result, "content", final_result) or "").strip()
+        if not summary:
+            raise RuntimeError("최종 요약 Provider가 빈 응답을 반환했습니다.")
+        return {
+            "ok": True,
+            "summary": summary[:24_000],
+            "truncated": truncated,
+            "source_length": len(transcript),
+            "processed_length": sum(len(chunk) for chunk in chunks),
+            "fallback": False,
+            "provider": str(getattr(llm, "last_provider", "") or ""),
+            "log_path": "",
+        }
+    except Exception as exc:
+        provider_errors = list(getattr(llm, "last_errors", []) or [])
+        write_failure_log(exc, provider_errors=provider_errors)
+        fallback_summary = local_safe_summary(transcript)
+        if fallback_summary:
+            return {
+                "ok": True,
+                "summary": fallback_summary[:24_000],
+                "truncated": truncated,
+                "source_length": len(transcript),
+                "processed_length": len(transcript),
+                "fallback": True,
+                "warning": "AI Provider 요약 호출이 실패하여 Transcript 원문 기반 로컬 안전 요약으로 대체했습니다.",
+                "provider_errors": provider_errors,
+                "log_path": str(log_path),
+            }
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": f"실시간 Transcript 요약 실패: {exc}",
+                "log_path": str(log_path),
+                "provider_errors": provider_errors,
+            },
+        ) from exc
+
+
+@router.get("/media-stt/status")
+async def media_stt_status():
+    """Return the local backend STT engine configuration without loading the model."""
+    return live_stt_runtime_status()
+
+
+@router.websocket("/media-stt/stream")
+async def media_stt_stream(ws: WebSocket):
+    """Receive 16kHz mono PCM16 and stream faster-whisper transcript events back to the client."""
+    await ws.accept()
+    root = str(ws.query_params.get("root") or "").strip()
+    language = str(ws.query_params.get("language") or "ko-KR").strip()
+    try:
+        sample_rate = int(ws.query_params.get("sample_rate") or 16000)
+    except (TypeError, ValueError):
+        sample_rate = 16000
+
+    session: LiveSttSession | None = None
+    try:
+        project_root = await _validated_memo_project_root(root)
+        session = LiveSttSession(
+            ws.send_json,
+            project_root=project_root,
+            language=language,
+            sample_rate=sample_rate,
+        )
+        await session.start()
+        while True:
+            message = await ws.receive()
+            message_type = str(message.get("type") or "")
+            if message_type == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            if isinstance(data, (bytes, bytearray)) and data:
+                session.append_pcm(bytes(data))
+                continue
+            text = message.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if str(payload.get("type") or "").lower() == "stop":
+                await session.finish(refine=payload.get("refine") is not False)
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        try:
+            await ws.send_json({
+                "type": "error",
+                "code": "STT_SESSION_ERROR",
+                "message": f"실시간 STT 세션 오류: {exc}",
+                "fallbackAllowed": True,
+            })
+        except Exception:
+            pass
+    finally:
+        if session is not None:
+            await session.close()
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
 @router.post("/files/read")
 async def project_file_read(payload: dict):
     """프로젝트 root + relative_path 기반 파일 읽기 API."""
@@ -4089,6 +5274,14 @@ async def project_file_read(payload: dict):
     project_root = Path(root).expanduser().resolve()
     target = (project_root / Path(relative_path.replace("\\", "/"))).resolve()
 
+    if target.suffix.casefold() in _PROJECT_IMAGE_SUFFIXES:
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "code": "IMAGE_BINARY_VIEWER_REQUIRED",
+                "message": "이미지는 텍스트 파일이 아닙니다. /api/files/image Viewer를 사용하세요.",
+            },
+        )
     if target.suffix.casefold() == ".pdf":
         raise HTTPException(
             status_code=415,
@@ -4179,6 +5372,14 @@ async def project_file_content(root: str, relative_path: str):
         / Path(relative_path.replace("\\", "/"))
     ).resolve()
 
+    if target.suffix.casefold() in _PROJECT_IMAGE_SUFFIXES:
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "code": "IMAGE_BINARY_VIEWER_REQUIRED",
+                "message": "이미지는 텍스트 파일이 아닙니다. /api/files/image Viewer를 사용하세요.",
+            },
+        )
     if target.suffix.casefold() == ".pdf":
         raise HTTPException(
             status_code=415,
@@ -4556,6 +5757,7 @@ async def ai_edit_code(req: CodeEditRequest):
     try:
         llm = model_for_task(LLMTask.CODE_GENERATION)
         is_notebook = req.path.casefold().endswith(".ipynb")
+        reference_prompt, normalized_references = _build_llm_code_reference_prompt(req.reference_texts)
         attachment_context = build_attachment_context(
             req.attachment_ids,
             purpose="LLM 대화형 코드 편집 참고자료",
@@ -4591,6 +5793,16 @@ async def ai_edit_code(req: CodeEditRequest):
 
 [사용자 수정 요청]
 {req.instruction}
+
+[사용자 선택 LLM 참조 문구]
+{reference_prompt}
+
+참조 문구 사용 규칙:
+- 참조 문구는 사용자가 편집기에서 선택하고 필요하면 직접 수정한 핵심 근거입니다.
+- 사용자가 참조 문구를 수정했다면 수정된 텍스트를 원본 선택 내용보다 우선합니다.
+- 사용자 지시어를 해석할 때 이 참조 문구를 우선 근거로 사용합니다.
+- 참조 문구를 자동으로 삭제/치환하라는 의미는 아닙니다. 실제 변경 범위는 사용자 지시어가 결정합니다.
+- 참조와 무관한 코드까지 임의로 확장 수정하지 않습니다.
 
 [Notebook Context]
 아래 Context는 입력 예산 보호를 위해 outputs, execution result, metadata를 제거했습니다.
@@ -4676,6 +5888,8 @@ async def ai_edit_code(req: CodeEditRequest):
                 "active_cell_index": notebook_ctx.active_cell_index,
                 "attachments": attachment_context.get("files") or [],
                 "attachment_warnings": attachment_context.get("warnings") or [],
+                "reference_texts": normalized_references,
+                "reference_count": len(normalized_references),
                 "context_budget": {
                     "original_file_chars": notebook_ctx.original_chars,
                     "llm_context_chars": notebook_ctx.compact_chars,
@@ -4698,6 +5912,16 @@ async def ai_edit_code(req: CodeEditRequest):
 
 [사용자 수정 요청]
 {req.instruction}
+
+[사용자 선택 LLM 참조 문구]
+{reference_prompt}
+
+참조 문구 사용 규칙:
+- 참조 문구는 사용자가 편집기에서 선택하고 필요하면 직접 수정한 핵심 근거입니다.
+- 사용자가 참조 문구를 수정했다면 수정된 텍스트를 원본 선택 내용보다 우선합니다.
+- 사용자 지시어는 이 참조 문구의 의미, 구조, 값, 조건, SQL/코드 흐름을 중심으로 해석합니다.
+- 참조 문구는 수정 대상 힌트이며, 사용자가 요청하지 않은 주변 코드까지 불필요하게 변경하지 않습니다.
+- 참조 문구가 현재 코드 일부와 겹치면 현재 코드의 실제 위치/문맥을 함께 확인해 안전하게 수정합니다.
 
 [현재 코드]
 ```text
@@ -4778,6 +6002,8 @@ async def ai_edit_code(req: CodeEditRequest):
             "edit_scope": "file",
             "attachments": attachment_context.get("files") or [],
             "attachment_warnings": attachment_context.get("warnings") or [],
+            "reference_texts": normalized_references,
+            "reference_count": len(normalized_references),
             "context_budget": {
                 "prompt_chars": len(prompt),
                 "estimated_tokens": approximate_tokens(prompt),
@@ -4846,6 +6072,7 @@ async def ai_project_edit(req: ProjectCodeEditRequest):
         )
 
     try:
+        reference_prompt, normalized_references = _build_llm_code_reference_prompt(req.reference_texts)
         attachment_context = build_attachment_context(
             req.attachment_ids,
             purpose="프로젝트 단위 LLM 코드 편집 참고자료",
@@ -4969,6 +6196,16 @@ async def ai_project_edit(req: ProjectCodeEditRequest):
 
 [관련 기존 파일 내용]
 {context_text or "(관련 기존 파일 없음 - 신규 프로젝트 파일 생성 가능)"}
+
+[사용자 선택 LLM 참조 문구]
+{reference_prompt}
+
+참조 문구 사용 규칙:
+- 참조 문구는 사용자가 열린 파일에서 선택하고 필요하면 직접 수정한 핵심 근거입니다.
+- 사용자가 참조 문구를 수정했다면 수정된 텍스트를 원본 선택 내용보다 우선합니다.
+- 프로젝트 수정 범위를 판단할 때 참조 문구의 코드/SQL/설정 흐름을 우선 분석합니다.
+- 참조 문구만 보고 프로젝트 전체를 재작성하지 말고, 사용자 요청에 필요한 파일과 영향 범위만 수정합니다.
+- 기존 동작을 유지하면서 참조 문구와 연결된 부분을 중심으로 증분 변경합니다.
 
 [사용자 등록 참고 파일]
 {attachment_prompt}
@@ -5123,6 +6360,8 @@ Markdown 코드펜스나 설명문은 JSON 밖에 작성하지 마십시오.
             "provider_task": LLMTask.MULTI_FILE_CODE_CHANGE.value,
             "attachments": attachment_context.get("files") or [],
             "attachment_warnings": attachment_context.get("warnings") or [],
+            "reference_texts": normalized_references,
+            "reference_count": len(normalized_references),
         }
 
     except HTTPException:
@@ -5308,6 +6547,50 @@ async def execute_terminal_command(payload: dict):
             },
         ) from e
 
+
+
+@router.post("/python/packages/execute")
+async def execute_notebook_package_cell(payload: dict):
+    """Run Notebook pip commands outside the persistent Python worker."""
+    root = str(payload.get("root") or "").strip()
+    code = str(payload.get("code") or "")
+    relative_path = str(payload.get("relative_path") or "").strip()
+    session_id = str(payload.get("session_id") or "default").strip() or "default"
+    capture_last_expression = bool(payload.get("capture_last_expression"))
+    notebook_mode = bool(payload.get("notebook_mode", True))
+    raw_cell_index = payload.get("cell_index")
+    try:
+        cell_index = int(raw_cell_index) if raw_cell_index is not None else None
+    except (TypeError, ValueError):
+        cell_index = None
+
+    if not root:
+        raise HTTPException(status_code=400, detail="root가 필요합니다.")
+    if not code.strip():
+        raise HTTPException(status_code=400, detail="실행할 pip 명령이 없습니다.")
+    if relative_path and not relative_path.lower().endswith(".ipynb"):
+        raise HTTPException(status_code=400, detail="Notebook 패키지 실행은 .ipynb 파일에서만 사용할 수 있습니다.")
+
+    try:
+        execution_env = await asyncio.to_thread(get_redis_python_script_runtime_env, root, relative_path)
+        return await asyncio.to_thread(
+            python_execution_manager.execute_package_cell,
+            root=root,
+            code=code,
+            relative_path=relative_path,
+            session_id=session_id,
+            capture_last_expression=capture_last_expression,
+            notebook_mode=notebook_mode,
+            cell_index=cell_index,
+            env_overrides=execution_env,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"message": f"Notebook 패키지 실행 실패: {exc}", "exception": type(exc).__name__},
+        ) from exc
 
 
 @router.post("/python/execute")
@@ -5943,10 +7226,21 @@ async def mcp_discover(req: MCPDiscoverRequest):
 
 @router.post("/mcp/servers")
 async def create_mcp_server(req: MCPServerCreate):
+    transport = str(req.transport or "streamable_http").strip().casefold()
+    if transport not in {"streamable_http", "stdio"}:
+        raise HTTPException(status_code=400, detail="지원하지 않는 MCP transport입니다.")
+    if transport == "streamable_http" and not str(req.endpoint or "").strip():
+        raise HTTPException(status_code=400, detail="streamable_http MCP Endpoint를 입력하세요.")
+    if transport == "stdio" and not str(req.command or "").strip():
+        raise HTTPException(status_code=400, detail="stdio MCP Command를 입력하세요.")
+
     async with SessionLocal() as db:
         row = MCPServer(
             name=req.name,
-            endpoint=req.endpoint,
+            transport=transport,
+            endpoint=str(req.endpoint or "").strip(),
+            command=str(req.command or "").strip(),
+            args=[str(x) for x in (req.args or []) if str(x).strip()],
             trust_level=req.trust_level.upper(),
             allow_read_without_prompt=req.allow_read_without_prompt,
             allow_write_without_prompt=req.allow_write_without_prompt,
@@ -5954,14 +7248,18 @@ async def create_mcp_server(req: MCPServerCreate):
         db.add(row)
         await db.commit()
         await db.refresh(row)
-        return {"id": row.id, "name": row.name, "endpoint": row.endpoint}
+        return {
+            "id": row.id, "name": row.name, "transport": row.transport,
+            "endpoint": row.endpoint, "command": row.command, "args": row.args or [],
+        }
 
 @router.get("/mcp/servers")
 async def list_mcp_servers():
     async with SessionLocal() as db:
         rows = (await db.execute(select(MCPServer))).scalars().all()
         return [{
-            "id": x.id, "name": x.name, "endpoint": x.endpoint,
+            "id": x.id, "name": x.name, "transport": x.transport, "endpoint": x.endpoint,
+            "command": x.command, "args": x.args or [],
             "status": x.last_status, "trust_level": x.trust_level,
             "supports_tool_list_changed": x.supports_tool_list_changed
         } for x in rows]
@@ -5983,6 +7281,50 @@ async def list_mcp_tools(server_id: int | None = None):
             "risk_level": x.risk_level, "enabled": x.enabled,
             "requires_confirmation": x.requires_confirmation,
         } for x in rows]
+
+@router.get("/mcp/blender/readiness")
+async def blender_mcp_readiness():
+    """Inspect MCP Registry only; never execute Blender Tool from this health check."""
+    async with SessionLocal() as db:
+        servers = (await db.execute(select(MCPServer))).scalars().all()
+        tools = (await db.execute(select(ToolRecord))).scalars().all()
+
+    blender_servers = []
+    server_ids = set()
+    for server in servers:
+        text = f"{server.name} {server.endpoint} {getattr(server, 'command', '')}".casefold()
+        if "blender" in text:
+            server_ids.add(server.id)
+            blender_servers.append({
+                "id": server.id, "name": server.name,
+                "transport": getattr(server, "transport", "streamable_http"),
+                "status": server.last_status, "enabled": bool(server.enabled),
+                "endpoint": server.endpoint,
+            })
+
+    capability_tokens = ("blender", "mesh", "scene", "material", "viewport", "render", "camera", "light", "keyframe")
+    blender_tools = []
+    for tool in tools:
+        text = f"{tool.name} {tool.description} {tool.category} {tool.capability}".casefold()
+        if tool.mcp_server_id in server_ids or any(token in text for token in capability_tokens):
+            blender_tools.append({
+                "id": tool.id, "server_id": tool.mcp_server_id, "name": tool.name,
+                "category": tool.category, "capability": tool.capability,
+                "risk_level": tool.risk_level, "enabled": bool(tool.enabled),
+                "requires_confirmation": bool(tool.requires_confirmation),
+            })
+
+    connected = any(row["enabled"] and str(row["status"]).upper() == "CONNECTED" for row in blender_servers)
+    enabled_tools = [row for row in blender_tools if row["enabled"]]
+    ready = bool(connected and enabled_tools)
+    return {
+        "ok": True, "registered": bool(blender_servers), "connected": connected,
+        "tool_capable": bool(enabled_tools), "ready": ready,
+        "server_count": len(blender_servers), "tool_count": len(enabled_tools),
+        "servers": blender_servers, "tools": enabled_tools,
+        "message": "Blender MCP 연결과 3D Tool Registry가 준비되었습니다." if ready else "Blender MCP Server를 등록·연결하고 Tool 동기화를 실행하세요.",
+    }
+
 
 @router.post("/memory")
 async def memory_add(req: MemoryAddRequest):
@@ -6066,6 +7408,8 @@ def _build_interview_requirement_context(
         "10. ui_layout의 restore_screen_state/restore_scroll_position/restore_draft_input/restore_selection_state/screen_restore_mode 설정을 Frontend 상태 저장·복원 설계에 반영합니다.",
         "11. ui_layout의 show_running_tasks/runtime_status_position/notify_agent_complete/notify_agent_failure/run_item_navigate를 실행 상태 UI와 알림 설계에 반영합니다. WebSocket/SSE는 자동 재연결, 현재 run 재조회, 누락 이벤트 재동기화를 기본 정책으로 설계합니다.",
         "12. ui_layout.theme가 custom이면 theme_id/theme_name/theme_tokens/component_rules/layout_rules를 Design Token의 단일 기준으로 사용하고 React/TypeScript CSS 변수 또는 Theme Provider에 반영합니다. 참조 사이트의 로고·문구·이미지·고유 콘텐츠를 복제하지 말고 색상·타이포그래피·간격·Radius·Shadow·Component 스타일 특성만 적용합니다.",
+        "13. agent_specialization.type이 BLENDER_3D이거나 Blender/3D 제작 요구가 있으면 Blender MCP를 Tool 실행 계층으로 사용하고 3D SceneSpec → Validator → LangGraph State → Blender MCP → Viewport QA → bounded repair → Render/Export 구조를 적용합니다.",
+        "14. Blender/3D Agent는 MCP success만으로 완료하지 않고 Scene 객체/Material/Camera/Light 상태와 Viewport/Render 결과를 검증합니다.",
     ])
 
     return "\n".join(rows)
@@ -6118,6 +7462,90 @@ def _normalize_latest_confirmed_requirement_conflicts(value: dict | None) -> dic
     return normalized
 
 
+@router.post("/workflow/prompt-module/recommend")
+async def prompt_module_recommend(req: PromptModuleRecommendRequest):
+    """Create an editable prompt recommendation for one Workflow prompt module."""
+    from app.services.model_router import model_for_task, LLMTask
+
+    module_id = str(req.module_id or "").strip()
+    if not module_id:
+        raise HTTPException(status_code=422, detail="Prompt module_id가 필요합니다.")
+
+    role = str(req.label or module_id).strip()
+    description = str(req.description or "").strip()
+    workflow_node = str(req.workflow_node or module_id).strip()
+    agent_context = str(req.agent_context or "").strip()[:12000]
+    current_prompt = str(req.current_prompt or "").strip()[:5000]
+
+    instruction = f"""
+당신은 AI Agent Workflow Prompt 설계 전문가입니다.
+아래 Workflow Prompt Module에 실제 사용할 System/Task Prompt를 추천하세요.
+
+[Module]
+ID: {module_id}
+Label: {role}
+Workflow Node: {workflow_node}
+역할: {description}
+
+[현재 Prompt]
+{current_prompt or "(없음)"}
+
+[Agent 요구사항 Context]
+{agent_context or "(아직 구체적인 요구사항 없음)"}
+
+규칙:
+1. 이 Module의 역할에만 집중합니다.
+2. Agent 요구사항에 맞춰 구체화하되 특정 프로젝트에 없는 기능을 임의 추가하지 않습니다.
+3. 입력, 처리 규칙, 출력 계약, 금지사항/검증 포인트를 명확하게 작성합니다.
+4. Prompt 본문만 반환합니다. 설명, 제목, Markdown 코드펜스는 사용하지 않습니다.
+5. 한국어를 기본으로 작성하되 코드/Schema/Capability 명칭은 필요한 경우 영문을 유지합니다.
+6. 300~1200자 정도의 실무형 Prompt로 작성합니다.
+"""
+    try:
+        llm = model_for_task(LLMTask.REQUIREMENTS_ANALYSIS)
+        result = await llm.ainvoke(instruction)
+        content = getattr(result, "content", result)
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    value = item.get("text") or item.get("content")
+                    if value:
+                        parts.append(str(value))
+            content = "\n".join(parts)
+        prompt = str(content or "").strip()
+        if prompt.startswith("```") and prompt.endswith("```"):
+            lines = prompt.splitlines()
+            prompt = "\n".join(lines[1:-1]).strip()
+        if not prompt:
+            raise RuntimeError("LLM이 빈 추천 Prompt를 반환했습니다.")
+        return {"ok": True, "prompt": prompt, "module_id": module_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AI 추천 Prompt 생성 실패: {exc}") from exc
+
+
+@router.post("/workflow/development-stage-plan/recommend")
+async def development_stage_plan_recommend(req: DevelopmentStageRecommendRequest):
+    plan = recommend_development_stage_plan(
+        req.request,
+        req.interview_messages,
+        req.confirmed_requirements,
+        req.attachment_memory,
+    )
+    return {"ok": True, "development_stage_plan": plan}
+
+
+@router.post("/workflow/development-stage-plan/approve")
+async def development_stage_plan_approve(req: DevelopmentStageApproveRequest):
+    try:
+        plan = approve_development_stage_plan(req.plan)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "development_stage_plan": plan}
+
+
 @router.post("/workflow/preview")
 async def workflow_preview(req: WorkflowPreviewRequest):
     if not req.request.strip():
@@ -6141,6 +7569,20 @@ async def workflow_preview(req: WorkflowPreviewRequest):
             }
 
     confirmed_requirements = _normalize_latest_confirmed_requirement_conflicts(req.confirmed_requirements)
+    development_stage_plan = confirmed_requirements.get("development_stage_plan") if isinstance(confirmed_requirements, dict) else None
+    if not isinstance(development_stage_plan, dict) or development_stage_plan.get("approved") is not True:
+        recommended = recommend_development_stage_plan(
+            req.request,
+            req.interview_messages,
+            confirmed_requirements,
+            req.attachment_memory,
+        )
+        return {
+            "ok": False,
+            "code": "DEVELOPMENT_STAGE_APPROVAL_REQUIRED",
+            "message": "Workflow 설계 전에 추천 개발 Stage를 확인하고 승인해 주세요.",
+            "development_stage_plan": recommended,
+        }
     full_request = _build_interview_requirement_context(
         request=req.request,
         interview_messages=req.interview_messages,
@@ -6196,6 +7638,8 @@ async def workflow_preview(req: WorkflowPreviewRequest):
             )
             preview_recovery = dict(design.get("recovery") or {})
 
+    design = apply_recommendation_settings_to_design(design, confirmed_requirements)
+    design = apply_development_stage_plan_to_design(design, development_stage_plan)
     design["confirmed_requirements"] = confirmed_requirements
     design["interview_messages"] = list(req.interview_messages or [])
 
@@ -6235,18 +7679,66 @@ async def workflow_preview(req: WorkflowPreviewRequest):
         "attachment_memory": attachment_memory,
         "attachments_consumed": bool(req.attachment_ids),
         "target_agent_workflow": target,
+        "development_stage_plan": design.get("development_stage_plan") or development_stage_plan or {},
+        "development_workflow": design.get("development_workflow") or {},
         "requirement_spec": design.get("requirement_spec") or {},
         "capability_plan": design.get("capability_plan") or {},
         "tool_mcp_plan": design.get("tool_mcp_plan") or {},
         "agent_architecture": design.get("agent_architecture") or {},
         "database_plan": design.get("database_plan") or {},
         "file_plan": design.get("file_plan") or {},
+        "three_d_agent_plan": design.get("three_d_agent_plan") or {},
         "environment_plan": design.get("environment_plan") or {},
         "settings_plan": design.get("settings_plan") or {},
         "design_runtime": design.get("design_runtime") or {},
         "workflow_quality": quality,
         "recovery": preview_recovery or design.get("recovery") or {},
     }
+
+
+@router.post("/agent-database/test")
+async def agent_database_connection_test(req: AgentDatabaseSetupRequest):
+    return await asyncio.to_thread(test_agent_database_setup, req.database_setup or {}, req.provider or "")
+
+
+@router.post("/agent-database/resource-plan")
+async def agent_database_resource_plan(req: AgentDatabaseSetupRequest):
+    return await asyncio.to_thread(build_database_resource_plan, req.database_plan or {}, req.database_setup or {})
+
+
+@router.post("/agent-database/analyze-existing")
+async def agent_database_analyze_existing(req: AgentDatabaseSetupRequest):
+    if not str(req.provider or "").strip():
+        return {"ok": False, "message": "분석할 DB Provider를 선택하세요."}
+    try:
+        return await asyncio.to_thread(analyze_existing_database, req.database_setup or {}, req.provider)
+    except Exception as exc:
+        return {"ok": False, "provider": req.provider, "message": str(exc)}
+
+
+@router.post("/agent-database/postgresql/create-schema")
+async def agent_database_create_postgresql_schema(req: AgentDatabaseSetupRequest):
+    try:
+        return await asyncio.to_thread(create_postgresql_schema_resource, req.database_setup or {})
+    except Exception as exc:
+        return {"ok": False, "provider": "postgresql", "message": str(exc)}
+
+
+@router.post("/agent-database/firestore/create-database")
+async def agent_database_create_firestore_database(req: AgentDatabaseSetupRequest):
+    try:
+        return await asyncio.to_thread(create_firestore_database_resource, req.database_setup or {})
+    except Exception as exc:
+        return {"ok": False, "provider": "firestore", "message": str(exc)}
+
+
+@router.post("/agent-database/provision")
+async def agent_database_provision(req: AgentDatabaseProvisionRequest):
+    if not str(req.project_root or "").strip():
+        return {"ok": False, "message": "프로젝트 경로가 필요합니다."}
+    return await asyncio.to_thread(
+        provision_agent_databases, req.project_root, req.database_plan or {}, req.database_setup or {}, req.database_resource_plan or {}
+    )
 
 
 @router.post("/database-design/preview")
@@ -6286,9 +7778,28 @@ async def database_design_preview(req: DatabaseDesignPreviewRequest):
         technologies.append("PostgreSQL")
     if "pgvector" in lower or "vector" in lower or "벡터" in lower or "embedding" in lower or "임베딩" in lower:
         technologies.append("pgvector")
+    firestore_enabled = "firestore" in lower or "google cloud firestore" in lower
+    if firestore_enabled:
+        technologies.append("Google Cloud Firestore")
     redis_enabled = "redis" in lower
     if redis_enabled:
         technologies.append("Redis")
+
+    firestore_collections: list[dict] = []
+    if firestore_enabled:
+        for table in plan.get("tables") or []:
+            if not isinstance(table, dict):
+                continue
+            name = str(table.get("name") or "").strip()
+            if not name:
+                continue
+            firestore_collections.append({
+                "name": name,
+                "purpose": str(table.get("purpose") or "설계 Entity 기반 Collection"),
+                "source_entity": name,
+            })
+        if not firestore_collections:
+            firestore_collections.append({"name": "documents", "purpose": "문서형 데이터 Collection", "source_entity": ""})
 
     redis_keys: list[dict] = []
     if redis_enabled:
@@ -6304,6 +7815,11 @@ async def database_design_preview(req: DatabaseDesignPreviewRequest):
             redis_keys.append({"key": "order_draft:{session_id}", "purpose": "주문 확인 전 Draft", "ttl": "30분 권장"})
 
     plan["technologies"] = list(dict.fromkeys(technologies))
+    plan["firestore_plan"] = {
+        "enabled": firestore_enabled,
+        "collections": firestore_collections,
+        "policy": "Firestore는 Table이 아닌 Collection/Document 구조로 생성합니다." if firestore_enabled else "",
+    }
     plan["redis_plan"] = {
         "enabled": redis_enabled,
         "keys": redis_keys,
@@ -6825,7 +8341,7 @@ async def save_workflow_design_checkpoint(req: AgentDesignCheckpointRequest):
         "attachment_summary_files", "attachment_requirements",
         "attachment_requirement_coverage", "manual_requirement_overrides",
         "feature_registry", "design_project_id", "design_project_version",
-        "ui_layout", "build_resume",
+        "ui_layout", "tool_prompt_settings", "build_resume",
     }
     snapshot = {
         key: value for key, value in (req.snapshot or {}).items()
@@ -7350,6 +8866,16 @@ async def workflow_redevelop_start_job(req: WorkflowRedevelopRequest):
     design_bundle = {
         **previous_bundle,
         "confirmed_requirements": confirmed_requirements,
+        "code_documentation": (
+            req.code_documentation
+            if isinstance(req.code_documentation, dict) and req.code_documentation
+            else (previous_bundle.get("code_documentation") or checkpoint.get("code_documentation") or {})
+        ),
+        "user_coding_style": (
+            req.user_coding_style
+            if isinstance(req.user_coding_style, dict) and req.user_coding_style
+            else (previous_bundle.get("user_coding_style") or checkpoint.get("user_coding_style") or {})
+        ),
         "previous_build_state": workflow_state,
         "resume_context": {
             "run_id": redevelopment.get("run_id") or "",
@@ -7472,3 +8998,155 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.receive_text()
     except WebSocketDisconnect:
         hub.disconnect(ws)
+
+
+def _recording_history_store_path(project_root: Path) -> Path:
+    return project_root / ".agentstudio" / "recording_history.json"
+
+
+def _load_recording_history_sync(store: Path) -> list[dict]:
+    if not store.exists():
+        return []
+    try:
+        payload = json.loads(store.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    rows = payload.get("recordings") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return []
+    normalized = []
+    for row in rows[-500:]:
+        if not isinstance(row, dict):
+            continue
+        recording_id = str(row.get("recording_id") or "").strip()[:160]
+        if not recording_id:
+            continue
+        normalized.append({
+            "recording_id": recording_id,
+            "started_at": str(row.get("started_at") or "")[:80],
+            "updated_at": str(row.get("updated_at") or "")[:80],
+            "duration_seconds": max(0, int(row.get("duration_seconds") or 0)),
+            "transcript_path": str(row.get("transcript_path") or "")[:1000],
+            "summary_path": str(row.get("summary_path") or "")[:1000],
+            "has_summary": bool(row.get("summary_path")),
+        })
+    return normalized
+
+
+def _save_recording_history_sync(store: Path, rows: list[dict]) -> None:
+    store.parent.mkdir(parents=True, exist_ok=True)
+    temp = store.with_name(f".{store.name}.{uuid.uuid4().hex}.tmp")
+    temp.write_text(json.dumps({"version": 1, "recordings": rows[-500:]}, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temp, store)
+
+
+def _safe_read_recording_text(path_text: str, project_root: Path) -> str:
+    raw = str(path_text or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw).expanduser().resolve()
+    # Only files previously persisted under the configured output root are read.
+    from app.services.runtime_path_policy import resolve_output_root
+    output_root = resolve_output_root(str(project_root)).resolve()
+    try:
+        path.relative_to(output_root)
+    except ValueError:
+        return ""
+    if not path.is_file() or path.suffix.lower() != ".txt":
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")[:20_000_000]
+    except OSError:
+        return ""
+
+
+@router.get("/media-stt/history")
+async def media_stt_history(root: str = Query(...)):
+    project_root = await _validated_memo_project_root(root)
+    rows = await asyncio.to_thread(_load_recording_history_sync, _recording_history_store_path(project_root))
+    rows.sort(key=lambda row: str(row.get("started_at") or row.get("updated_at") or ""), reverse=True)
+    return {"ok": True, "recordings": rows}
+
+
+@router.get("/media-stt/history/{recording_id}")
+async def media_stt_history_detail(recording_id: str, root: str = Query(...)):
+    project_root = await _validated_memo_project_root(root)
+    rows = await asyncio.to_thread(_load_recording_history_sync, _recording_history_store_path(project_root))
+    target = next((row for row in rows if row.get("recording_id") == recording_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="녹음 기록을 찾을 수 없습니다.")
+    transcript = await asyncio.to_thread(_safe_read_recording_text, target.get("transcript_path", ""), project_root)
+    summary = await asyncio.to_thread(_safe_read_recording_text, target.get("summary_path", ""), project_root)
+    return {"ok": True, "recording": target, "transcript": transcript, "summary": summary}
+
+
+# v5.493: save user-visible files under DEFAULT_OUTPUT_ROOT.
+@router.post("/output/save")
+async def save_agentstudio_output_file(request: Request, filename: str = Query(default="download.bin"), category: str = Query(default="downloads"), project_root: str = Query(default="")):
+    payload = await request.body()
+    if not payload:
+        raise HTTPException(status_code=400, detail="저장할 파일 내용이 없습니다.")
+    if len(payload) > 200 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="한 번에 저장할 수 있는 파일은 최대 200MB입니다.")
+    try:
+        return await asyncio.to_thread(save_output_bytes, payload, filename, category, project_root)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Output 파일 저장 실패: {exc}") from exc
+
+
+@router.post("/media-stt/save-text")
+async def save_media_stt_text_file(request: Request):
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"잘못된 저장 요청입니다: {exc}") from exc
+    project_root = str((payload or {}).get("root") or "").strip()
+    content = str((payload or {}).get("text") or "").strip()
+    kind = str((payload or {}).get("kind") or "transcript").strip().casefold()
+    recording_id = str((payload or {}).get("recording_id") or "").strip()[:160]
+    started_at = str((payload or {}).get("started_at") or "").strip()[:80]
+    try:
+        duration_seconds = max(0, int((payload or {}).get("duration_seconds") or 0))
+    except (TypeError, ValueError):
+        duration_seconds = 0
+    if not content:
+        raise HTTPException(status_code=400, detail="저장할 텍스트가 없습니다.")
+    if kind not in {"transcript", "summary"}:
+        raise HTTPException(status_code=400, detail="지원하지 않는 저장 종류입니다.")
+    if len(content.encode("utf-8")) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="텍스트 파일은 최대 20MB까지 저장할 수 있습니다.")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    prefix = "live_summary" if kind == "summary" else "live_transcript"
+    try:
+        result = await asyncio.to_thread(save_output_text, content, f"{prefix}_{stamp}.txt", "recordings", project_root)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"텍스트 파일 저장 실패: {exc}") from exc
+    if recording_id and project_root:
+        validated_root = await _validated_memo_project_root(project_root)
+        store = _recording_history_store_path(validated_root)
+        rows = await asyncio.to_thread(_load_recording_history_sync, store)
+        now_text = datetime.now().astimezone().isoformat()
+        existing = next((row for row in rows if row.get("recording_id") == recording_id), None)
+        if existing is None:
+            existing = {
+                "recording_id": recording_id,
+                "started_at": started_at,
+                "updated_at": now_text,
+                "duration_seconds": duration_seconds,
+                "transcript_path": "",
+                "summary_path": "",
+                "has_summary": False,
+            }
+            rows.append(existing)
+        existing["updated_at"] = now_text
+        if started_at:
+            existing["started_at"] = started_at
+        if duration_seconds:
+            existing["duration_seconds"] = duration_seconds
+        if kind == "summary":
+            existing["summary_path"] = str(result.get("path") or "")
+            existing["has_summary"] = True
+        else:
+            existing["transcript_path"] = str(result.get("path") or "")
+        await asyncio.to_thread(_save_recording_history_sync, store, rows)
+    return {**result, "kind": kind, "recording_id": recording_id}

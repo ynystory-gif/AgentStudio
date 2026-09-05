@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.core.table_naming_policy import primary_key_column_name
+
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _ALLOWED_TYPES = {
@@ -45,6 +47,172 @@ def _table(name: str, module: str, purpose: str, columns: list[dict], indexes: l
         "columns": columns,
         "indexes": indexes or [],
     }
+
+def _infer_table_crud(table: dict) -> list[str]:
+    explicit = table.get("crud")
+    if isinstance(explicit, str):
+        values = [x.strip().upper() for x in re.split(r"[,/\s]+", explicit) if x.strip()]
+    elif isinstance(explicit, (list, tuple, set)):
+        values = [str(x).strip().upper() for x in explicit if str(x).strip()]
+    else:
+        values = []
+    normalized = []
+    aliases = {"CREATE": "C", "READ": "R", "UPDATE": "U", "DELETE": "D", "C": "C", "R": "R", "U": "U", "D": "D"}
+    for value in values:
+        mapped = aliases.get(value)
+        if mapped and mapped not in normalized:
+            normalized.append(mapped)
+    if normalized:
+        return normalized
+
+    name = str(table.get("name") or "").lower()
+    purpose = str(table.get("purpose") or "").lower()
+    source = str(table.get("source") or "").lower()
+    module = str(table.get("module") or "").upper()
+    text = f"{name} {purpose}"
+    columns = {str(x.get("name") or "") for x in table.get("columns") or [] if isinstance(x, dict)}
+
+    append_only_markers = ("log", "logs", "history", "event", "events", "run_steps", "artifact", "version", "message", "chunk", "audit")
+    if any(marker in text for marker in append_only_markers):
+        return ["C", "R"]
+    if "updated_at" in columns:
+        crud = ["C", "R", "U"]
+        if "is_deleted" in columns or source == "llm_custom_business":
+            crud.append("D")
+        return crud
+    if source == "llm_custom_business":
+        return ["C", "R", "U", "D"]
+    if module in {"CORE", "MEMORY"} and name not in {"agent_versions", "workflows", "workflow_nodes", "workflow_edges"}:
+        return ["C", "R", "U", "D"]
+    return ["C", "R"]
+
+
+def _policy_column(name: str) -> dict:
+    if name == "id":
+        return _col("id", "BIGSERIAL", nullable=False, primary_key=True)
+    if name == "created_at":
+        return _col("created_at", "TIMESTAMPTZ", nullable=False, default="CURRENT_TIMESTAMP")
+    if name == "updated_at":
+        return _col("updated_at", "TIMESTAMPTZ", nullable=False, default="CURRENT_TIMESTAMP")
+    if name == "is_deleted":
+        return _col("is_deleted", "BOOLEAN", nullable=False, default="FALSE")
+    if name in {"created_by", "updated_by"}:
+        return _col(name, "BIGINT", nullable=True)
+    raise KeyError(name)
+
+
+def apply_common_table_policy(plan: dict) -> dict:
+    """Apply AgentStudio's default relational table policy before Preview/DDL generation.
+
+    v5.595 database identity rule:
+    - Never generate a bare ``id`` PK for a new table.
+    - Default PK is ``{logical_table_name}_id``.
+    - Technical prefixes such as ``rag_`` / ``app_`` are stripped.
+    - A project-specific prefix can be supplied through ``common_policy.id_prefixes``.
+    - Existing explicit non-``id`` PKs are preserved.
+    """
+    result = copy.deepcopy(plan or {})
+    pk_name_by_table: dict[str, str] = {}
+    for table in result.get("tables") or []:
+        if not isinstance(table, dict):
+            continue
+        table_name = str(table.get("name") or "").strip().lower()
+        crud = _infer_table_crud(table)
+        columns = [dict(x) for x in table.get("columns") or [] if isinstance(x, dict)]
+        policy = table.get("common_policy") if isinstance(table.get("common_policy"), dict) else {}
+        overrides = policy.get("overrides") if isinstance(policy.get("overrides"), dict) else {}
+        id_prefixes = policy.get("id_prefixes") if isinstance(policy.get("id_prefixes"), (list, tuple, set)) else []
+        default_id_name = primary_key_column_name(table_name, prefixes=id_prefixes)
+
+        # The user's global rule applies to generated default IDs. Explicit business/natural PKs remain intact.
+        pk_columns = [x for x in columns if x.get("primary_key")]
+        if not pk_columns:
+            id_col = _policy_column("id")
+            id_col["name"] = default_id_name
+            columns.insert(0, id_col)
+            pk_columns = [id_col]
+        elif len(pk_columns) == 1 and str(pk_columns[0].get("name") or "").strip().lower() == "id":
+            pk_columns[0]["name"] = default_id_name
+
+        pk_name_by_table[table_name] = str(pk_columns[0].get("name") or default_id_name) if pk_columns else default_id_name
+        names = {str(x.get("name") or "") for x in columns}
+
+        wants_update = "U" in crud
+        wants_delete = wants_update and "D" in crud
+        recommendations = {
+            "id": True,
+            "created_at": wants_update,
+            "updated_at": wants_update,
+            "is_deleted": wants_delete,
+            "created_by": wants_update,
+            "updated_by": wants_update,
+        }
+        for key, default_enabled in list(recommendations.items()):
+            if key in overrides:
+                recommendations[key] = bool(overrides[key])
+
+        for name in ("created_at", "updated_at", "is_deleted", "created_by", "updated_by"):
+            enabled = recommendations[name]
+            if enabled and name not in names:
+                columns.append(_policy_column(name))
+                names.add(name)
+            elif not enabled and name in names and name in overrides:
+                columns = [x for x in columns if str(x.get("name") or "") != name]
+                names.discard(name)
+
+        reason = []
+        if wants_update:
+            reason.append("수정 가능한 데이터로 판단하여 등록/수정 시각과 작업 주체 추적 컬럼을 추천")
+        else:
+            reason.append("생성 후 수정하지 않는 조회/로그성 데이터로 판단하여 수정 Audit 컬럼 제외")
+        if wants_delete:
+            reason.append("수정·삭제 기능이 있어 Soft Delete(is_deleted) 추천")
+        else:
+            reason.append("삭제 기능이 명시되지 않아 is_deleted 제외")
+        if any(bool(x.get("unique")) for x in columns) and recommendations.get("is_deleted"):
+            reason.append("Soft Delete + UNIQUE 충돌 방지를 위해 활성 데이터 Partial Unique Index 사용")
+
+        table["columns"] = columns
+        table["crud"] = crud
+        table["common_policy"] = {
+            **policy,
+            "status": "USER_FIXED" if overrides else "RECOMMENDED",
+            "recommendations": recommendations,
+            "overrides": overrides,
+            "reason": reason,
+            "id_name": pk_name_by_table.get(table_name, default_id_name),
+            "identity_strategy": "BIGINT GENERATED BY DEFAULT AS IDENTITY",
+            "updated_at_strategy": "shared trigger function",
+        }
+
+    # Registry/custom plans historically referenced ``target_table.id``. Rewrite those references
+    # to the normalized physical PK column so generated DDL never points at a non-existent bare id.
+    for table in result.get("tables") or []:
+        if not isinstance(table, dict):
+            continue
+        for column in table.get("columns") or []:
+            if not isinstance(column, dict):
+                continue
+            ref = str(column.get("references") or "").strip().lower()
+            if not ref or "." not in ref:
+                continue
+            ref_table, ref_column = ref.split(".", 1)
+            if ref_column == "id" and ref_table in pk_name_by_table:
+                column["references"] = f"{ref_table}.{pk_name_by_table[ref_table]}"
+    return result
+
+
+def apply_common_table_policy_overrides(plan: dict, overrides: dict | None) -> dict:
+    result = copy.deepcopy(plan or {})
+    override_map = overrides if isinstance(overrides, dict) else {}
+    for table in result.get("tables") or []:
+        name = str(table.get("name") or "")
+        value = override_map.get(name)
+        if not isinstance(value, dict):
+            continue
+        policy = table.get("common_policy") if isinstance(table.get("common_policy"), dict) else {}
+        table["common_policy"] = {**policy, "overrides": {**(policy.get("overrides") or {}), **value}}
+    return apply_common_table_policy(result)
 
 
 MODULE_REGISTRY: dict[str, dict[str, Any]] = {
@@ -454,7 +622,7 @@ def _normalize_custom_table(raw: dict) -> dict | None:
     if not columns:
         return None
     if not any(c["primary_key"] for c in columns):
-        columns.insert(0, _col("id", "BIGSERIAL", nullable=False, primary_key=True))
+        columns.insert(0, _col(primary_key_column_name(name), "BIGSERIAL", nullable=False, primary_key=True))
     return {
         "name": name,
         "module": "CUSTOM_BUSINESS",
@@ -495,6 +663,8 @@ def validate_database_plan(plan: dict) -> dict:
             col_names.add(cname)
         if columns and not any(bool(x.get("primary_key")) for x in columns):
             warnings.append(f"{name}: 명시적인 Primary Key가 없습니다.")
+        if any(bool(x.get("primary_key")) and str(x.get("name") or "").strip().lower() == "id" for x in columns):
+            errors.append(f"{name}: 기본 Primary Key에 단순 id를 사용할 수 없습니다. 테이블명 기반 *_id를 사용하세요.")
         table_columns[name] = col_names
 
     for table in tables:
@@ -552,7 +722,9 @@ def generate_postgresql_ddl(plan: dict) -> str:
         lines.extend(["CREATE EXTENSION IF NOT EXISTS vector;", ""])
 
     foreign_keys: list[tuple[str, str, str, str]] = []
-    tables = plan.get("tables") or []
+    partial_unique_indexes: list[tuple[str, str]] = []
+    updated_at_tables: list[str] = []
+    tables = apply_common_table_policy(plan).get("tables") or []
     # 모든 테이블을 먼저 만든 뒤 FK를 추가하여 Custom Entity 간 참조 순서에 의존하지 않습니다.
     for table in tables:
         name = str(table.get("name") or "")
@@ -563,12 +735,18 @@ def generate_postgresql_ddl(plan: dict) -> str:
         for column in table.get("columns") or []:
             cname = str(column.get("name") or "")
             ctype = _normalize_type(column.get("type") or "TEXT")
-            row = f"    {cname} {ctype}"
+            if column.get("primary_key") and ctype == "BIGSERIAL":
+                row = f"    {cname} BIGINT GENERATED BY DEFAULT AS IDENTITY"
+            else:
+                row = f"    {cname} {ctype}"
             if column.get("primary_key"):
                 row += " PRIMARY KEY"
             if not bool(column.get("nullable", True)):
                 row += " NOT NULL"
-            if column.get("unique"):
+            soft_delete = any(str(x.get("name") or "") == "is_deleted" for x in table.get("columns") or [] if isinstance(x, dict))
+            if column.get("unique") and soft_delete:
+                partial_unique_indexes.append((name, cname))
+            elif column.get("unique"):
                 row += " UNIQUE"
             default = _safe_default(column.get("default") or "")
             if default:
@@ -591,6 +769,34 @@ def generate_postgresql_ddl(plan: dict) -> str:
             lines.append(f"CREATE INDEX IF NOT EXISTS {index_name} ON {name} ({', '.join(cols)});")
         if table.get("indexes"):
             lines.append("")
+        if any(str(x.get("name") or "") == "updated_at" for x in table.get("columns") or [] if isinstance(x, dict)):
+            updated_at_tables.append(name)
+
+    for table_name, column_name in partial_unique_indexes:
+        index_name = f"ux_{table_name}_{column_name}_active"[:63]
+        lines.append(f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table_name} ({column_name}) WHERE is_deleted = FALSE;")
+    if partial_unique_indexes:
+        lines.append("")
+
+    if updated_at_tables:
+        lines.extend([
+            "CREATE OR REPLACE FUNCTION agentstudio_set_updated_at()",
+            "RETURNS TRIGGER AS $$",
+            "BEGIN",
+            "    NEW.updated_at = CURRENT_TIMESTAMP;",
+            "    RETURN NEW;",
+            "END;",
+            "$$ LANGUAGE plpgsql;",
+            "",
+        ])
+        for table_name in updated_at_tables:
+            trigger_name = f"trg_{table_name}_updated_at"[:63]
+            lines.extend([
+                f"DROP TRIGGER IF EXISTS {trigger_name} ON {table_name};",
+                f"CREATE TRIGGER {trigger_name} BEFORE UPDATE ON {table_name}",
+                "FOR EACH ROW EXECUTE FUNCTION agentstudio_set_updated_at();",
+            ])
+        lines.append("")
 
     if foreign_keys:
         lines.extend(["-- Foreign keys are applied after all tables exist.", ""])
@@ -659,6 +865,10 @@ def build_database_plan(request: str, design: dict | None = None) -> dict:
             seen.add(custom["name"])
             tables.append(custom)
 
+    policy_seed = {"tables": tables}
+    policy_seed = apply_common_table_policy(policy_seed)
+    tables = policy_seed.get("tables") or tables
+
     relationships: list[dict] = []
     for table in tables:
         for column in table.get("columns") or []:
@@ -692,7 +902,7 @@ def build_database_plan(request: str, design: dict | None = None) -> dict:
 
 
 def finalize_database_plan(plan: dict) -> dict:
-    result = copy.deepcopy(plan or {})
+    result = apply_common_table_policy(copy.deepcopy(plan or {}))
     if not result.get("enabled"):
         result.update({"confirmed": True, "finalized": True, "ddl": "-- Database module is disabled for this Agent.\n"})
         result["validation"] = validate_database_plan(result)

@@ -107,7 +107,7 @@ export function TerminalPanel({
             </div>
           )}
 
-          {sessions.map((terminal) => (
+          {sessions.map((terminal: LegacyValue) => (
             <div
               key={terminal.id}
               className={activeTerminalId === terminal.id ? 'terminal-tab active' : 'terminal-tab'}
@@ -198,7 +198,7 @@ export function TerminalPanel({
       )}
 
       <div className="xterm-shell-wrap">
-        {sessions.map((terminal) => (
+        {sessions.map((terminal: LegacyValue) => (
           <div
             key={terminal.id}
             ref={(element: HTMLDivElement | null) => onBindTerminalContainer(terminal, element)}
@@ -230,7 +230,7 @@ export function TerminalPanel({
 
             {!completion.loading && completion.items?.length > 0 && (
               <div className="terminal-completion-list">
-                {completion.items.map((item, index) => (
+                {completion.items.map((item: LegacyValue, index: LegacyValue) => (
                   <button
                     type="button"
                     key={`${item.kind || 'item'}:${item.insert_text || item.label}:${index}`}

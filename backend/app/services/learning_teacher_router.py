@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app.core.config import get_settings
+from app.services.active_ollama_model_service import resolve_active_ollama_model
 from app.core.database import SessionLocal
 from app.core.machine_identity import current_pc_name
 from app.models.entities import AppSetting
@@ -105,7 +106,8 @@ async def learning_teacher_priority() -> dict[str, Any]:
     openai_enabled = _truthy(db.get("OPENAI_ENABLED", ""), bool(settings.openai_enabled))
     codex_enabled = _truthy(db.get("CODEX_ENABLED", ""), bool(settings.codex_enabled))
     openai_model = db.get("OPENAI_MODEL") or str(settings.openai_model or "")
-    ollama_model = db.get("OLLAMA_MODEL") or str(os.environ.get("OLLAMA_MODEL") or settings.ollama_model or "")
+    active_ollama = await resolve_active_ollama_model()
+    ollama_model = str(active_ollama.get("active_model") or "")
     return {
         "strategy": strategy,
         "priority": chain,

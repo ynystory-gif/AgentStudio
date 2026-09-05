@@ -36,7 +36,7 @@ export function WebBrowserWorkspace({
   onRemoteState,
   onRemotePopup,
 }: WebBrowserWorkspaceProps) {
-  const activeTab = tabs.find(tab => tab.id === activeTabId) ?? tabs[0] ?? null
+  const activeTab = tabs.find((tab: LegacyValue) => tab.id === activeTabId) ?? tabs[0] ?? null
 
   if (!activeTab) {
     return <div className="web-browser-workspace-empty">웹브라우저 탭을 준비하지 못했습니다.</div>
@@ -44,7 +44,7 @@ export function WebBrowserWorkspace({
 
   return <div className="web-browser-workspace">
     <div className="web-browser-workspace-tabs" role="tablist" aria-label="웹브라우저 탭">
-      {tabs.map(tab => {
+      {tabs.map((tab: LegacyValue) => {
         const active = tab.id === activeTab.id
         return <div
           key={tab.id}
@@ -73,7 +73,7 @@ export function WebBrowserWorkspace({
                 className="web-browser-workspace-tab-close"
                 title="웹브라우저 탭 닫기"
                 aria-label={`${tab.title} 웹브라우저 탭 닫기`}
-                onClick={event => {
+                onClick={(event: LegacyValue) => {
                   event.stopPropagation()
                   onCloseTab(tab.id)
                 }}

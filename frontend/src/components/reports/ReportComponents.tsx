@@ -66,7 +66,7 @@ export interface KeyValueGridProps {
 
 export function KeyValueGrid({ items = [] }: KeyValueGridProps) {
   return <div className="kv-grid">
-    {items.map((item, index) => <div className="kv-item" key={index}>
+    {items.map((item: LegacyValue, index: LegacyValue) => <div className="kv-item" key={index}>
       <span>{item.label}</span>
       <strong>{item.value ?? '-'}</strong>
     </div>)}
@@ -80,8 +80,8 @@ export interface FileChangeListProps {
 
 export function FileChangeList({ created = [], modified = [] }: FileChangeListProps) {
   const rows = [
-    ...created.map(path => ({ path, type: 'CREATED' as const })),
-    ...modified.map(path => ({ path, type: 'MODIFIED' as const })),
+    ...created.map((path: LegacyValue) => ({ path, type: 'CREATED' as const })),
+    ...modified.map((path: LegacyValue) => ({ path, type: 'MODIFIED' as const })),
   ]
 
   if (!rows.length) {
@@ -89,7 +89,7 @@ export function FileChangeList({ created = [], modified = [] }: FileChangeListPr
   }
 
   return <div className="file-change-list">
-    {rows.map((row, index) => <div className="file-change-row" key={`${row.path}-${index}`}>
+    {rows.map((row: LegacyValue, index: LegacyValue) => <div className="file-change-row" key={`${row.path}-${index}`}>
       <span className={`file-change-type ${row.type.toLowerCase()}`}>{row.type}</span>
       <code>{row.path}</code>
     </div>)}
@@ -107,7 +107,7 @@ export function WorkflowMiniMap({ workflow }: WorkflowMiniMapProps) {
   }
 
   return <div className="workflow-mini-map">
-    {steps.map((step, index) => {
+    {steps.map((step: LegacyValue, index: LegacyValue) => {
       const label = typeof step === 'string'
         ? step
         : (step.label || step.name || step.title || `Step ${index + 1}`)

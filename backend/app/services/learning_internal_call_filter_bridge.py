@@ -74,9 +74,9 @@ async def _quarantine_existing_internal_learning_cases() -> int:
 async def sync_misjudgment_candidates_without_internal_learning() -> dict:
     # The runtime DB may be an older AgentStudio schema. Ensure the relational learning
     # columns/tables exist before any ORM INSERT/SELECT references group_id.
-    from app.services.learning_relational_schema_service import ensure_learning_relational_schema
+    from app.services.learning_relational_schema_service import assert_learning_relational_schema_ready
 
-    relational = await ensure_learning_relational_schema()
+    relational = await assert_learning_relational_schema_ready()
     result = await _original_sync_misjudgment_candidates()
     quarantined = await _quarantine_existing_internal_learning_cases()
     result["internal_learning_quarantined"] = quarantined

@@ -14,6 +14,7 @@ from app.core.database import (
     ensure_runtime_metadata_tables,
     migrate_agentstudio_schema,
     migrate_agentstudio_schema_on_connection,
+    prepare_rag_primary_key_compatibility_for_create_all,
     normalize_async_database_url,
     normalize_schema_name,
     postgres_search_path,
@@ -446,6 +447,12 @@ async def _prepare_agentstudio_schema_transaction(candidate, schema: str) -> dic
             f'SET LOCAL search_path TO {qschema}, "extensions", "public"'
         ))
 
+        # v5.597: existing v5.588-v5.594 RAG tables can still use a physical ``id``
+        # PK. Rename those columns before create_all creates new tables whose FKs
+        # already target table-specific keys such as rag_sources.sources_id.
+        await prepare_rag_primary_key_compatibility_for_create_all(
+            conn, schema=target_schema
+        )
         # schema_translate_map explicitly qualifies all SQLAlchemy ORM tables.
         await conn.run_sync(Base.metadata.create_all)
         migration = await migrate_agentstudio_schema_on_connection(conn, schema=target_schema)
@@ -692,14 +699,14 @@ async def initialize_supabase_schema(
 
 async def runtime_status() -> dict[str, Any]:
     provider = _ACTIVE_PROVIDER
-    desired = PROVIDER_LOCAL
+    # Project-root .env is authoritative for provider selection. The local control DB
+    # mirrors the choice for diagnostics only and must never override .env at startup.
+    desired = _normalize_provider(getattr(get_settings(), "agentstudio_database_provider", PROVIDER_LOCAL))
     local_state_error = ""
     try:
-        state = await _load_local_provider_state()
-        desired = _normalize_provider(state.get(PROVIDER_SETTING_KEY))
+        await _load_local_provider_state()
     except Exception as exc:
         local_state_error = str(exc)
-        desired = _normalize_provider(getattr(get_settings(), "agentstudio_database_provider", PROVIDER_LOCAL))
 
     return {
         "ok": True,
@@ -783,6 +790,13 @@ async def save_supabase_runtime_settings(
     }
 
 
+async def _prepare_learning_schema_after_runtime_rebind() -> dict[str, Any]:
+    """Run learning DDL/backfill only after an explicit AgentStudio runtime DB switch."""
+    from app.services.learning_relational_schema_service import ensure_learning_relational_schema
+
+    return await ensure_learning_relational_schema(force=True, run_backfill=True)
+
+
 async def activate_database_provider(
     provider: str,
     *,
@@ -807,6 +821,7 @@ async def activate_database_provider(
         get_settings.cache_clear()
         await rebind_database(target_database_url)
         await migrate_agentstudio_schema()
+        await _prepare_learning_schema_after_runtime_rebind()
         await agent_graph_runtime.set_database_url(target_langgraph_url, restart=True)
         _ACTIVE_PROVIDER = PROVIDER_LOCAL
         _LAST_ERROR = ""
@@ -873,6 +888,8 @@ async def activate_database_provider(
         # v5.308: project machine-scope schema changes must also be present when
         # callers skip the full schema initializer. The migration is idempotent.
         await migrate_agentstudio_schema()
+        # v5.446: learning DDL is a lifecycle migration, never a Learning Center page-read side effect.
+        await _prepare_learning_schema_after_runtime_rebind()
         scoped_langgraph_url = _postgres_url_with_search_path(langgraph_url, target_schema)
         langgraph_ok = bool(await agent_graph_runtime.set_database_url(scoped_langgraph_url, restart=True))
         if not langgraph_ok:
@@ -939,16 +956,15 @@ async def activate_database_provider(
 
 
 async def apply_saved_database_provider() -> dict[str, Any]:
-    """Startup: bootstrap locally first, then rebind to saved Supabase when selected."""
+    """Startup: bootstrap locally, then apply the provider declared in project-root .env.
+
+    The local PostgreSQL app_settings provider row is a mirror/cache only. It must not
+    override AGENTSTUDIO_DATABASE_PROVIDER from the user-managed project-root .env.
+    """
     global _ACTIVE_PROVIDER, _LAST_ERROR
     from app.services.langgraph_runtime import agent_graph_runtime
 
-    desired = PROVIDER_LOCAL
-    try:
-        state = await _load_local_provider_state()
-        desired = _normalize_provider(state.get(PROVIDER_SETTING_KEY))
-    except Exception:
-        desired = _normalize_provider(getattr(get_settings(), "agentstudio_database_provider", PROVIDER_LOCAL))
+    desired = _normalize_provider(getattr(get_settings(), "agentstudio_database_provider", PROVIDER_LOCAL))
 
     if desired != PROVIDER_SUPABASE:
         _ACTIVE_PROVIDER = PROVIDER_LOCAL

@@ -100,6 +100,7 @@ async def _start_problem_collection_job_allow_single(
     target_per_case: int = 100,
     max_cases: int = 20,
     provider: str = "ollama",
+    source_case_ids: list[str] | None = None,
 ) -> dict:
     """Start a collection job without the legacy minimum of 10 problems per topic."""
     target = max(1, min(int(target_per_case or 100), 500))
@@ -117,9 +118,10 @@ async def _start_problem_collection_job_allow_single(
         status="running",
         target_per_topic=target,
         max_topics=maximum,
+        source_case_ids=[str(value) for value in list(source_case_ids or []) if str(value or "").strip()][:maximum],
         created_at=datetime.utcnow().isoformat(),
     )
-    asyncio.create_task(collection._run_problem_collection_job(job_id, target, maximum, provider))
+    asyncio.create_task(collection._run_problem_collection_job(job_id, target, maximum, provider, source_case_ids))
     return dict(collection._PROBLEM_JOBS[job_id])
 
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app.core.config import get_settings
+from app.services.active_ollama_model_service import BASE_MODEL_NAME
 from app.core.database import SessionLocal
 from app.core.machine_identity import current_pc_name
 from app.models.learning_entities import LlmLearningDataset, LlmLearningPcApplication
@@ -99,7 +100,7 @@ async def apply_to_ollama_for_current_pc(dataset_id: str, model_name: str, adapt
                 "이 PC에 학습 Adapter가 없습니다. 학습 데이터는 공용 조회되지만 "
                 "실제 Adapter 파일은 PC별 로컬 산출물입니다."
             )
-        base_model = str(training.get("ollama_base_model") or get_settings().ollama_model)
+        base_model = str(training.get("ollama_base_model") or BASE_MODEL_NAME)
 
         stmt = select(LlmLearningPcApplication).where(
             LlmLearningPcApplication.dataset_id == dataset_id,

@@ -1,0 +1,9 @@
+/* Shared AgentStudio option help UI. Text is never smaller than 13px. */
+.option-help{position:relative;display:inline-flex;flex:none;font-size:13px}
+.option-help-trigger{width:27px;height:27px;border:1px solid #31536a;border-radius:50%;background:#102a3a;color:#9fc5d9;cursor:pointer;font-size:13px}
+.option-help-tooltip{display:none;position:absolute;z-index:40;right:0;top:32px;width:260px;padding:8px;border:1px solid #31536a;border-radius:6px;background:#0b1b25;box-shadow:0 8px 24px #0009;font-size:13px}
+.option-help-tooltip strong,.option-help-tooltip span{display:block;font-size:13px}.option-help-tooltip span{margin-top:3px;color:#9cb1bd;line-height:1.45}
+.option-help:hover .option-help-tooltip,.option-help:focus-within .option-help-tooltip{display:block}.option-help.open .option-help-tooltip{display:none!important}
+.option-help-popover{position:absolute;z-index:50;right:0;top:32px;width:min(360px,70vw);max-height:330px;overflow:auto;display:grid;gap:7px;padding:11px;border:1px solid #3b6178;border-radius:7px;background:#0a1822;box-shadow:0 12px 30px #000b;font-size:13px}
+.option-help-popover>*{font-size:13px}.option-help-popover>span,.option-help-popover p{margin:0;color:#a8bdc8;line-height:1.5}.option-help-popover b{color:#d8e7ef}.option-help-popover>button{justify-self:end;border:1px solid #31536a;background:#102a3a;color:#bdd8e7;border-radius:5px;padding:5px 8px;cursor:pointer;font-size:13px}
+.option-help-ai-reason{display:grid;gap:3px;padding:7px;border-left:3px solid #4a8fb7;background:#102432}

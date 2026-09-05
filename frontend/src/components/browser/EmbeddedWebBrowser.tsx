@@ -88,7 +88,7 @@ export function EmbeddedWebBrowser({
         <input
           type="checkbox"
           checked={detectionEnabled}
-          onChange={event => onDetectionEnabledChange(event.target.checked)}
+          onChange={(event: LegacyValue) => onDetectionEnabledChange(event.target.checked)}
         />
         웹 URL 감지
       </label>
@@ -116,7 +116,7 @@ export function EmbeddedWebBrowser({
       <button type="button" onClick={() => onHome(tab.id)} title="새 탭">⌂</button>
       <form
         className="embedded-browser-address-form"
-        onSubmit={event => {
+        onSubmit={(event: LegacyValue) => {
           event.preventDefault()
           submit()
         }}
@@ -124,8 +124,8 @@ export function EmbeddedWebBrowser({
         <span className="embedded-browser-security-mark">◉</span>
         <input
           value={address}
-          onChange={event => setAddress(event.target.value)}
-          onFocus={event => event.currentTarget.select()}
+          onChange={(event: LegacyValue) => setAddress(event.target.value)}
+          onFocus={(event: LegacyValue) => event.currentTarget.select()}
           placeholder="https://www.naver.com 또는 http://localhost:8501"
           spellCheck={false}
           aria-label="웹 주소"
@@ -146,7 +146,7 @@ export function EmbeddedWebBrowser({
         ? externalChromiumMode
           ? <ChromiumRemoteViewport
               tab={tab}
-              onRemoteState={(tabId, state) => {
+              onRemoteState={(tabId: LegacyValue, state: LegacyValue) => {
                 setAddress(state.url || tab.url)
                 onRemoteState(tabId, state)
               }}
@@ -166,7 +166,7 @@ export function EmbeddedWebBrowser({
             <div className="embedded-browser-start-examples">
               <code>https://www.naver.com</code>
               <code>http://localhost:8501</code>
-              <code>http://127.0.0.1:8000/docs</code>
+              <code>{`${window.__AGENTSTUDIO_CONFIG__?.API_BASE_URL?.replace(/\/api$/, '') || 'Backend URL 미설정'}/docs`}</code>
             </div>
           </div>
       }

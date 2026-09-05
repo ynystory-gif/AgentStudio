@@ -118,6 +118,12 @@ settings = get_settings()
 database_url = normalize_async_database_url(settings.database_url)
 runtime_schema = ""
 
+if not database_url:
+    raise RuntimeError(
+        "DATABASE_URL이 설정되지 않았습니다. 프로젝트 루트 .env에 "
+        "DATABASE_URL을 설정하세요. AgentStudio는 DB 계정/비밀번호를 하드코딩해 대체하지 않습니다."
+    )
+
 engine = create_agentstudio_async_engine(database_url)
 
 SessionLocal = async_sessionmaker(
@@ -189,28 +195,128 @@ async def get_db():
 async def ensure_runtime_metadata_tables() -> dict:
     """Create newly-added ORM tables on the *currently active* runtime DB.
 
-    AgentStudio bootstraps from local PostgreSQL and can then switch to Supabase.
-    A new release may add tables after a user's Supabase schema was first provisioned,
-    so migration-only startup is not enough: create_all(checkfirst) must also run after
-    the runtime rebind. This is additive and never drops user data.
+    v5.597 migration-order guard:
+    legacy v5.588-v5.594 RAG tables can still physically expose ``id`` while the
+    current metadata references table-specific keys such as ``sources_id``.  Those
+    existing columns must be renamed *before* SQLAlchemy tries to CREATE a new table
+    whose FK points at the renamed key; otherwise PostgreSQL rejects CREATE TABLE with
+    UndefinedColumn.  The pre-create migration is idempotent and never drops data.
     """
     import app.models.entities  # noqa: F401
+    import app.models.rag_entities  # noqa: F401
+    import app.models.account_setting_entities  # noqa: F401
+    precreate_pk_renames: list[str] = []
     async with engine.begin() as conn:
+        precreate_pk_renames = await prepare_rag_primary_key_compatibility_for_create_all(
+            conn, schema=runtime_schema
+        )
         await conn.run_sync(Base.metadata.create_all)
     return {
         "ok": True,
         "schema": runtime_schema or "public/default",
         "table_count": len(Base.metadata.tables),
+        "precreate_pk_renames": precreate_pk_renames,
     }
 
 
 async def init_db():
     import app.models.entities  # noqa: F401
+    import app.models.rag_entities  # noqa: F401
+    import app.models.account_setting_entities  # noqa: F401
     async with engine.begin() as conn:
         await conn.execute(
             text("SELECT extname FROM pg_extension WHERE extname='vector'")
         )
+        precreate_pk_renames = await prepare_rag_primary_key_compatibility_for_create_all(
+            conn, schema=runtime_schema
+        )
+        if precreate_pk_renames:
+            print(
+                "[완료되었습니다] Legacy RAG PK 사전 보정: "
+                f"{len(precreate_pk_renames)}개 · create_all 이전 적용"
+            )
         await conn.run_sync(Base.metadata.create_all)
+
+
+
+
+# v5.595: Newly introduced RAG tables follow the global AgentStudio PK rule.
+# The Python ORM attribute remains ``id`` for API/backward compatibility, while the
+# physical PostgreSQL column is table-specific (for example rag_chunks.chunks_id).
+_RAG_PRIMARY_KEY_COLUMN_RENAMES: dict[str, str] = {
+    "rag_studio_settings": "studio_settings_id",
+    "rag_collections": "collections_id",
+    "rag_sources": "sources_id",
+    "rag_collection_sources": "collection_sources_id",
+    "rag_documents": "documents_id",
+    "rag_chunks": "chunks_id",
+    "rag_embeddings": "embeddings_id",
+    "rag_index_jobs": "index_jobs_id",
+    "rag_retrieval_settings": "retrieval_settings_id",
+    "rag_search_logs": "search_logs_id",
+    "rag_agent_tools": "agent_tools_id",
+    "rag_workflow_bindings": "workflow_bindings_id",
+    "rag_agent_test_logs": "agent_test_logs_id",
+    "rag_intelligence_settings": "intelligence_settings_id",
+    "rag_recommendation_runs": "recommendation_runs_id",
+    "rag_source_operation_settings": "source_operation_settings_id",
+    "rag_sync_jobs": "sync_jobs_id",
+    "rag_document_versions": "document_versions_id",
+    "rag_document_security": "document_security_id",
+    "rag_access_rules": "access_rules_id",
+    "rag_search_audit_logs": "search_audit_logs_id",
+    "rag_evaluation_cases": "evaluation_cases_id",
+    "rag_evaluation_runs": "evaluation_runs_id",
+}
+
+
+async def _migrate_rag_primary_key_column_names(conn, *, schema: str) -> list[str]:
+    """Rename legacy v5.588-v5.594 RAG ``id`` PK columns without dropping data.
+
+    PostgreSQL automatically updates dependent FK constraint targets when a referenced
+    column is renamed. The migration is idempotent and safe for fresh databases where
+    the new physical column names already exist.
+    """
+    target_schema = normalize_schema_name(schema, default="public")
+    qschema = quote_identifier(target_schema)
+    applied: list[str] = []
+    for table_name, target_column in _RAG_PRIMARY_KEY_COLUMN_RENAMES.items():
+        result = await conn.execute(
+            text(
+                """
+                SELECT
+                  EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema=:schema_name AND table_name=:table_name AND column_name='id'
+                  ) AS has_legacy_id,
+                  EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema=:schema_name AND table_name=:table_name AND column_name=:target_column
+                  ) AS has_target_id
+                """
+            ),
+            {"schema_name": target_schema, "table_name": table_name, "target_column": target_column},
+        )
+        row = result.first()
+        has_legacy_id = bool(row[0]) if row else False
+        has_target_id = bool(row[1]) if row else False
+        if has_legacy_id and not has_target_id:
+            await conn.execute(
+                text(f'ALTER TABLE {qschema}."{table_name}" RENAME COLUMN "id" TO "{target_column}"')
+            )
+            applied.append(f"{target_schema}.{table_name}.id -> {target_column}")
+    return applied
+
+
+async def prepare_rag_primary_key_compatibility_for_create_all(conn, *, schema: str = "") -> list[str]:
+    """Rename legacy physical RAG PK columns before SQLAlchemy ``create_all``.
+
+    This is intentionally smaller than the full AgentStudio migration because fresh
+    databases may not have core tables such as ``app_settings``/``projects`` yet.
+    It is safe to call on both fresh and previously provisioned local/Supabase schemas.
+    """
+    target_schema = await _resolve_connection_schema(conn, schema)
+    return await _migrate_rag_primary_key_column_names(conn, schema=target_schema)
 
 
 async def migrate_agentstudio_schema() -> dict:
@@ -320,6 +426,7 @@ async def migrate_agentstudio_schema_on_connection(conn, *, schema: str = "") ->
     ]
 
     applied = []
+    applied.extend(await _migrate_rag_primary_key_column_names(conn, schema=target_schema))
     await conn.execute(text(machine_setting_statements[0]))
     applied.append(" ".join(machine_setting_statements[0].strip().split()))
     await conn.execute(

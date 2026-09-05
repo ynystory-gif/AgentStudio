@@ -1,4 +1,8 @@
-﻿$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+﻿param(
+    [switch]$ElevatedChild
+)
+
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -20,7 +24,8 @@ if (-not $IsAdministrator) {
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            ('"{0}"' -f $PSCommandPath)
+            ('"{0}"' -f $PSCommandPath),
+            "-ElevatedChild"
         )
         $ElevatedProcess = Start-Process `
             -FilePath "powershell.exe" `
@@ -61,7 +66,7 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 # Resolve the expected version from this checkout's backend source so the launcher
 # can still detect a genuinely old process on the selected port without failing
 # simply because SYSTEM_ADMIN.ps1 itself was not bumped during packaging.
-$FallbackAgentStudioVersion = "5.379"
+$FallbackAgentStudioVersion = "5.574"
 function Resolve-LocalAgentStudioVersion {
     param(
         [string]$ProjectRoot,
@@ -102,7 +107,34 @@ $FrontendLog = Join-Path $LogDir "frontend_console.log"
 $FailureLog = Join-Path $LogDir "system_manager_failure.log"
 $DbHealthLog = Join-Path $LogDir "database_health.log"
 $BackendStartupLog = Join-Path $LogDir "backend_startup.log"
+$ProjectEnvPath = Join-Path $Root ".env"
 $BackendEnvPath = Join-Path $BackendDir ".env"
+
+# v5.493: apply saved Temp/Cache/Output roots before pip/npm/backend processes start.
+function Get-AgentStudioEnvValue {
+    param([string]$Key)
+    if (-not (Test-Path $ProjectEnvPath)) { return "" }
+    try {
+        $escaped = [Regex]::Escape($Key)
+        $Line = Get-Content -LiteralPath $ProjectEnvPath -Encoding UTF8 |
+            Where-Object { $_ -match ("^\s*{0}\s*=" -f $escaped) } |
+            Select-Object -Last 1
+        if (-not $Line) { return "" }
+        $parts = $Line -split "=", 2
+        if ($parts.Count -ne 2) { return "" }
+        return [string]$parts[1].Trim()
+    } catch { return "" }
+}
+$ConfiguredTempRoot = Get-AgentStudioEnvValue "DEFAULT_TEMP_ROOT"
+$ConfiguredCacheRoot = Get-AgentStudioEnvValue "DEFAULT_CACHE_ROOT"
+$ConfiguredOutputRoot = Get-AgentStudioEnvValue "DEFAULT_OUTPUT_ROOT"
+if ($ConfiguredTempRoot) { New-Item -ItemType Directory -Force -Path $ConfiguredTempRoot | Out-Null; $env:TEMP=$ConfiguredTempRoot; $env:TMP=$ConfiguredTempRoot; $env:TMPDIR=$ConfiguredTempRoot; $env:AGENTSTUDIO_TEMP_ROOT=$ConfiguredTempRoot }
+if ($ConfiguredCacheRoot) {
+    New-Item -ItemType Directory -Force -Path $ConfiguredCacheRoot | Out-Null
+    $env:AGENTSTUDIO_CACHE_ROOT=$ConfiguredCacheRoot; $env:PIP_CACHE_DIR=Join-Path $ConfiguredCacheRoot "pip"; $env:NPM_CONFIG_CACHE=Join-Path $ConfiguredCacheRoot "npm"; $env:HF_HOME=Join-Path $ConfiguredCacheRoot "huggingface"; $env:TORCH_HOME=Join-Path $ConfiguredCacheRoot "torch"; $env:EASYOCR_MODULE_PATH=Join-Path $ConfiguredCacheRoot "easyocr"
+    @($env:PIP_CACHE_DIR,$env:NPM_CONFIG_CACHE,$env:HF_HOME,$env:TORCH_HOME,$env:EASYOCR_MODULE_PATH) | ForEach-Object { New-Item -ItemType Directory -Force -Path $_ | Out-Null }
+}
+if ($ConfiguredOutputRoot) { New-Item -ItemType Directory -Force -Path $ConfiguredOutputRoot | Out-Null; $env:AGENTSTUDIO_OUTPUT_ROOT=$ConfiguredOutputRoot }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -182,50 +214,63 @@ function Get-FreePort {
     throw "사용 가능한 포트를 찾을 수 없습니다. 시작 포트: $StartPort"
 }
 
+function Set-AgentStudioEnvDefaultIfMissing {
+    param(
+        [string]$Name,
+        [string]$Value
+    )
+
+    if (-not $Name -or $null -eq $Value) {
+        return
+    }
+
+    $existing = Get-AgentStudioEnvValue $Name
+    if ($existing) {
+        return
+    }
+
+    if (-not (Test-Path $ProjectEnvPath)) {
+        $header = @(
+            "# THEANOVA AgentStudio runtime settings",
+            "# Auto-created by SYSTEM_ADMIN. Secrets are never generated here."
+        ) -join [Environment]::NewLine
+        Set-Content -LiteralPath $ProjectEnvPath -Value $header -Encoding UTF8
+    }
+
+    Add-Content -LiteralPath $ProjectEnvPath -Value ("{0}={1}" -f $Name,$Value) -Encoding UTF8
+    Write-Host "[자동 설정] $Name=$Value" -ForegroundColor DarkCyan
+    Write-Log "Bootstrap .env 기본값 추가: $Name=$Value"
+}
+
 function Get-BootstrapSetting {
     param(
         [string]$Name,
-        [string]$DefaultValue
+        [string]$DefaultValue = ""
     )
 
-    if (-not (Test-Path $BackendEnvPath)) {
+    $value = Get-AgentStudioEnvValue $Name
+    if ($value) {
+        return $value
+    }
+
+    if ($DefaultValue) {
+        Set-AgentStudioEnvDefaultIfMissing -Name $Name -Value $DefaultValue
         return $DefaultValue
     }
 
-    try {
-        $escaped = [Regex]::Escape($Name)
-        $line = Get-Content -LiteralPath $BackendEnvPath -Encoding UTF8 |
-            Where-Object { $_ -match ("^\s*{0}\s*=" -f $escaped) } |
-            Select-Object -Last 1
-
-        if ($line) {
-            $parts = $line -split "=", 2
-            if ($parts.Count -eq 2) {
-                $value = [string]$parts[1]
-                $value = $value.Trim()
-                if ($value) {
-                    return $value
-                }
-            }
-        }
-    }
-    catch {
-        Write-Log "포트 설정 읽기 경고: $Name - $($_.Exception.Message)"
-    }
-
-    return $DefaultValue
+    throw "프로젝트 루트 .env에 필수 설정 '$Name' 이 없습니다: $ProjectEnvPath"
 }
 
 function Resolve-AgentStudioPort {
     param(
         [string]$SettingName,
-        [int]$DefaultPort,
         [int]$ExcludedPort = 0,
-        [string]$Label = "Service"
+        [string]$Label = "Service",
+        [int]$DefaultPort = 0
     )
 
-    $raw = Get-BootstrapSetting $SettingName ([string]$DefaultPort)
-    $preferred = $DefaultPort
+    $raw = Get-BootstrapSetting $SettingName $(if ($DefaultPort -gt 0) { [string]$DefaultPort } else { "" })
+    $preferred = 0
     $parsed = 0
 
     if ([int]::TryParse([string]$raw, [ref]$parsed)) {
@@ -233,30 +278,21 @@ function Resolve-AgentStudioPort {
             $preferred = $parsed
         }
         else {
-            Write-Host "[경고] $Label 설정 포트가 범위를 벗어났습니다: $parsed -> 기본값 $DefaultPort" -ForegroundColor Yellow
+            throw "$Label 설정 포트가 범위를 벗어났습니다: $parsed ($SettingName)"
         }
     }
     else {
-        Write-Host "[경고] $Label 설정 포트가 숫자가 아닙니다: $raw -> 기본값 $DefaultPort" -ForegroundColor Yellow
+        throw "$Label 설정 포트가 숫자가 아닙니다: $raw ($SettingName)"
     }
 
     if ($ExcludedPort -gt 0 -and $preferred -eq $ExcludedPort) {
-        $fallback = Get-FreePort ([Math]::Min(65535, $preferred + 1)) $ExcludedPort
-        Write-Host "[경고] $Label 포트 $preferred 는 다른 AgentStudio 서비스와 중복됩니다. 추천 포트 $fallback 를 사용합니다." -ForegroundColor Yellow
-        Write-Log "$Label 포트 중복: requested=$preferred fallback=$fallback"
-        return $fallback
+        throw "$Label 포트 $preferred 는 다른 AgentStudio 서비스와 중복됩니다. 프로젝트 루트 .env 값을 수정하세요."
     }
 
-    if (Test-PortAvailable $preferred) {
-        return $preferred
+    if (-not (Test-PortAvailable $preferred)) {
+        throw "$Label 포트 $preferred 는 이미 사용 중입니다. .env에 설정한 포트를 임의 변경하지 않습니다. 사용 중인 프로세스를 종료하거나 .env 값을 수정하세요."
     }
-
-    $fallbackStart = if ($preferred -lt 65535) { $preferred + 1 } else { $DefaultPort }
-    $fallback = Get-FreePort $fallbackStart $ExcludedPort
-    Write-Host "[경고] $Label 포트 $preferred 는 다른 프로그램이 사용 중입니다." -ForegroundColor Yellow
-    Write-Host "       다른 프로그램은 종료하지 않고 사용 가능한 추천 포트 $fallback 를 사용합니다." -ForegroundColor Yellow
-    Write-Log "$Label 포트 사용 중: requested=$preferred fallback=$fallback"
-    return $fallback
+    return $preferred
 }
 
 function Stop-PortProcess {
@@ -457,25 +493,83 @@ function Ensure-OllamaServer {
     }
 }
 
+function Invoke-LocalJsonNoProxy {
+    param(
+        [string]$Url,
+        [int]$TimeoutMs = 2500
+    )
+
+    # v5.555: Windows PowerShell/WinHTTP proxy settings can unexpectedly
+    # intercept even 127.0.0.1 requests. Backend startup verification must
+    # always talk directly to the local listener.
+    $request = [System.Net.HttpWebRequest]::Create($Url)
+    $request.Proxy = $null
+    $request.Timeout = $TimeoutMs
+    $request.ReadWriteTimeout = $TimeoutMs
+    $request.Method = "GET"
+    $request.KeepAlive = $false
+
+    $response = $null
+    $reader = $null
+    try {
+        $response = $request.GetResponse()
+        $statusCode = [int]$response.StatusCode
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream(), [System.Text.Encoding]::UTF8)
+        $body = $reader.ReadToEnd()
+        if ($statusCode -lt 200 -or $statusCode -ge 300) {
+            throw ("Local HTTP {0}: {1}" -f $statusCode, $body)
+        }
+        if ([string]::IsNullOrWhiteSpace($body)) {
+            return $null
+        }
+        return ($body | ConvertFrom-Json)
+    }
+    finally {
+        if ($reader) { $reader.Dispose() }
+        if ($response) { $response.Dispose() }
+    }
+}
+
 function Wait-ApiHealth {
     param(
         [string]$Url,
-        [int]$Retry = 30
+        [int]$Retry = 90,
+        [int]$DelaySec = 1
     )
 
+    $lastErrorMessage = ""
     for ($i = 1; $i -le $Retry; $i++) {
         try {
-            $r = Invoke-RestMethod -Uri $Url -TimeoutSec 2
-            if ($r.ok -eq $true) {
+            $r = Invoke-LocalJsonNoProxy -Url $Url -TimeoutMs 2000
+            $healthName = [string]$r.name
+            $healthVersion = [string]$r.version
+            if ($r.ok -eq $true -and $healthName -eq "THEANOVA AgentStudio") {
+                if ($i -gt 1) {
+                    Write-Log ("FastAPI Health 직접 연결 확인: attempt={0}/{1}; version={2}" -f $i, $Retry, $healthVersion)
+                }
                 return $true
             }
+
+            $lastErrorMessage = (
+                "직접 Health 응답 불일치: ok={0}; name={1}; version={2}" -f `
+                [string]$r.ok, $healthName, $healthVersion
+            )
         }
         catch {
+            $lastErrorMessage = $_.Exception.Message
         }
 
-        Start-Sleep -Seconds 1
+        if (($i % 15) -eq 0 -and $i -lt $Retry) {
+            Write-Host ("[대기] Backend 초기화 진행 중... {0}/{1}초" -f $i, $Retry) -ForegroundColor DarkGray
+            Write-Log ("FastAPI Health 직접 연결 대기: attempt={0}/{1}; last={2}" -f $i, $Retry, $lastErrorMessage)
+        }
+
+        Start-Sleep -Seconds $DelaySec
     }
 
+    if ($lastErrorMessage) {
+        Write-Log ("FastAPI Health 직접 연결 최종 실패: {0}" -f $lastErrorMessage)
+    }
     return $false
 }
 
@@ -502,16 +596,23 @@ try {
 
     Stop-AgentStudioProcesses
 
+    # v5.538: runtime-only, non-secret settings are self-healed on first run.
+    # Existing root .env values remain authoritative and are never overwritten.
+    if (-not (Test-Path $ProjectEnvPath)) {
+        Write-Host "[안내] 프로젝트 루트 .env가 없어 안전한 Runtime 기본값만 자동 생성합니다." -ForegroundColor Yellow
+        Write-Log "root .env 없음 - non-secret bootstrap settings만 자동 생성"
+    }
+
     $BackendPort = Resolve-AgentStudioPort `
         -SettingName "AGENTSTUDIO_BACKEND_PORT" `
-        -DefaultPort 8000 `
-        -Label "Backend"
+        -Label "Backend" `
+        -DefaultPort 8000
 
     $FrontendPort = Resolve-AgentStudioPort `
         -SettingName "AGENTSTUDIO_FRONTEND_PORT" `
-        -DefaultPort 5173 `
         -ExcludedPort $BackendPort `
-        -Label "Frontend"
+        -Label "Frontend" `
+        -DefaultPort 5173
 
     Write-Host "[확인] Backend 포트 : $BackendPort"
     Write-Host "[확인] Frontend 포트: $FrontendPort"
@@ -526,9 +627,11 @@ try {
     $RootJson = $Root | ConvertTo-Json -Compress
     $RuntimeConfigLines = @(
         "window.__AGENTSTUDIO_CONFIG__ = {",
-        '  BACKEND_HOST: "127.0.0.1",',
+        '  BACKEND_HOST: window.location.hostname,',
         ("  BACKEND_PORT: {0}," -f $BackendPort),
         ("  FRONTEND_PORT: {0}," -f $FrontendPort),
+        ("  API_BASE_URL: window.location.protocol + '//'+ window.location.hostname + ':{0}/api'," -f $BackendPort),
+        ("  WS_BASE_URL: (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.hostname + ':{0}/api/ws'," -f $BackendPort),
         ("  AGENTSTUDIO_ROOT: {0}" -f $RootJson),
         "};"
     )
@@ -574,6 +677,119 @@ try {
     }
     Write-Host "[확인] Node.js/npm 사용 가능"
 
+    # v5.510: project-root/.env is the only source of database credentials.
+    # Legacy backend/.env may contain stale database accounts from old releases, so
+    # never migrate or use DB connection keys from that file. Non-DB settings may be
+    # migrated when root .env already exists, then backend/.env is removed.
+    $LegacyBackendEnvPath = Join-Path $Root "backend\.env"
+    $SensitiveLegacyDbKeys = @(
+        "DATABASE_URL", "LANGGRAPH_DATABASE_URL",
+        "AGENTSTUDIO_LOCAL_DATABASE_URL", "AGENTSTUDIO_LOCAL_LANGGRAPH_DATABASE_URL",
+        "SUPABASE_DATABASE_URL", "SUPABASE_LANGGRAPH_DATABASE_URL"
+    )
+    if (Test-Path $LegacyBackendEnvPath) {
+        try {
+            if (Test-Path $ProjectEnvPath) {
+                $projectKeys = @{}
+                foreach ($line in (Get-Content -LiteralPath $ProjectEnvPath -Encoding UTF8)) {
+                    if ($line -match '^\s*([^#=\s]+)\s*=') { $projectKeys[$matches[1]] = $true }
+                }
+                $missingLines = New-Object System.Collections.Generic.List[string]
+                foreach ($line in (Get-Content -LiteralPath $LegacyBackendEnvPath -Encoding UTF8)) {
+                    if ($line -match '^\s*([^#=\s]+)\s*=') {
+                        $key = $matches[1]
+                        if (($SensitiveLegacyDbKeys -notcontains $key) -and (-not $projectKeys.ContainsKey($key))) {
+                            $missingLines.Add($line)
+                        }
+                    }
+                }
+                if ($missingLines.Count -gt 0) {
+                    Add-Content -LiteralPath $ProjectEnvPath -Value "`r`n# Migrated non-DB settings from legacy backend/.env by AgentStudio v5.517" -Encoding UTF8
+                    Add-Content -LiteralPath $ProjectEnvPath -Value $missingLines -Encoding UTF8
+                }
+            }
+            Remove-Item -LiteralPath $LegacyBackendEnvPath -Force
+            Write-Host "[정리] legacy backend/.env 삭제 (DB 연결정보는 root .env만 사용)"
+        } catch { Write-Warning "legacy backend/.env 정리 실패: $($_.Exception.Message)" }
+    }
+
+    # v5.517: v5.515/v5.516 archives were created from a workspace whose Korean
+    # root filenames had already been mojibake-corrupted. When v5.517 is overlaid in
+    # place, those invalid duplicate guide/script names remain unless explicitly removed.
+    # Remove only root PS1/PPTX names containing known mojibake marker characters.
+    $removedMojibakeRootFiles = @()
+    Get-ChildItem -LiteralPath $Root -File -ErrorAction SilentlyContinue | Where-Object {
+        ($_.Extension -in @('.ps1', '.pptx')) -and ($_.Name -match '[δ∞φΩ]')
+    } | ForEach-Object {
+        $removedMojibakeRootFiles += $_.Name
+        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+    }
+    if ($removedMojibakeRootFiles.Count -gt 0) {
+        Write-Host "[정리] 손상된 한글 파일명 잔여 파일 제거: $($removedMojibakeRootFiles.Count)개"
+    }
+
+    # v5.510: in-place upgrades do not delete files removed from a newer ZIP.
+    # src/App.tsx is obsolete after v5.507 moved the application root to src/app/App.tsx.
+    # Delete the stale legacy file before contract validation so old installations can
+    # upgrade in place without a false regression failure.
+    $LegacyFrontendAppPath = Join-Path $FrontendDir "src\App.tsx"
+    if (Test-Path $LegacyFrontendAppPath) {
+        Remove-Item -LiteralPath $LegacyFrontendAppPath -Force
+        Write-Host "[정리] 이전 Frontend src/App.tsx 제거 (src/app/App.tsx 사용)"
+    }
+
+    # v5.517: in-place ZIP overlays can leave directories/files that were intentionally
+    # retired by the feature split. The frontend contract validator treats those paths
+    # as regressions, so remove only the exact legacy paths before validation.
+    $RetiredFrontendFeaturePaths = @(
+        (Join-Path $FrontendDir "src\components\notebook"),
+        (Join-Path $FrontendDir "src\components\memo\ProjectMemoPanel.tsx"),
+        (Join-Path $FrontendDir "src\components\viewers\DocumentViewers.tsx"),
+        (Join-Path $FrontendDir "src\utils\notebook.ts"),
+        (Join-Path $FrontendDir "src\components\database"),
+        (Join-Path $FrontendDir "src\components\codex"),
+        (Join-Path $FrontendDir "src\components\media\MediaWorkflowEditor.tsx"),
+        (Join-Path $FrontendDir "src\components\media\MediaWorkflowEditor.css")
+    )
+    $removedRetiredFrontendPaths = @()
+    foreach ($retiredFeaturePath in $RetiredFrontendFeaturePaths) {
+        if (Test-Path -LiteralPath $retiredFeaturePath) {
+            Remove-Item -LiteralPath $retiredFeaturePath -Recurse -Force -ErrorAction Stop
+            $removedRetiredFrontendPaths += $retiredFeaturePath
+        }
+    }
+    if ($removedRetiredFrontendPaths.Count -gt 0) {
+        Write-Host "[정리] 분리 전 Frontend 잔여 경로 제거: $($removedRetiredFrontendPaths.Count)개"
+    }
+
+
+    # v5.506: remove obsolete offline TypeScript migration shims left behind by an
+    # in-place upgrade from v5.503. ZIP extraction does not delete files that no
+    # longer exist in the newer archive, so the stale declaration can otherwise
+    # shadow the real React 19 / xterm package types and break every TSX build.
+    $obsoleteTypeShimPatterns = @(
+        "__temp_typecheck_shim__.d.ts",
+        "__temp_typecheck_*.d.ts"
+    )
+    $removedObsoleteTypeShims = @()
+    foreach ($pattern in $obsoleteTypeShimPatterns) {
+        Get-ChildItem -Path (Join-Path $FrontendDir "src") -Filter $pattern -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            $removedObsoleteTypeShims += $_.FullName
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+        }
+    }
+    if ($removedObsoleteTypeShims.Count -gt 0) {
+        Write-Host "[정리] 이전 TypeScript 임시 타입 선언 제거: $($removedObsoleteTypeShims.Count)개"
+    }
+
+    # Also clear incremental TypeScript build metadata after removing stale input
+    # files. This prevents an old program graph from being reused on an upgrade.
+    $tsBuildInfoPath = Join-Path $FrontendDir "node_modules\.tmp\tsconfig.app.tsbuildinfo"
+    if (Test-Path $tsBuildInfoPath) {
+        Remove-Item -LiteralPath $tsBuildInfoPath -Force -ErrorAction SilentlyContinue
+        Write-Host "[정리] 이전 TypeScript 빌드 캐시 제거"
+    }
+
     Push-Location $FrontendDir
     try {
         if (-not (Test-Path (Join-Path $FrontendDir "node_modules"))) {
@@ -595,9 +811,17 @@ $requiredFrontendPackages = @(
     "@xterm/xterm",
     "@xterm/addon-fit",
     "typescript",
+    "vite",
     "@types/node",
     "@types/react",
     "@types/react-dom"
+)
+$requiredFrontendPackageFiles = @(
+    "typescript\bin\tsc",
+    "vite\client.d.ts",
+    "@types\node\index.d.ts",
+    "@types\react\index.d.ts",
+    "@types\react-dom\index.d.ts"
 )
 
 $needNpmInstall = -not (Test-Path $frontendNodeModules)
@@ -607,6 +831,17 @@ if (-not $needNpmInstall) {
         $packagePath = Join-Path $frontendNodeModules $packageName
         if (-not (Test-Path $packagePath)) {
             Write-Host "[확인] Frontend 필수 패키지 누락: $packageName" -ForegroundColor Yellow
+            $needNpmInstall = $true
+            break
+        }
+    }
+}
+
+if (-not $needNpmInstall) {
+    foreach ($relativePackageFile in $requiredFrontendPackageFiles) {
+        $packageFilePath = Join-Path $frontendNodeModules $relativePackageFile
+        if (-not (Test-Path $packageFilePath)) {
+            Write-Host "[확인] Frontend 패키지 파일 누락/불완전: $relativePackageFile" -ForegroundColor Yellow
             $needNpmInstall = $true
             break
         }
@@ -631,9 +866,25 @@ else {
     Write-Host "[확인] Frontend 필수 패키지가 모두 설치되어 있습니다." -ForegroundColor DarkGray
 }
 
-        & npm run build
-        if ($LASTEXITCODE -ne 0) {
-            throw "Frontend 빌드 검증 실패"
+        $FrontendBuildLog = Join-Path $LogDir "frontend_build.log"
+        # v5.467: Windows PowerShell 5.1 converts native stderr from npm.ps1 into
+        # ErrorRecord/RemoteException when ErrorActionPreference=Stop. Build tools often
+        # write warnings to stderr even when they intend normal output, so capture the
+        # complete stream without letting PowerShell terminate before npm's exit code
+        # can be evaluated.
+        $PreviousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $FrontendBuildOutput = & npm run build 2>&1 | Tee-Object -FilePath $FrontendBuildLog
+            $FrontendBuildExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $PreviousErrorActionPreference
+        }
+        $FrontendBuildOutput | ForEach-Object { Write-Host $_ }
+        if ($FrontendBuildExitCode -ne 0) {
+            $FrontendBuildTail = ($FrontendBuildOutput | Select-Object -Last 50) -join [Environment]::NewLine
+            throw "Frontend 빌드 검증 실패`n$FrontendBuildTail`n전체 빌드 로그: $FrontendBuildLog"
         }
         Write-Ok "Frontend 빌드 검증"
     }
@@ -676,6 +927,18 @@ else {
         $env:AGENTSTUDIO_BACKEND_PORT = [string]$BackendPort
         $env:AGENTSTUDIO_FRONTEND_PORT = [string]$FrontendPort
 
+        # v5.510: stale machine/user/process DB variables must not override root .env.
+        # Pydantic receives explicit values from root .env, but clearing inherited DB
+        # variables here also protects libraries/services that read os.environ directly.
+        $InheritedDatabaseEnvKeys = @(
+            "DATABASE_URL", "LANGGRAPH_DATABASE_URL",
+            "AGENTSTUDIO_LOCAL_DATABASE_URL", "AGENTSTUDIO_LOCAL_LANGGRAPH_DATABASE_URL",
+            "SUPABASE_DATABASE_URL", "SUPABASE_LANGGRAPH_DATABASE_URL"
+        )
+        foreach ($dbEnvKey in $InheritedDatabaseEnvKeys) {
+            Remove-Item -Path ("Env:" + $dbEnvKey) -ErrorAction SilentlyContinue
+        }
+
         Start-Process `
             -FilePath $BackendPython `
             -ArgumentList @(
@@ -696,8 +959,30 @@ else {
 
     $BackendHealthUrl = "http://127.0.0.1:$BackendPort/api/health"
 
+    # Record which PID actually owns the configured backend port. This makes
+    # stale/foreign listener problems visible instead of reporting only a timeout.
+    try {
+        Start-Sleep -Milliseconds 350
+        $BackendPortOwner = Get-NetTCPConnection -LocalPort $BackendPort -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($BackendPortOwner) {
+            $OwnerPid = [int]$BackendPortOwner.OwningProcess
+            $OwnerProcess = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $OwnerPid) -ErrorAction SilentlyContinue
+            $OwnerCommand = if ($OwnerProcess) { [string]$OwnerProcess.CommandLine } else { "" }
+            Write-Log ("Backend listen 확인: port={0}; pid={1}; command={2}" -f $BackendPort, $OwnerPid, $OwnerCommand)
+        }
+        else {
+            Write-Log ("Backend listen 대기 시작: port={0}; listener 아직 없음" -f $BackendPort)
+        }
+    }
+    catch {
+        Write-Log ("Backend listen 진단 실패: {0}" -f $_.Exception.Message)
+    }
+
     Write-Step "FastAPI Health Check: $BackendHealthUrl"
-    if (-not (Wait-ApiHealth $BackendHealthUrl 30)) {
+    # v5.554: DB/provider 초기화와 Python import가 느린 PC에서도 Backend가
+    # 실제로 기동 중인 상태를 조기 실패로 오판하지 않도록 최대 90초 기다립니다.
+    if (-not (Wait-ApiHealth $BackendHealthUrl 90 1)) {
         Write-Host ""
         Write-Host "[실패] FastAPI Backend가 정상 시작되지 않았습니다." -ForegroundColor Red
         Write-Host "Backend 로그 전체 경로: $BackendLog" -ForegroundColor Yellow
@@ -716,9 +1001,9 @@ else {
             Write-Host "=============================================" -ForegroundColor DarkYellow
         }
 
-        throw "FastAPI Health Check 실패 - Backend 로그를 확인하십시오: $BackendLog"
+        throw "FastAPI Health Check 90초 초과 - Backend 로그를 확인하십시오: $BackendLog"
     }
-    $BackendHealthInfo = Invoke-RestMethod -Uri $BackendHealthUrl -TimeoutSec 5
+    $BackendHealthInfo = Invoke-LocalJsonNoProxy -Url $BackendHealthUrl -TimeoutMs 5000
     $RunningVersion = [string]$BackendHealthInfo.version
     if ($RunningVersion -ne $ExpectedAgentStudioVersion) {
         throw (
@@ -737,7 +1022,7 @@ else {
     $DatabaseHealthy = $false
 
     try {
-        $dbHealth = Invoke-RestMethod -Uri $DbHealthUrl -TimeoutSec 5
+        $dbHealth = Invoke-LocalJsonNoProxy -Url $DbHealthUrl -TimeoutMs 5000
 
         if ($dbHealth.ok -eq $true -and $dbHealth.database_connected -eq $true) {
             $DatabaseHealthy = $true
@@ -908,5 +1193,22 @@ catch {
     Write-Host "실패 상세 로그: $FailureLog" -ForegroundColor Yellow
     Write-Host "상세 오류:"
     Write-Host $_.Exception.ToString()
+
+    # v5.467: when SYSTEM_ADMIN was relaunched through UAC, this is the elevated
+    # console that previously disappeared immediately after a startup failure.
+    # Keep it open so the actual npm/backend/frontend error remains readable.
+    if ($ElevatedChild) {
+        Write-Host ""
+        Write-Host "============================================================" -ForegroundColor DarkYellow
+        Write-Host "[실패] 오류 확인을 위해 이 관리자 창을 자동으로 닫지 않습니다." -ForegroundColor Yellow
+        Write-Host "로그를 확인한 뒤 Enter 키를 누르면 창을 닫습니다." -ForegroundColor Yellow
+        Write-Host "============================================================" -ForegroundColor DarkYellow
+        try {
+            [void](Read-Host)
+        }
+        catch {
+            # Non-interactive hosts may not provide stdin; failure logging already completed.
+        }
+    }
     exit 1
 }

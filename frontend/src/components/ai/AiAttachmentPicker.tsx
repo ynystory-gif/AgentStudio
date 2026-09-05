@@ -1,3 +1,4 @@
+import { asLegacyError } from '../../utils/errors'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api'
 
@@ -80,7 +81,7 @@ function terminal(status: string): boolean {
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise(resolve => window.setTimeout(resolve, ms))
+  return new Promise((resolve: LegacyValue) => window.setTimeout(resolve, ms))
 }
 
 export function AiAttachmentPicker({
@@ -106,12 +107,12 @@ export function AiAttachmentPicker({
 
   useEffect(() => {
     attachmentsRef.current = attachments
-    const activeIds = new Set(attachments.map(item => item.attachment_id))
-    setAnalysisFiles(current => {
+    const activeIds = new Set(attachments.map((item: LegacyValue) => item.attachment_id))
+    setAnalysisFiles((current: LegacyValue) => {
       let changed = false
       const next: Record<string, AiAttachmentAnalysisFile> = {}
       for (const [key, value] of Object.entries(current)) {
-        if (activeIds.has(key)) next[key] = value
+        if (activeIds.has(key)) next[key] = value as AiAttachmentAnalysisFile
         else changed = true
       }
       return changed ? next : current
@@ -119,7 +120,7 @@ export function AiAttachmentPicker({
   }, [attachments])
 
   const analysisState = useMemo<AiAttachmentAnalysisState>(() => {
-    const files = attachments.map(item => analysisFiles[item.attachment_id] || {
+    const files = attachments.map((item: LegacyValue) => analysisFiles[item.attachment_id] || {
       attachment_id: item.attachment_id,
       name: item.name,
       size: item.size,
@@ -128,16 +129,16 @@ export function AiAttachmentPicker({
       stage: '대기',
       message: '분석 대기 중',
     })
-    const ready = files.length === 0 || files.every(item => terminal(item.status))
+    const ready = files.length === 0 || files.every((item: LegacyValue) => terminal(item.status))
     const overallProgress = files.length
-      ? Math.round(files.reduce((sum, item) => sum + Math.max(0, Math.min(100, Number(item.progress) || 0)), 0) / files.length)
+      ? Math.round(files.reduce((sum: LegacyValue, item: LegacyValue) => sum + Math.max(0, Math.min(100, Number(item.progress) || 0)), 0) / files.length)
       : 100
     return {
       busy: analysisBusy,
       ready,
       overallProgress,
-      failedFiles: files.filter(item => item.status === 'FAILED').length,
-      successfulFiles: files.filter(item => item.status === 'SUCCESS').length,
+      failedFiles: files.filter((item: LegacyValue) => item.status === 'FAILED').length,
+      successfulFiles: files.filter((item: LegacyValue) => item.status === 'SUCCESS').length,
       files,
     }
   }, [analysisBusy, analysisFiles, attachments])
@@ -161,8 +162,8 @@ export function AiAttachmentPicker({
 
   function applyAnalysisSnapshot(rows: AiAttachmentAnalysisFile[] | undefined) {
     if (!Array.isArray(rows) || !rows.length) return
-    const activeIds = new Set(attachmentsRef.current.map(item => item.attachment_id))
-    setAnalysisFiles(current => {
+    const activeIds = new Set(attachmentsRef.current.map((item: LegacyValue) => item.attachment_id))
+    setAnalysisFiles((current: LegacyValue) => {
       const next = { ...current }
       for (const row of rows) {
         const id = String(row?.attachment_id || '')
@@ -182,7 +183,7 @@ export function AiAttachmentPicker({
     analysisRunRef.current = runId
     setAnalysisBusy(true)
     setMessage('')
-    setAnalysisFiles(current => {
+    setAnalysisFiles((current: LegacyValue) => {
       const next = { ...current }
       for (const item of pending) {
         next[item.attachment_id] = {
@@ -202,7 +203,7 @@ export function AiAttachmentPicker({
       const created = await api<JobResponse>('/ai/attachments/analyze', {
         method: 'POST',
         body: JSON.stringify({
-          attachment_ids: pending.map(item => item.attachment_id),
+          attachment_ids: pending.map((item: LegacyValue) => item.attachment_id),
           purpose: analysisPurpose,
         }),
       })
@@ -226,10 +227,10 @@ export function AiAttachmentPicker({
         await delay(180)
       }
       throw new Error('첨부 파일 분석 준비 시간이 너무 오래 걸리고 있습니다.')
-    } catch (error: any) {
-      const failure = error?.message || String(error)
-      const pendingIds = new Set(pending.map(item => item.attachment_id))
-      setAnalysisFiles(current => {
+    } catch (error) {
+      const failure = asLegacyError(error).message || String(error)
+      const pendingIds = new Set(pending.map((item: LegacyValue) => item.attachment_id))
+      setAnalysisFiles((current: LegacyValue) => {
         const next = { ...current }
         for (const item of pending) {
           const previous = next[item.attachment_id]
@@ -255,7 +256,7 @@ export function AiAttachmentPicker({
 
   useEffect(() => {
     if (analysisBusy || !attachments.length) return
-    const pending = attachments.filter(item => {
+    const pending = attachments.filter((item: LegacyValue) => {
       const state = analysisFiles[item.attachment_id]
       return !state || !terminal(state.status)
     })
@@ -292,7 +293,7 @@ export function AiAttachmentPicker({
       const duplicateIds: string[] = []
       for (const row of incoming) {
         const key = normalizePath(row.path)
-        const existingIndex = next.findIndex(item => normalizePath(item.path) === key)
+        const existingIndex = next.findIndex((item: LegacyValue) => normalizePath(item.path) === key)
         if (existingIndex >= 0) {
           duplicateIds.push(row.attachment_id)
           continue
@@ -308,12 +309,12 @@ export function AiAttachmentPicker({
 
       const rejected = Array.isArray(result.rejected) ? result.rejected : []
       if (rejected.length) {
-        setMessage(rejected.map(row => `${row.name || '파일'}: ${row.message || '등록 제외'}`).join(' / '))
+        setMessage(rejected.map((row: LegacyValue) => `${row.name || '파일'}: ${row.message || '등록 제외'}`).join(' / '))
       } else if (incoming.length && next.length === attachments.length) {
         setMessage('이미 등록된 파일입니다.')
       }
-    } catch (error: any) {
-      setMessage(error?.message || String(error))
+    } catch (error) {
+      setMessage(asLegacyError(error).message || String(error))
     } finally {
       setBusy(false)
     }
@@ -321,14 +322,14 @@ export function AiAttachmentPicker({
 
   function remove(attachmentId: string) {
     analysisRunRef.current += 1
-    onChange(attachments.filter(item => item.attachment_id !== attachmentId))
+    onChange(attachments.filter((item: LegacyValue) => item.attachment_id !== attachmentId))
     setAnalysisBusy(false)
     void release([attachmentId])
   }
 
   function clear() {
     analysisRunRef.current += 1
-    const ids = attachments.map(item => item.attachment_id)
+    const ids = attachments.map((item: LegacyValue) => item.attachment_id)
     onChange([])
     setAnalysisFiles({})
     setAnalysisBusy(false)
@@ -339,7 +340,7 @@ export function AiAttachmentPicker({
   const overallLabel = analysisActive && analysisState.ready
     ? '첨부 Context 준비 완료 · 현재 AI 요청에 사용 중'
     : analysisState.ready && attachments.length > 0
-      ? '첨부 Context 준비 완료 · AI 심층 분석 대기'
+      ? '첨부 Context 준비 완료 · 요구사항 정리 대기'
     : analysisState.busy
       ? `첨부 파일 분석 준비 ${analysisState.overallProgress}%`
       : analysisState.failedFiles
@@ -377,11 +378,11 @@ export function AiAttachmentPicker({
             <div className="ai-attachment-overall-fill" style={{ width: `${analysisState.overallProgress}%` }} />
           </div>
           <div className="ai-attachment-progress-list" aria-label="파일별 AI 분석 준비 진행률">
-            {analysisState.files.map(item => {
+            {analysisState.files.map((item: LegacyValue) => {
               const activeLabel = analysisActive && item.status === 'SUCCESS' ? '현재 AI 요청에 사용 중' : item.stage
               return <div className={`ai-attachment-progress-row ${item.status.toLowerCase()}`} key={item.attachment_id} title={item.message}>
                 <div className="ai-attachment-progress-meta">
-                  <span className="ai-attachment-name" title={attachments.find(row => row.attachment_id === item.attachment_id)?.path || item.name}>{item.name}</span>
+                  <span className="ai-attachment-name" title={attachments.find((row: LegacyValue) => row.attachment_id === item.attachment_id)?.path || item.name}>{item.name}</span>
                   <small>{formatBytes(item.size || 0)}</small>
                   <b>{activeLabel}</b>
                   <em>{item.progress}%</em>
@@ -396,7 +397,7 @@ export function AiAttachmentPicker({
                 <div className="ai-attachment-file-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={item.progress}>
                   <div className="ai-attachment-file-fill" style={{ width: `${item.progress}%` }} />
                 </div>
-                <div className="ai-attachment-stage-message">{analysisActive && item.status === 'SUCCESS' ? '준비된 파일 Context를 현재 AI 요청에 포함하고 있습니다.' : (item.status === 'SUCCESS' ? 'Context 준비 완료. 답변 보내기 또는 첨부만 먼저 분석을 누르면 AI 심층 분석을 시작합니다.' : item.message)}</div>
+                <div className="ai-attachment-stage-message">{analysisActive && item.status === 'SUCCESS' ? '준비된 파일 Context를 현재 AI 요청에 포함하고 있습니다.' : (item.status === 'SUCCESS' ? 'Context 준비 완료. 추출된 Context를 캐시했으며 같은 첨부 ID는 다시 읽지 않습니다.' : item.message)}</div>
               </div>
             })}
           </div>

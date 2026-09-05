@@ -50,7 +50,7 @@ function LlmRouteCard({ item, index }: LlmRouteCardProps) {
       </div>
 
       {Array.isArray(item.notes) && item.notes.length > 0 && <div className="llm-route-notes">
-        {item.notes.map((note, noteIndex) => <span key={noteIndex}>{note}</span>)}
+        {item.notes.map((note: LegacyValue, noteIndex: LegacyValue) => <span key={noteIndex}>{note}</span>)}
       </div>}
     </div>
   </details>
@@ -131,7 +131,7 @@ export function LlmCatalogPanel({
   const items = Array.isArray(catalog?.items) ? catalog.items : []
   const defaults = catalog?.defaults || {}
   const historyItems = Array.isArray(history?.items) ? history.items : []
-  const successCount = historyItems.filter(item => String(item.status || '').toLowerCase() === 'success').length
+  const successCount = historyItems.filter((item: LegacyValue) => String(item.status || '').toLowerCase() === 'success').length
   const errorCount = historyItems.length - successCount
 
   return <div className="analysis-report-dashboard llm-catalog-dashboard">
@@ -161,7 +161,7 @@ export function LlmCatalogPanel({
           아직 저장된 실제 LLM 호출이 없습니다. v5.243 이후 실행되는 LLM 요청부터 이곳에 요청과 결과가 함께 저장됩니다.
         </div>}
         <div className="llm-history-list">
-          {historyItems.map((item, index) => <LlmHistoryCard key={item.id || `${String(item.timestamp)}-${index}`} item={item} index={index} />)}
+          {historyItems.map((item: LegacyValue, index: LegacyValue) => <LlmHistoryCard key={item.id || `${String(item.timestamp)}-${index}`} item={item} index={index} />)}
         </div>
         {history?.truncated && <div className="report-empty-mini">최근 기록이 많아 최신 {historyItems.length}개를 화면에 표시하고 있습니다. 전체 기록은 보관 파일에 유지됩니다.</div>}
         {history?.log_path && <div className="llm-history-storage-note">
@@ -192,7 +192,7 @@ export function LlmCatalogPanel({
       <ReportSection icon="⎔" title="LLM 요청 형식 / 라우팅 목록" subtitle="참고용 Task → Provider → JSON Body 예시" className="span-2">
         {!items.length && !loading && <div className="report-empty-mini">표시할 LLM 라우팅 정보가 없습니다.</div>}
         <div className="llm-route-list">
-          {items.map((item, index) => <LlmRouteCard key={`${item.task}-${index}`} item={item} index={index} />)}
+          {items.map((item: LegacyValue, index: LegacyValue) => <LlmRouteCard key={`${item.task}-${index}`} item={item} index={index} />)}
         </div>
       </ReportSection>
     </div>

@@ -11,7 +11,9 @@ function valueOf(name, fallback) {
 }
 
 const host = valueOf('--host', '127.0.0.1')
-const port = Number(valueOf('--port', '5173'))
+const rawPort = valueOf('--port', '')
+if (!rawPort) throw new Error('--port is required; SYSTEM_ADMIN must pass AGENTSTUDIO_FRONTEND_PORT from root .env')
+const port = Number(rawPort)
 const logPath = valueOf(
   '--log',
   path.resolve(__dirname, '..', 'logs', 'frontend_console.log')

@@ -26,7 +26,7 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.models.learning_entities import LlmLearningDataset, LlmLearningProblem
-from app.services.learning_relational_schema_service import ensure_learning_relational_schema
+from app.services.learning_relational_schema_service import assert_learning_relational_schema_ready
 from app.services import learning_finetune_job_service as finetune
 
 
@@ -43,7 +43,7 @@ def _fingerprint(instruction: str, input_text: str, output_text: str) -> str:
 
 async def _validated_training_rows_reconciled() -> tuple[list[dict], list[LlmLearningDataset]]:
     """Use Dataset validation state as source of truth and repair normalized flags."""
-    await ensure_learning_relational_schema()
+    await assert_learning_relational_schema_ready()
     async with SessionLocal() as session:
         datasets = (
             await session.execute(

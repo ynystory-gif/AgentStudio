@@ -23,8 +23,12 @@ from app.core.machine_identity import (
 )
 
 
-ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
-ENV_EXAMPLE_PATH = Path(__file__).resolve().parents[2] / ".env.example"
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = BACKEND_ROOT.parent
+LEGACY_BACKEND_ENV_PATH = BACKEND_ROOT / ".env"
+PROJECT_ENV_PATH = PROJECT_ROOT / ".env"
+ENV_PATH = PROJECT_ENV_PATH
+ENV_EXAMPLE_PATH = BACKEND_ROOT / ".env.example"
 
 # DB 연결 이전에도 필요한 최소 bootstrap 설정만 .env에 유지합니다.
 DB_CONNECTION_ENV_ONLY_KEYS = {
@@ -101,8 +105,6 @@ DEFAULT_SETTING_VALUES = {
     "CODING_LLM_PROVIDER": "auto",
     "REQUIREMENTS_LLM_PROVIDER": "auto",
     "MEMORY_EMBEDDING_PROVIDER": "ollama",
-    "AGENTSTUDIO_BACKEND_PORT": "8000",
-    "AGENTSTUDIO_FRONTEND_PORT": "5173",
     "OLLAMA_AUTO_START": "true",
     "WEATHER_AUTO_LOCATION": "true",
 }
@@ -130,8 +132,11 @@ def _parse_env_lines(lines: list[str]) -> dict[str, str]:
 
 
 def _read_actual_env_lines() -> list[str]:
-    if ENV_PATH.exists():
-        return ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    # project-root/.env is the authoritative writable configuration. backend/.env is legacy fallback only.
+    if PROJECT_ENV_PATH.exists():
+        return PROJECT_ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    if LEGACY_BACKEND_ENV_PATH.exists():
+        return LEGACY_BACKEND_ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
     if ENV_EXAMPLE_PATH.exists():
         return ENV_EXAMPLE_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
     return []
@@ -143,22 +148,33 @@ def read_env_dict() -> dict[str, str]:
     data: dict[str, str] = {}
     if ENV_EXAMPLE_PATH.exists():
         data.update(_parse_env_lines(ENV_EXAMPLE_PATH.read_text(encoding="utf-8", errors="replace").splitlines()))
-    if ENV_PATH.exists():
-        data.update(_parse_env_lines(ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines()))
+    legacy_data = {}
+    if LEGACY_BACKEND_ENV_PATH.exists():
+        legacy_data = _parse_env_lines(LEGACY_BACKEND_ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines())
+        for key in ("DATABASE_URL", "LANGGRAPH_DATABASE_URL", "AGENTSTUDIO_LOCAL_DATABASE_URL", "AGENTSTUDIO_LOCAL_LANGGRAPH_DATABASE_URL", "SUPABASE_DATABASE_URL", "SUPABASE_LANGGRAPH_DATABASE_URL"):
+            legacy_data.pop(key, None)
+        data.update(legacy_data)
+    if PROJECT_ENV_PATH.exists():
+        data.update(_parse_env_lines(PROJECT_ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines()))
     return data
 
 
 def read_actual_env_dict() -> dict[str, str]:
-    """backend/.env에 실제로 저장된 값만 반환합니다 (.env.example 제외)."""
-    if not ENV_PATH.exists():
-        return {}
-    return _parse_env_lines(
-        ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
-    )
+    """실제 .env 값을 반환합니다. DB 연결정보는 project-root/.env만 사용합니다."""
+    data: dict[str, str] = {}
+    legacy_data = {}
+    if LEGACY_BACKEND_ENV_PATH.exists():
+        legacy_data = _parse_env_lines(LEGACY_BACKEND_ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines())
+        for key in ("DATABASE_URL", "LANGGRAPH_DATABASE_URL", "AGENTSTUDIO_LOCAL_DATABASE_URL", "AGENTSTUDIO_LOCAL_LANGGRAPH_DATABASE_URL", "SUPABASE_DATABASE_URL", "SUPABASE_LANGGRAPH_DATABASE_URL"):
+            legacy_data.pop(key, None)
+        data.update(legacy_data)
+    if PROJECT_ENV_PATH.exists():
+        data.update(_parse_env_lines(PROJECT_ENV_PATH.read_text(encoding="utf-8", errors="replace").splitlines()))
+    return data
 
 
 def get_database_env_settings() -> dict[str, str]:
-    """DB 연결 bootstrap 값은 오직 backend/.env를 source of truth로 사용합니다."""
+    """DB bootstrap은 project-root/.env를 source of truth로 사용합니다."""
     actual = read_actual_env_dict()
     merged = read_env_dict()
     return {
@@ -458,7 +474,7 @@ async def migrate_env_settings_to_db() -> dict:
     async with SessionLocal() as session:
         pc_name = current_pc_name()
         # 구버전에서 잘못 저장됐을 수 있는 DB 연결 bootstrap 행은 제거합니다.
-        # 이후 DATABASE_URL/LANGGRAPH_DATABASE_URL은 backend/.env만 source of truth입니다.
+        # 이후 DATABASE_URL/LANGGRAPH_DATABASE_URL은 project-root/.env만 source of truth입니다.
         await session.execute(
             delete(AppSetting).where(
                 AppSetting.key.in_(list(DB_CONNECTION_ENV_ONLY_KEYS))
@@ -527,6 +543,11 @@ def _apply_runtime_values(values: dict[str, str]) -> None:
 
     get_settings.cache_clear()
 
+    # v5.493: path settings are operational immediately, not cosmetic.
+    if any(key in values for key in {"DEFAULT_TEMP_ROOT", "DEFAULT_CACHE_ROOT", "DEFAULT_OUTPUT_ROOT"}):
+        from app.services.runtime_path_policy import apply_runtime_path_policy
+        apply_runtime_path_policy()
+
 
 async def load_db_settings_into_runtime() -> dict:
     """
@@ -572,7 +593,7 @@ async def get_editable_settings() -> dict[str, Any]:
         default_value = DEFAULT_SETTING_VALUES.get(key, "")
         if key in DB_CONNECTION_ENV_ONLY_KEYS:
             # DATABASE_URL/LANGGRAPH_DATABASE_URL은 DB 자체에 연결하기 위한 bootstrap 값이므로
-            # app_settings를 절대 조회하지 않고 backend/.env 실제 저장값만 사용합니다.
+            # app_settings를 절대 조회하지 않고 project-root/.env 실제 저장값만 사용합니다.
             value = actual_env_data.get(key, env_data.get(key, default_value))
         elif key in BOOTSTRAP_KEYS:
             value = env_data.get(key, default_value)
@@ -612,7 +633,7 @@ async def get_editable_settings() -> dict[str, Any]:
         "bootstrap": sorted(BOOTSTRAP_KEYS),
         "env_only": sorted(DB_CONNECTION_ENV_ONLY_KEYS),
         "database_connection_source": str(ENV_PATH),
-        "database_connection_storage": "backend/.env only (app_settings 미사용)",
+        "database_connection_storage": "project-root/.env only (app_settings 미사용)",
         "db_connected": db_connected,
         "db_error": db_error,
         "mode": "shared_db+local_env" if db_connected else "local_env_fallback",
@@ -625,7 +646,7 @@ async def get_editable_settings() -> dict[str, Any]:
 async def save_database_env_settings(values: dict[str, Any]) -> dict[str, Any]:
     """
     DATABASE_URL / LANGGRAPH_DATABASE_URL은 DB 연결 자체를 만들기 위한 bootstrap 설정입니다.
-    따라서 PostgreSQL app_settings에 절대 저장하지 않고 backend/.env에만 저장합니다.
+    따라서 PostgreSQL app_settings에 절대 저장하지 않고 project-root/.env에만 저장합니다.
     DB가 완전히 오프라인이어도 저장/재조회가 가능해야 합니다.
     """
     allowed = DB_CONNECTION_ENV_ONLY_KEYS | {"POSTGRESQL18_ROOT"}
@@ -653,7 +674,7 @@ async def save_database_env_settings(values: dict[str, Any]) -> dict[str, Any]:
     actual = read_actual_env_dict()
     mismatched = [key for key, value in env_values.items() if actual.get(key) != value]
     if mismatched:
-        raise OSError("backend/.env 저장 확인 실패: " + ", ".join(mismatched))
+        raise OSError("project-root/.env 저장 확인 실패: " + ", ".join(mismatched))
 
     database_rebound = False
     database_rebind_error = ""
@@ -723,11 +744,11 @@ async def update_settings(
         current = read_env_dict()
         backend_raw = values.get(
             "AGENTSTUDIO_BACKEND_PORT",
-            current.get("AGENTSTUDIO_BACKEND_PORT", "8000"),
+            current.get("AGENTSTUDIO_BACKEND_PORT", ""),
         )
         frontend_raw = values.get(
             "AGENTSTUDIO_FRONTEND_PORT",
-            current.get("AGENTSTUDIO_FRONTEND_PORT", "5173"),
+            current.get("AGENTSTUDIO_FRONTEND_PORT", ""),
         )
         try:
             backend_port = int(str(backend_raw))
@@ -870,6 +891,16 @@ async def update_settings(
             db_error = str(exc)
             _mark_pending_settings(set(db_values.keys()))
 
+    # v5.494: a manually saved/stale Ollama model value must not diverge from
+    # the model actually used by AgentStudio requests. Re-resolve after DB commit.
+    active_ollama_sync = {}
+    if "OLLAMA_MODEL" in db_values:
+        try:
+            from app.services.active_ollama_model_service import sync_active_ollama_model
+            active_ollama_sync = await sync_active_ollama_model()
+        except Exception as exc:
+            active_ollama_sync = {"ok": False, "error": str(exc) or type(exc).__name__}
+
     restart_required = any(
         key in bootstrap_values
         for key in ("LANGGRAPH_DATABASE_URL", "AGENTSTUDIO_BACKEND_PORT", "AGENTSTUDIO_FRONTEND_PORT")
@@ -907,6 +938,7 @@ async def update_settings(
         "database_rebind_error": database_rebind_error,
         "saved_bootstrap": saved_bootstrap,
         "restart_required": restart_required,
+        "active_ollama_sync": active_ollama_sync,
         "message": message,
         "settings": await get_editable_settings(),
     }

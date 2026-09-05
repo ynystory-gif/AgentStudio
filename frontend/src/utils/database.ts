@@ -35,7 +35,7 @@ interface RedisMutableTreeNode {
 }
 
 export function buildRedisKeyTree(keys: RedisKeySummary[] = []): RedisTreeNode {
-  const root: RedisMutableTreeNode = { name: '', path: '', children: new Map(), items: [] }
+  const root: RedisMutableTreeNode = { name: '', path: '', children: new Map<LegacyValue,LegacyValue>(), items: [] }
   for (const item of Array.isArray(keys) ? keys : []) {
     const full = String(item?.key || '')
     if (!full) continue
@@ -47,7 +47,7 @@ export function buildRedisKeyTree(keys: RedisKeySummary[] = []): RedisTreeNode {
       path = path ? `${path}:${part}` : part
       let child = node.children.get(part)
       if (!child) {
-        child = { name: part, path, children: new Map(), items: [] }
+        child = { name: part, path, children: new Map<LegacyValue,LegacyValue>(), items: [] }
         node.children.set(part, child)
       }
       node = child
@@ -58,16 +58,16 @@ export function buildRedisKeyTree(keys: RedisKeySummary[] = []): RedisTreeNode {
     name: node.name,
     path: node.path,
     children: [...node.children.values()]
-      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+      .sort((a: LegacyValue, b: LegacyValue) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
       .map(finalize),
-    items: node.items.sort((a, b) => String(a.label || '').localeCompare(String(b.label || ''), undefined, { sensitivity: 'base' })),
+    items: node.items.sort((a: LegacyValue, b: LegacyValue) => String(a.label || '').localeCompare(String(b.label || ''), undefined, { sensitivity: 'base' })),
   })
   return finalize(root)
 }
 
 export function countRedisTreeKeys(node: RedisTreeNode | null | undefined): number {
   if (!node) return 0
-  return (node.items || []).length + (node.children || []).reduce((sum, child) => sum + countRedisTreeKeys(child), 0)
+  return (node.items || []).length + (node.children || []).reduce((sum: LegacyValue, child: LegacyValue) => sum + countRedisTreeKeys(child), 0)
 }
 
 export function firestoreValueText(value: unknown): string {

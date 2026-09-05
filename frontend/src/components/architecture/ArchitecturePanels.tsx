@@ -5,7 +5,7 @@ import type {
   GeneratedAgentArchitectureReport,
 } from '../../types/report'
 
-function safeArchitectureText(value: unknown, fallback = ''): string {
+function safeArchitectureText(value: unknown, fallback: LegacyValue = ''): string {
   const text = String(value ?? '').replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim()
   if (!text) return fallback
   const lower = text.toLowerCase()
@@ -18,7 +18,7 @@ function safeArchitectureText(value: unknown, fallback = ''): string {
     'assistant:',
     'user:',
   ]
-  if (rawStateMarkers.some(marker => lower.includes(marker)) || (text.match(/[{}\[\]]/g)?.length || 0) > 10) {
+  if (rawStateMarkers.some((marker: LegacyValue) => lower.includes(marker)) || (text.match(/[{}\[\]]/g)?.length || 0) > 10) {
     return fallback
   }
   return text.length > 220 ? `${text.slice(0, 220)}…` : text
@@ -41,7 +41,7 @@ function ArchitectureList({ items = [], empty = '정보가 없습니다.' }: Arc
   const rows = normalizeArchitectureList(items)
   if (!rows.length) return <div className="report-empty-mini">{empty}</div>
   return <div className="architecture-chip-list">
-    {rows.map((item, index) => {
+    {rows.map((item: LegacyValue, index: LegacyValue) => {
       const rawLabel = typeof item === 'string'
         ? item
         : (item.label || item.name || item.component || item.title || item.path || '')
@@ -98,24 +98,24 @@ export function GeneratedAgentArchitecturePanel({ report }: GeneratedAgentArchit
   const infrastructure = normalizeArchitectureList(architecture.infrastructure)
   const adaptiveSource = architecture.source === 'PROJECT_SOURCE_INFERENCE'
   const profileLabel = report?.projectProfile?.project_type_label || ''
-  const componentTitles = components.map((item, index) => typeof item === 'string'
+  const componentTitles = components.map((item: LegacyValue, index: LegacyValue) => typeof item === 'string'
     ? item
     : (item.label || item.name || item.component || `구성요소 ${index + 1}`))
-  const interfaceTitles = interfaces.map((item, index) => typeof item === 'string'
+  const interfaceTitles = interfaces.map((item: LegacyValue, index: LegacyValue) => typeof item === 'string'
     ? item
     : (item.label || item.name || item.component || `인터페이스 ${index + 1}`))
-  const persistenceTitles = persistence.map((item, index) => typeof item === 'string'
+  const persistenceTitles = persistence.map((item: LegacyValue, index: LegacyValue) => typeof item === 'string'
     ? item
     : (item.label || item.name || item.component || `영속성 ${index + 1}`))
-  const findComponent = (tokens: string[]) => componentTitles.find(title => {
+  const findComponent = (tokens: string[]) => componentTitles.find((title: LegacyValue) => {
     const lower = String(title || '').toLowerCase()
-    return tokens.some(token => lower.includes(token))
+    return tokens.some((token: LegacyValue) => lower.includes(token))
   })
   const centerTitle = adaptiveSource
     ? (findComponent(['agent','orchestrator','backend','core','service']) || componentTitles[0] || 'Application Core')
     : (componentTitles[0] || 'AI Agent Core')
   const rightTitle = adaptiveSource
-    ? (findComponent(['tool','mcp','response','output','llm']) || componentTitles.find(title => title !== centerTitle) || 'Connected Component')
+    ? (findComponent(['tool','mcp','response','output','llm']) || componentTitles.find((title: LegacyValue) => title !== centerTitle) || 'Connected Component')
     : (componentTitles[1] || 'Action / Tool Executor')
   const leftTitle = adaptiveSource
     ? (interfaceTitles[0] || componentTitles[0] || 'Program Entry Point')
@@ -345,7 +345,7 @@ export function ArchitectureConformancePanel({ report }: GeneratedAgentArchitect
       {!mismatches.length
         ? <div className="report-empty-mini">차이가 없습니다. Design Architecture 계약을 충족했습니다.</div>
         : <div className="architecture-mismatch-list">
-          {mismatches.map((item, index) => <div className={`architecture-mismatch-row ${item.severity || 'warning'}`} key={`${item.type || 'mismatch'}-${index}`}>
+          {mismatches.map((item: LegacyValue, index: LegacyValue) => <div className={`architecture-mismatch-row ${item.severity || 'warning'}`} key={`${item.type || 'mismatch'}-${index}`}>
             <span>{item.severity === 'critical' ? '●' : '△'}</span>
             <div>
               <strong>{item.expected || item.path || item.category || item.type || 'Architecture mismatch'}</strong>

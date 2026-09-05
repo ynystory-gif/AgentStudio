@@ -65,7 +65,7 @@ def _problem_count(dataset: LlmLearningDataset) -> int:
     return int(dataset.problem_count or 0)
 
 
-async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
+async def _current_pc_learned_case_ids(repair_mappings: bool = True) -> tuple[set[str], list[dict], int]:
     """Return exact learned case ids and family metadata for current PC.
 
     For modern Datasets the group snapshot comes from deployment_json. For every applied
@@ -105,11 +105,13 @@ async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
         ).scalars().all() if source_ids else []
         source_by_id = {str(row.id): row for row in source_rows}
 
-        # Load all cases once so reconciliation is deterministic and does not issue one
-        # query per Dataset.
+        # v5.445: full family reconciliation is a maintenance/write operation. It runs
+        # at startup and after learning-apply, not on every list GET. Normal screen reads
+        # use the persisted source_group_case_ids snapshot and exact source ID only.
         all_cases = (
-            await session.execute(select(LlmMisjudgmentCase))
-        ).scalars().all()
+            (await session.execute(select(LlmMisjudgmentCase))).scalars().all()
+            if repair_mappings else []
+        )
 
         learned_ids: set[str] = set()
         families: list[dict] = []
@@ -139,7 +141,7 @@ async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
             # same-family rows belong to the learned snapshot. Cases after applied_at are
             # deliberately excluded and remain visible as true recurrences.
             reconciled_ids = set(mapped_ids)
-            if source_row is not None:
+            if repair_mappings and source_row is not None:
                 for row in all_cases:
                     candidate = _case_dict(row)
                     if (
@@ -151,7 +153,7 @@ async def _current_pc_learned_case_ids() -> tuple[set[str], list[dict], int]:
             if dataset.source_case_id:
                 reconciled_ids.add(str(dataset.source_case_id))
 
-            if reconciled_ids != mapped_ids or not deployment.get("source_group_key"):
+            if repair_mappings and (reconciled_ids != mapped_ids or not deployment.get("source_group_key")):
                 deployment["source_case_id"] = str(dataset.source_case_id or "")
                 deployment["source_group_case_ids"] = sorted(reconciled_ids)
                 deployment["source_group_key"] = _group_key(reconciled_ids) if reconciled_ids else ""
@@ -188,7 +190,7 @@ async def backfill_current_pc_learning_group_mappings() -> dict:
     Safe to call repeatedly. It never adds cases that happened after the Dataset's current
     PC application time, so genuine post-learning recurrences remain actionable.
     """
-    learned_ids, families, repaired = await _current_pc_learned_case_ids()
+    learned_ids, families, repaired = await _current_pc_learned_case_ids(repair_mappings=True)
     return {
         "ok": True,
         "pc_name": current_pc_name(),
@@ -205,7 +207,7 @@ async def list_aggregated_misjudgment_cases_current_pc_unlearned_only(
     limit: int = 500,
 ) -> dict:
     result = await _original_list_aggregated_misjudgment_cases(provider, status, limit)
-    learned_case_ids, learned_families, repaired = await _current_pc_learned_case_ids()
+    learned_case_ids, learned_families, repaired = await _current_pc_learned_case_ids(repair_mappings=False)
 
     aggregated = list(result.get("items") or [])
     all_group_ids: set[str] = set()
@@ -341,8 +343,18 @@ async def list_aggregated_misjudgment_cases_current_pc_unlearned_only(
             and bool(pc_app_by_dataset[dataset_id].installed)
             and bool(pc_app_by_dataset[dataset_id].enabled)
         ]
+        exact_source_datasets = [
+            row for row in matched_datasets
+            if str(row.source_case_id or "") == str(representative.get("id") or "")
+        ]
         representative["learning_data_exists"] = bool(matched_datasets and problem_count > 0)
         representative["learning_dataset_exists"] = bool(matched_datasets)
+        # v5.442 distinguishes a same-family reusable Dataset from a Dataset that is
+        # directly anchored to the exact visible representative ID. This lets users
+        # recover legacy collections that were accidentally generated from a different
+        # same-family raw case without creating duplicates once the exact ID is repaired.
+        representative["learning_exact_source_dataset_exists"] = bool(exact_source_datasets)
+        representative["learning_exact_source_dataset_ids"] = [str(row.id) for row in exact_source_datasets]
         representative["learning_dataset_count"] = len(matched_datasets)
         representative["learning_problem_count"] = problem_count
         representative["learning_dataset_ids"] = dataset_ids

@@ -24,20 +24,15 @@ export class AgentStudioApiError extends Error {
   }
 }
 function getRuntimeConfig():AgentStudioRuntimeConfig{return window.__AGENTSTUDIO_CONFIG__||{}}
-function getApiBase():string{const envBase=import.meta.env.VITE_API_BASE_URL;if(envBase)return envBase.replace(/\/$/,'');const cfg=getRuntimeConfig();const host=cfg.BACKEND_HOST||window.location.hostname||'127.0.0.1';const port=cfg.BACKEND_PORT||8000;return `${window.location.protocol}//${host}:${port}/api`}
-function getWsBase():string{const cfg=getRuntimeConfig();const host=cfg.BACKEND_HOST||window.location.hostname||'127.0.0.1';const port=cfg.BACKEND_PORT||8000;return `ws://${host}:${port}/api/ws`}
+function getApiBase():string{const cfg=getRuntimeConfig();const runtimeBase=String(cfg.API_BASE_URL||'').trim();if(runtimeBase)return runtimeBase.replace(/\/$/,'');throw new Error('AgentStudio runtime-config.js에 API_BASE_URL이 없습니다. SYSTEM_ADMIN.cmd를 다시 실행해 프로젝트 루트 .env 설정을 적용하세요.')}
+function getWsBase():string{const cfg=getRuntimeConfig();const runtimeBase=String(cfg.WS_BASE_URL||'').trim();if(runtimeBase)return runtimeBase.replace(/\/$/,'');throw new Error('AgentStudio runtime-config.js에 WS_BASE_URL이 없습니다. SYSTEM_ADMIN.cmd를 다시 실행해 프로젝트 루트 .env 설정을 적용하세요.')}
 export async function apiFetch(path:string,options:RequestInit={}):Promise<Response>{
   const apiBase=getApiBase(),url=`${apiBase}${path}`,token=getAuthToken();let res:Response
-<<<<<<< HEAD
   const incomingHeaders=(options.headers||{}) as Record<string,string>
   const headers:Record<string,string>={...(token?{Authorization:`Bearer ${token}`}:{ }),...incomingHeaders}
-  if(options.body!==undefined&&options.body!==null&&!Object.keys(headers).some(key=>key.toLowerCase()==='content-type'))headers['Content-Type']='application/json'
+  if(options.body!==undefined&&options.body!==null&&!Object.keys(headers).some((key: LegacyValue)=>key.toLowerCase()==='content-type'))headers['Content-Type']='application/json'
   try{
     res=await fetch(url,{...options,headers})
-=======
-  try{
-    res=await fetch(url,{...options,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{ }),...((options.headers||{}) as Record<string,string>)}})
->>>>>>> d0e40bd86a999808d857b8acca8a9a6f14259c81
   }catch(cause){
     if(cause instanceof DOMException&&cause.name==='AbortError')throw cause
     throw new AgentStudioApiError(`Backend 연결 실패: ${url}`,{kind:'network',apiBase,url,path,cause})
@@ -47,14 +42,18 @@ export async function apiFetch(path:string,options:RequestInit={}):Promise<Respo
     if(res.status===401&&!path.startsWith('/auth/'))clearAuthToken()
     throw new AgentStudioApiError(`Backend HTTP ${res.status}: ${detail}`,{kind:'http',status:res.status,apiBase,url,path,responseBody:body})
   }
-<<<<<<< HEAD
   return res
 }
-export async function api<T=unknown>(path:string,options:RequestInit={}):Promise<T>{
+export type DynamicApiResponse=LegacyRecord
+export async function api<T=DynamicApiResponse>(path:string,options:RequestInit={}):Promise<T>{
   const res=await apiFetch(path,options)
-=======
->>>>>>> d0e40bd86a999808d857b8acca8a9a6f14259c81
   return res.json() as Promise<T>
 }
-export function connectJobs(onEvent:(event:JobEvent)=>void):WebSocket{const token=getAuthToken();const ws=new WebSocket(`${getWsBase()}${token?`?access_token=${encodeURIComponent(token)}`:''}`);ws.onmessage=event=>onEvent(JSON.parse(event.data) as JobEvent);ws.onopen=()=>ws.send('connected');return ws}
+export async function saveBlobToOutput(blob:Blob,filename:string,category: LegacyValue='downloads',projectRoot: LegacyValue=''):Promise<{ok:boolean;path:string;output_root:string;relative_path:string;bytes:number}>{
+  const params=new URLSearchParams({filename:String(filename||'download.bin'),category:String(category||'downloads')})
+  if(projectRoot)params.set('project_root',projectRoot)
+  const res=await apiFetch(`/output/save?${params.toString()}`,{method:'POST',headers:{'Content-Type':blob.type||'application/octet-stream'},body:blob})
+  return res.json()
+}
+export function connectJobs(onEvent:(event:JobEvent)=>void):WebSocket{const token=getAuthToken();const ws=new WebSocket(`${getWsBase()}${token?`?access_token=${encodeURIComponent(token)}`:''}`);ws.onmessage=(event: LegacyValue)=>onEvent(JSON.parse(event.data) as JobEvent);ws.onopen=()=>ws.send('connected');return ws}
 export function runtimeInfo():RuntimeInfo{return {apiBase:getApiBase(),wsBase:getWsBase(),config:getRuntimeConfig()}}

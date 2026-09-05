@@ -13,9 +13,10 @@ from typing import Any
 from sqlalchemy import func, select
 
 from app.core.config import get_settings
+from app.services.active_ollama_model_service import BASE_MODEL_NAME, resolve_active_ollama_model
 from app.core.database import SessionLocal
 from app.core.machine_identity import current_pc_name
-from app.models.learning_entities import LlmLearningDataset, LlmMisjudgmentCase
+from app.models.learning_entities import LlmLearningDataset, LlmLearningProblem, LlmMisjudgmentCase
 from app.services.llm_provider import get_chat_model
 from app.services.llm_usage_service import UsageTrackedChatModel, llm_history_log_path
 
@@ -114,7 +115,9 @@ def _case_dict(row: LlmMisjudgmentCase) -> dict:
     }
 
 
-def _dataset_dict(row: LlmLearningDataset) -> dict:
+def _dataset_dict(row: LlmLearningDataset, problems: list[dict] | None = None) -> dict:
+    resolved_problems = list(problems if problems is not None else (row.problems_json or []))
+    resolved_count = len([item for item in resolved_problems if isinstance(item, dict)])
     return {
         "id": row.id,
         "created_at": row.created_at.isoformat() if row.created_at else "",
@@ -128,14 +131,138 @@ def _dataset_dict(row: LlmLearningDataset) -> dict:
         "source_model": row.source_model,
         "scope": row.scope_json or {},
         "target_count": row.target_count,
-        "problem_count": row.problem_count,
-        "problems": row.problems_json or [],
+        "problem_count": resolved_count or int(row.problem_count or 0),
+        "problems": resolved_problems,
         "validation": row.validation_json or {},
         "split": row.split_json or {},
         "training": row.training_json or {},
         "evaluation": row.evaluation_json or {},
         "deployment": row.deployment_json or {},
     }
+
+
+def _normalized_problem_dict(row: LlmLearningProblem) -> dict:
+    return {
+        # problem_key is the stable logical ID used by legacy validation/UI. The DB row
+        # id remains available for diagnostics without changing the public contract.
+        "id": str(row.problem_key or row.id),
+        "db_id": str(row.id),
+        "source_case_id": str(row.source_case_id or ""),
+        "instruction": str(row.instruction or ""),
+        "input": str(row.input_text or ""),
+        "output": str(row.output_text or ""),
+        "domain": str(row.domain or ""),
+        "topic": str(row.topic or ""),
+        "subtopic": str(row.subtopic or ""),
+        "difficulty": str(row.difficulty or "medium"),
+        "problem_type": str(row.problem_type or "scenario"),
+        "validated": bool(row.validated),
+    }
+
+
+def _legacy_problem_key(problem: dict, index: int) -> str:
+    value = str(problem.get("id") or problem.get("problem_key") or "").strip()
+    return value or f"legacy-{index + 1}"
+
+
+async def ensure_dataset_problem_storage(dataset_id: str) -> dict:
+    """Reconcile legacy Dataset JSON and normalized problem rows for one Dataset.
+
+    v5.439 makes the relational ``llm_learning_problems`` rows authoritative for reads,
+    while keeping ``problems_json`` populated for older training/validation code. A
+    collection job is only considered complete after this reconciliation succeeds.
+    """
+    async with SessionLocal() as session:
+        dataset = await session.get(LlmLearningDataset, str(dataset_id or ""))
+        if dataset is None:
+            raise KeyError("Dataset을 찾을 수 없습니다.")
+
+        normalized = (
+            await session.execute(
+                select(LlmLearningProblem)
+                .where(LlmLearningProblem.dataset_id == dataset.id)
+                .order_by(LlmLearningProblem.created_at.asc(), LlmLearningProblem.id.asc())
+            )
+        ).scalars().all()
+        legacy = [item for item in list(dataset.problems_json or []) if isinstance(item, dict)]
+        changed = False
+
+        if legacy:
+            existing_keys = {str(row.problem_key or "") for row in normalized}
+            for index, problem in enumerate(legacy):
+                problem_key = _legacy_problem_key(problem, index)
+                if problem_key in existing_keys:
+                    continue
+                row = LlmLearningProblem(
+                    id=uuid.uuid4().hex,
+                    dataset_id=dataset.id,
+                    group_id=str(getattr(dataset, "group_id", "") or ""),
+                    source_case_id=str(dataset.source_case_id or ""),
+                    problem_key=problem_key,
+                    instruction=str(problem.get("instruction") or ""),
+                    input_text=str(problem.get("input") or ""),
+                    output_text=str(problem.get("output") or ""),
+                    domain=str(problem.get("domain") or (dataset.scope_json or {}).get("domain") or ""),
+                    topic=str(problem.get("topic") or (dataset.scope_json or {}).get("topic") or ""),
+                    subtopic=str(problem.get("subtopic") or ""),
+                    difficulty=str(problem.get("difficulty") or "medium"),
+                    problem_type=str(problem.get("problem_type") or "scenario"),
+                    validated=bool(problem.get("validated")),
+                )
+                session.add(row)
+                normalized.append(row)
+                existing_keys.add(problem_key)
+                changed = True
+            if changed:
+                await session.flush()
+
+        if normalized:
+            hydrated = [_normalized_problem_dict(row) for row in normalized]
+            # Keep the legacy JSON mirror alive because validation/curriculum paths from
+            # older projects still read it. Do not allow a normalized-only Dataset to
+            # look empty in the UI.
+            legacy_keys = {_legacy_problem_key(item, index) for index, item in enumerate(legacy)}
+            normalized_keys = {str(item.get("id") or "") for item in hydrated}
+            if not legacy or legacy_keys != normalized_keys or len(legacy) != len(hydrated):
+                dataset.problems_json = hydrated
+                changed = True
+            if int(dataset.problem_count or 0) != len(hydrated):
+                dataset.problem_count = len(hydrated)
+                changed = True
+            validation = dict(dataset.validation_json or {})
+            if str(dataset.status or "") == "review":
+                approved = sum(1 for item in hydrated if bool(item.get("validated")))
+                expected = {"approved": approved, "rejected": 0, "pending": max(0, len(hydrated) - approved)}
+                if any(int(validation.get(key) or 0) != value for key, value in expected.items()):
+                    validation.update(expected)
+                    dataset.validation_json = validation
+                    changed = True
+            if changed:
+                dataset.updated_by_pc_name = current_pc_name()
+                await session.commit()
+                await session.refresh(dataset)
+            return {
+                "ok": True,
+                "dataset": _dataset_dict(dataset, hydrated),
+                "problem_count": len(hydrated),
+                "problem_storage": "relational+legacy_mirror",
+                "reconciled": changed,
+            }
+
+        # A Dataset with no problem rows and no JSON is genuinely empty. Returning this
+        # explicitly lets the job fail instead of announcing a false successful collection.
+        if int(dataset.problem_count or 0) != 0:
+            dataset.problem_count = 0
+            dataset.updated_by_pc_name = current_pc_name()
+            await session.commit()
+            await session.refresh(dataset)
+        return {
+            "ok": True,
+            "dataset": _dataset_dict(dataset, []),
+            "problem_count": 0,
+            "problem_storage": "empty",
+            "reconciled": changed,
+        }
 
 
 async def sync_misjudgment_candidates() -> dict:
@@ -405,12 +532,59 @@ async def generate_problem_dataset(case_id: str, target_count: int = 100, provid
 
 
 async def list_datasets() -> dict:
+    """Fast, read-only shared Dataset list.
+
+    v5.445 no longer runs one repair transaction per Dataset whenever the Learning
+    Center is opened.  Relational/legacy reconciliation already runs at AgentStudio
+    startup and immediately after Dataset creation, so normal list reads can load all
+    Dataset/problem rows in two bulk queries.
+    """
     async with SessionLocal() as session:
-        rows = (await session.execute(select(LlmLearningDataset).order_by(LlmLearningDataset.updated_at.desc()))).scalars().all()
-    return {"ok": True, "items": [_dataset_dict(row) for row in rows], "total": len(rows), "storage": "runtime_db_shared"}
+        dataset_rows = (
+            await session.execute(
+                select(LlmLearningDataset).order_by(LlmLearningDataset.updated_at.desc())
+            )
+        ).scalars().all()
+        problem_rows = (
+            await session.execute(
+                select(LlmLearningProblem).order_by(
+                    LlmLearningProblem.dataset_id.asc(),
+                    LlmLearningProblem.created_at.asc(),
+                    LlmLearningProblem.id.asc(),
+                )
+            )
+        ).scalars().all()
+
+    problems_by_dataset: dict[str, list[dict]] = {}
+    for problem in problem_rows:
+        problems_by_dataset.setdefault(str(problem.dataset_id), []).append(_normalized_problem_dict(problem))
+
+    items: list[dict] = []
+    empty = 0
+    for dataset in dataset_rows:
+        normalized = problems_by_dataset.get(str(dataset.id), [])
+        # Relational rows are authoritative when present. Legacy JSON remains a safe
+        # fallback for a Dataset created by an older process before startup repair.
+        resolved = normalized if normalized else [item for item in list(dataset.problems_json or []) if isinstance(item, dict)]
+        item = _dataset_dict(dataset, resolved)
+        items.append(item)
+        empty += int(int(item.get("problem_count") or 0) <= 0)
+
+    return {
+        "ok": True,
+        "items": items,
+        "total": len(items),
+        "storage": "runtime_db_shared",
+        "problem_storage": "relational_authoritative_with_legacy_mirror",
+        "repaired_dataset_count": 0,
+        "empty_dataset_count": empty,
+        "read_mode": "bulk_read_only",
+        "repair_policy": "startup_and_dataset_write_path",
+    }
 
 
 async def validate_dataset(dataset_id: str, approved_problem_ids: list[str] | None = None) -> dict:
+    await ensure_dataset_problem_storage(dataset_id)
     async with SessionLocal() as session:
         dataset = await session.get(LlmLearningDataset, dataset_id)
         if not dataset:
@@ -423,6 +597,13 @@ async def validate_dataset(dataset_id: str, approved_problem_ids: list[str] | No
             approved += int(bool(problem["validated"]))
         if approved < 10:
             raise ValueError("검증 완료 문제는 최소 10개 이상이어야 합니다.")
+        normalized_rows = (
+            await session.execute(
+                select(LlmLearningProblem).where(LlmLearningProblem.dataset_id == dataset.id)
+            )
+        ).scalars().all()
+        for row in normalized_rows:
+            row.validated = str(row.problem_key or row.id) in approved_set
         dataset.problems_json = problems
         dataset.status = "validated"
         dataset.validation_json = {"approved": approved, "rejected": len(problems) - approved, "pending": 0}
@@ -457,8 +638,8 @@ async def prepare_training(dataset_id: str, base_model: str = "") -> dict:
             with (out / f"{name}.jsonl").open("w", encoding="utf-8") as handle:
                 for item in rows:
                     handle.write(json.dumps({"instruction": item["instruction"], "input": item.get("input", ""), "output": item["output"]}, ensure_ascii=False) + "\n")
-        selected_base = str(base_model or settings.ollama_model or "qwen2.5:7b")
-        hf_base = {"qwen2.5:7b": "Qwen/Qwen2.5-7B-Instruct", "qwen2.5:3b": "Qwen/Qwen2.5-3B-Instruct", "qwen2.5:1.5b": "Qwen/Qwen2.5-1.5B-Instruct"}.get(selected_base.lower(), selected_base)
+        selected_base = str(base_model or BASE_MODEL_NAME)
+        hf_base = {BASE_MODEL_NAME.casefold(): "Qwen/Qwen3.5-4B"}.get(selected_base.casefold(), selected_base)
         manifest = {
             "dataset_id": dataset_id,
             "prepared_by_pc_name": current_pc_name(),
@@ -520,7 +701,7 @@ async def apply_to_ollama(dataset_id: str, model_name: str, adapter_path: str = 
         adapter = Path(adapter_path or training.get("adapter_dir") or "")
         if not adapter.exists():
             raise ValueError("학습 Adapter 경로가 이 PC에 존재하지 않습니다. Dataset은 공용이지만 학습 산출물은 PC 로컬 파일입니다.")
-        base_model = str(training.get("ollama_base_model") or get_settings().ollama_model)
+        base_model = str(training.get("ollama_base_model") or BASE_MODEL_NAME)
         deployment = await asyncio.to_thread(_apply_ollama_local, base_model, adapter, model_name, dataset_id)
         dataset.status = "deployed"
         dataset.deployment_json = deployment
@@ -530,7 +711,8 @@ async def apply_to_ollama(dataset_id: str, model_name: str, adapter_path: str = 
 
 
 async def learning_summary() -> dict:
-    await sync_misjudgment_candidates()
+    # v5.445: summary GET is read-only. History -> misjudgment synchronization runs at
+    # AgentStudio startup and only when the operator presses `오판 수집`.
     async with SessionLocal() as session:
         case_counts = {}
         for status in _ALLOWED_CASE_STATUS:
@@ -539,11 +721,12 @@ async def learning_summary() -> dict:
         for status in _ALLOWED_DATASET_STATUS:
             dataset_counts[status] = int((await session.execute(select(func.count()).select_from(LlmLearningDataset).where(LlmLearningDataset.status == status))).scalar() or 0)
     settings = get_settings()
+    active_ollama = await resolve_active_ollama_model()
     return {
         "ok": True,
         "cases": case_counts,
         "datasets": dataset_counts,
-        "current_ollama_model": settings.ollama_model,
+        "current_ollama_model": str(active_ollama.get("active_model") or BASE_MODEL_NAME),
         "current_strategy": settings.ai_provider_strategy,
         "storage": "runtime_db_shared",
         "shared_across_pcs": True,

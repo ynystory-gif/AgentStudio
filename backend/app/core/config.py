@@ -2,13 +2,21 @@ from functools import lru_cache
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = BACKEND_ROOT.parent
+PROJECT_ENV_PATH = PROJECT_ROOT / ".env"
+BACKEND_ENV_PATH = BACKEND_ROOT / ".env"
+
 class Settings(BaseSettings):
     app_name: str = "THEANOVA AgentStudio"
     app_env: str = "development"
     agentstudio_pc_name: str = ""
     agentstudio_system_host_name: str = ""
-    database_url: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/theanova_agentstudio"
-    langgraph_database_url: str = "postgresql://postgres:postgres@127.0.0.1:5432/theanova_agentstudio"
+    agentstudio_backend_port: int = 0
+    agentstudio_frontend_port: int = 0
+    # DB credentials must come from user-managed .env files. Never fall back to a hard-coded account/password.
+    database_url: str = ""
+    langgraph_database_url: str = ""
     # v5.284: local PostgreSQL remains the bootstrap/control DB. Supabase is optional after schema verification.
     local_database_url: str = ""
     local_langgraph_database_url: str = ""
@@ -25,7 +33,7 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
 
     ollama_base_url: str = "http://127.0.0.1:11434"
-    ollama_model: str = "qwen2.5:7b"
+    ollama_model: str = "qwen3.5:4b"
     ollama_embedding_model: str = "nomic-embed-text"
     ollama_auto_start: bool = True
 
@@ -70,25 +78,41 @@ class Settings(BaseSettings):
     weather_location: str = ""
     weather_extra_locations: str = ""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_file=str(PROJECT_ENV_PATH),
+        extra="ignore",
+        case_sensitive=False,
+    )
 
     @property
     def project_roots(self) -> list[str]:
         return [x.strip() for x in self.allowed_project_roots.split(";") if x.strip()]
 
-def _read_backend_env_overrides() -> dict:
-    """
-    AgentStudio bootstrap 설정은 backend/.env를 최종 기준으로 사용합니다.
-
-    Windows 부모 프로세스에 오래된 DATABASE_URL 등이 남아 있으면 Pydantic의
-    기본 우선순위(OS 환경변수 > .env) 때문에 시스템 관리 화면에서 저장한 값이
-    재시작 후에도 적용되지 않을 수 있습니다. DB 접속에 필요한 bootstrap 값만
-    명시적 init 값으로 전달해 backend/.env가 확실히 우선하도록 합니다.
-    """
-    env_path = Path(__file__).resolve().parents[2] / ".env"
-    if not env_path.exists():
+def _parse_env_file(path: Path) -> dict[str, str]:
+    if not path.exists():
         return {}
+    found: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in raw_line:
+            continue
+        key, value = raw_line.split("=", 1)
+        found[key.strip()] = value.strip()
+    return found
 
+
+def _read_agentstudio_env_overrides() -> dict:
+    """
+    Read AgentStudio bootstrap settings from user-managed .env files.
+
+    Priority:
+    1. project-root/.env for all database connection settings (authoritative)
+    2. backend/.env only as a legacy fallback for non-database bootstrap settings
+
+    Explicit init values are used so stale Windows parent-process environment variables
+    cannot override the .env values selected by the user. No database credential is
+    synthesized in code.
+    """
     mapping = {
         "AGENTSTUDIO_PC_NAME": "agentstudio_pc_name",
         "AGENTSTUDIO_SYSTEM_HOST_NAME": "agentstudio_system_host_name",
@@ -101,20 +125,31 @@ def _read_backend_env_overrides() -> dict:
         "SUPABASE_LANGGRAPH_DATABASE_URL": "supabase_langgraph_database_url",
         "SUPABASE_DB_SCHEMA": "supabase_db_schema",
         "POSTGRESQL18_ROOT": "postgresql18_root",
+        "AGENTSTUDIO_BACKEND_PORT": "agentstudio_backend_port",
+        "AGENTSTUDIO_FRONTEND_PORT": "agentstudio_frontend_port",
     }
-    found = {}
-    for raw_line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in raw_line:
-            continue
-        key, value = raw_line.split("=", 1)
-        key = key.strip()
-        field = mapping.get(key)
-        if field:
-            found[field] = value.strip()
-    return found
+    project_values = _parse_env_file(PROJECT_ENV_PATH)
+    legacy_values = _parse_env_file(BACKEND_ENV_PATH)
+
+    # Database credentials are root-.env-only. A stale backend/.env must never
+    # resurrect historical postgres/postgres (or any other) connection settings.
+    root_only_database_keys = {
+        "DATABASE_URL",
+        "LANGGRAPH_DATABASE_URL",
+        "AGENTSTUDIO_LOCAL_DATABASE_URL",
+        "AGENTSTUDIO_LOCAL_LANGGRAPH_DATABASE_URL",
+        "SUPABASE_DATABASE_URL",
+        "SUPABASE_LANGGRAPH_DATABASE_URL",
+    }
+
+    merged: dict[str, str] = {}
+    for key, value in legacy_values.items():
+        if key not in root_only_database_keys:
+            merged[key] = value
+    merged.update(project_values)
+    return {field: merged[key] for key, field in mapping.items() if key in merged}
 
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings(**_read_backend_env_overrides())
+    return Settings(**_read_agentstudio_env_overrides())

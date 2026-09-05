@@ -24,7 +24,7 @@ from sqlalchemy import select
 from app.core.database import SessionLocal
 from app.core.machine_identity import current_pc_name
 from app.models.learning_entities import LlmLearningDataset, LlmLearningPcApplication, LlmLearningProblem
-from app.services.learning_relational_schema_service import ensure_learning_relational_schema
+from app.services.learning_relational_schema_service import assert_learning_relational_schema_ready
 from app.services.learning_visibility_bridge import backfill_current_pc_learning_group_mappings
 from app.services.ollama_model_manager_service import get_recommended_model_status, persist_current_ollama_model
 
@@ -134,7 +134,7 @@ def _problem_fingerprint(instruction: str, input_text: str, output_text: str) ->
 
 
 async def _validated_training_rows() -> tuple[list[dict], list[LlmLearningDataset]]:
-    await ensure_learning_relational_schema()
+    await assert_learning_relational_schema_ready()
     async with SessionLocal() as session:
         datasets = (
             await session.execute(

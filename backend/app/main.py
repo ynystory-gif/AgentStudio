@@ -1,6 +1,10 @@
 import asyncio
 import sys
 
+# v5.493: apply saved path roots before optional ML/browser imports.
+from app.services.runtime_path_policy import bootstrap_runtime_paths_from_env_file, apply_runtime_path_policy
+bootstrap_runtime_paths_from_env_file()
+
 # Windows + psycopg async requires SelectorEventLoop.
 if sys.platform == "win32":
     try:
@@ -34,15 +38,20 @@ from app.api.learning_routes import router as learning_router
 from app.api.learning_full_apply_routes import router as learning_full_apply_router
 from app.api.ui_theme_dynamic_routes import router as ui_theme_dynamic_router
 from app.api.scheduler_routes import router as scheduler_router
+from app.api.media_workflow_routes import router as media_workflow_router
 from app.api.auth_routes import router as auth_router
+from app.api.account_settings_routes import router as account_settings_router
+from app.api.rag_routes import router as rag_router
 from app.services.langgraph_runtime import agent_graph_runtime
 from app.services.mcp_registry import mcp_registry_monitor
 from app.services.settings_service import migrate_env_settings_to_db, load_db_settings_into_runtime, register_current_machine, resolve_pending_machine_name
 from app.core.machine_identity import ensure_pc_name_env, current_pc_name
 from app.services.project_root_registry import restore_registered_project_roots
 from app.services.llm_usage_service import prune_llm_history
+from app.services.active_ollama_model_service import sync_active_ollama_model
 from app.services.llm_learning_service import sync_misjudgment_candidates
 from app.services.learning_visibility_bridge import backfill_current_pc_learning_group_mappings
+from app.services.learning_relational_schema_service import ensure_learning_relational_schema
 from app.services.auth_service import authenticate_token
 from app.services.database_runtime_service import apply_saved_database_provider
 from app.services.chromium_browser_service import chromium_browser_manager
@@ -63,8 +72,21 @@ async def lifespan(app: FastAPI):
         print(f"[완료되었습니다] DB 스키마 보정: {schema_migration.get('count', 0)}개")
         migration = await migrate_env_settings_to_db()
         runtime = await load_db_settings_into_runtime()
+        runtime_paths = apply_runtime_path_policy()
+        print(f"[완료되었습니다] Runtime 경로 적용: Temp={runtime_paths.get('temp_root', '')} · Cache={runtime_paths.get('cache_root', '')} · Output={runtime_paths.get('output_root', '')}")
         runtime_db = await apply_saved_database_provider()
         runtime_metadata = await ensure_runtime_metadata_tables()
+        runtime_pk_renames = list(runtime_metadata.get("precreate_pk_renames") or [])
+        if runtime_pk_renames:
+            print(
+                "[완료되었습니다] Runtime RAG PK 사전 보정: "
+                f"{len(runtime_pk_renames)}개 · create_all 이전 적용"
+            )
+        active_ollama = await sync_active_ollama_model()
+        print(
+            "[완료되었습니다] Active Ollama 모델 동기화: "
+            f"{active_ollama.get('active_model', '')} · reason={active_ollama.get('reason', '')}"
+        )
         print("[완료되었습니다] PostgreSQL/pgvector 초기화")
         print(f"[완료되었습니다] Runtime ORM 테이블 확인: {runtime_metadata.get('table_count', 0)}개 · schema={runtime_metadata.get('schema', '')}")
         print(f"[완료되었습니다] Runtime DB: {runtime_db.get('active_provider', 'local')} · {runtime_db.get('target', '')}")
@@ -85,6 +107,12 @@ async def lifespan(app: FastAPI):
         try:
             history_prune = prune_llm_history(force=True)
             print(f"[완료되었습니다] LLM 요청/응답 10일 보관 정리: 삭제 {history_prune.get('removed', 0)}개")
+            learning_schema = await ensure_learning_relational_schema()
+            print(
+                "[완료되었습니다] LLM 학습 관계형 스키마/문제 행 보정: "
+                f"문제 {learning_schema.get('created_problem_row_count', 0)}개 · "
+                f"Dataset 연결 {learning_schema.get('linked_dataset_count', 0)}개"
+            )
             learning_sync = await sync_misjudgment_candidates()
             print(f"[완료되었습니다] LLM 오판 학습 후보 공용 DB 동기화: 신규 {learning_sync.get('added', 0)}개 · 전체 {learning_sync.get('total', 0)}개")
             mapping_backfill = await backfill_current_pc_learning_group_mappings()
@@ -128,7 +156,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.435", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.600", lifespan=lifespan)
 
 _PUBLIC_API_PATHS = {
     "/api/health",
@@ -171,10 +199,7 @@ async def _agentstudio_auth_guard(request: Request, call_next):
 # of Starlette's middleware list, so register CORS after the auth guard.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:5173", "http://localhost:5173",
-        "http://127.0.0.1:5174", "http://localhost:5174",
-    ],
+    allow_origins=[],
     allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost):\d+$",
     allow_credentials=True,
     allow_methods=["*"],
@@ -193,12 +218,15 @@ async def _agentstudio_startup_probe():
         f.write(f"[{datetime.now().isoformat()}] AgentStudio Backend startup completed\n")
 
 app.include_router(auth_router, prefix="/api")
+app.include_router(account_settings_router, prefix="/api")
 app.include_router(router, prefix="/api")
 app.include_router(learning_diagnostics_router, prefix="/api")
 app.include_router(learning_router, prefix="/api")
 app.include_router(learning_full_apply_router, prefix="/api")
 app.include_router(ui_theme_dynamic_router, prefix="/api")
 app.include_router(scheduler_router, prefix="/api")
+app.include_router(media_workflow_router, prefix="/api")
+app.include_router(rag_router, prefix="/api")
 
 from app.api.terminal_ws import router as terminal_ws_router
 app.include_router(terminal_ws_router)

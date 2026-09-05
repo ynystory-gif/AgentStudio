@@ -21,6 +21,9 @@ from app.models.entities import AppSetting
 
 LATEST_RECOMMENDED_MODEL = "qwen3.5:4b"
 _MODEL_JOBS: dict[str, dict] = {}
+_MODEL_STATUS_CACHE: dict = {}
+_MODEL_STATUS_CACHE_AT: float = 0.0
+_MODEL_STATUS_TTL_SECONDS = 600.0
 
 
 def _candidate_ollama_executables() -> list[str]:
@@ -209,15 +212,49 @@ def _verify_model_sync(ollama_exe: str, env: dict[str, str]) -> str:
     return output
 
 
-async def get_recommended_model_status() -> dict:
+async def get_recommended_model_status(force_refresh: bool = False) -> dict:
+    """Return the recommended-model status with a short per-process cache.
+
+    The installed/current model and common model root are configuration-like values, not
+    live training telemetry. v5.445 therefore reuses the last successful check for ten
+    minutes instead of re-reading settings and scanning Ollama executable paths on every
+    Learning Center navigation. A model apply/download invalidates this cache.
+    """
+    global _MODEL_STATUS_CACHE, _MODEL_STATUS_CACHE_AT
+    now = time.monotonic()
+    if (
+        not force_refresh
+        and _MODEL_STATUS_CACHE
+        and now - _MODEL_STATUS_CACHE_AT < _MODEL_STATUS_TTL_SECONDS
+    ):
+        cached = dict(_MODEL_STATUS_CACHE)
+        cached["cache_hit"] = True
+        cached["cache_ttl_seconds"] = int(_MODEL_STATUS_TTL_SECONDS)
+        return cached
+
     settings = get_settings()
     common_root = await _pc_setting("COMMON_MODELS_ROOT") or str(os.environ.get("COMMON_MODELS_ROOT", "") or "").strip() or str(settings.common_models_root or "").strip()
     current_model = await _pc_setting("OLLAMA_MODEL") or str(os.environ.get("OLLAMA_MODEL", "") or "").strip() or str(settings.ollama_model or "").strip()
     ollama_exe = next(iter(_candidate_ollama_executables()), "")
-    return {"ok": True, "recommended_model": LATEST_RECOMMENDED_MODEL, "current_model": current_model, "common_models_root": common_root, "ollama_executable": ollama_exe, "ready": bool(common_root and ollama_exe), "pc_name": current_pc_name()}
+    result = {
+        "ok": True,
+        "recommended_model": LATEST_RECOMMENDED_MODEL,
+        "current_model": current_model,
+        "common_models_root": common_root,
+        "ollama_executable": ollama_exe,
+        "ready": bool(common_root and ollama_exe),
+        "pc_name": current_pc_name(),
+        "cache_hit": False,
+        "cache_ttl_seconds": int(_MODEL_STATUS_TTL_SECONDS),
+        "latest_model_already_selected": current_model.strip().lower() == LATEST_RECOMMENDED_MODEL.lower(),
+    }
+    _MODEL_STATUS_CACHE = dict(result)
+    _MODEL_STATUS_CACHE_AT = now
+    return result
 
 
 async def persist_current_ollama_model(model_name: str, common_root: str = "") -> None:
+    global _MODEL_STATUS_CACHE, _MODEL_STATUS_CACHE_AT
     model = str(model_name or "").strip()
     if not model:
         raise ValueError("적용할 Ollama 모델 이름이 없습니다.")
@@ -233,6 +270,13 @@ async def persist_current_ollama_model(model_name: str, common_root: str = "") -
         os.environ["COMMON_MODELS_ROOT"] = root
         os.environ["OLLAMA_MODELS"] = root
     get_settings.cache_clear()
+    _MODEL_STATUS_CACHE = {}
+    _MODEL_STATUS_CACHE_AT = 0.0
+    try:
+        from app.services.active_ollama_model_service import invalidate_active_ollama_model_cache
+        invalidate_active_ollama_model_cache()
+    except Exception:
+        pass
 
 
 async def _run_download_job(job_id: str, status: dict) -> None:
@@ -259,7 +303,7 @@ async def _run_download_job(job_id: str, status: dict) -> None:
 
 
 async def start_recommended_model_job() -> dict:
-    status = await get_recommended_model_status()
+    status = await get_recommended_model_status(force_refresh=True)
     if not str(status.get("common_models_root") or "").strip():
         raise ValueError("공통 모델 관리 경로(COMMON_MODELS_ROOT)가 설정되어 있지 않습니다. 시스템 관리에서 공통 모델 경로를 먼저 저장하세요.")
     if not str(status.get("ollama_executable") or "").strip():

@@ -3,7 +3,7 @@ import base64, hashlib, hmac, os, platform, secrets, socket, uuid
 from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from app.core.database import SessionLocal
-from app.core.machine_identity import current_pc_name
+from app.core.machine_identity import current_pc_name, detect_system_pc_name
 from app.models.auth_entities import AgentStudioAuthSession, AgentStudioMember, AgentStudioMemberPc
 from app.models.entities import AgentStudioMachine
 
@@ -47,6 +47,30 @@ async def _ensure_machine_row(session, pc_name:str)->AgentStudioMachine:
         if not str(machine.os_name or '').strip(): machine.os_name=platform.platform()
     return machine
 
+
+async def _reconcile_current_pc_alias(session, member_id: str, pcs: list[str]) -> list[str]:
+    """Repair the v5.511/v5.512 machine-identity split without bypassing PC security.
+
+    Those releases could read the physical Windows host name from backend/.env logic
+    while the authoritative project-root .env already contained a user-managed
+    AGENTSTUDIO_PC_NAME.  If this member is already registered to this exact physical
+    host, add the configured AgentStudio PC alias as the same machine.  No unrelated
+    unregistered PC is auto-approved.
+    """
+    configured = current_pc_name()
+    physical = detect_system_pc_name()
+    normalized = {str(x or '').strip() for x in pcs if str(x or '').strip()}
+    if not configured or configured in normalized or not physical or physical not in normalized:
+        return sorted(normalized)
+    await _ensure_machine_row(session, configured)
+    existing=(await session.execute(select(AgentStudioMemberPc).where(AgentStudioMemberPc.member_id==member_id,AgentStudioMemberPc.pc_name==configured))).scalar_one_or_none()
+    if not existing:
+        session.add(AgentStudioMemberPc(id=uuid.uuid4().hex,member_id=member_id,pc_name=configured,can_manage=True))
+        await session.flush()
+    normalized.add(configured)
+    print(f"[AUTH] PC 이름 설정 전환 자동 보정: physical={physical} -> configured={configured}")
+    return sorted(normalized)
+
 async def register_member(payload:dict)->dict:
     login_id=str(payload.get('login_id') or '').strip()
     name=str(payload.get('name') or '').strip();email=str(payload.get('email') or '').strip().lower()
@@ -67,10 +91,24 @@ async def register_member(payload:dict)->dict:
 
 async def login(login_id:str,password:str,remember_me:bool)->dict:
     async with SessionLocal() as s:
-        row=(await s.execute(select(AgentStudioMember).where(AgentStudioMember.login_id==login_id.strip()))).scalar_one_or_none()
-        if not row or not row.is_active or not _verify_password(password,row.password_hash): raise ValueError('아이디 또는 비밀번호가 올바르지 않습니다.')
+        normalized_login_id=login_id.strip()
+        row=(await s.execute(select(AgentStudioMember).where(AgentStudioMember.login_id==normalized_login_id))).scalar_one_or_none()
+        if not row:
+            from app.services.database_runtime_service import runtime_status
+            status=await runtime_status()
+            print(f"[AUTH] 로그인 계정 없음: provider={status.get('active_provider','')} target={status.get('supabase_target') if status.get('active_provider')=='supabase' else status.get('local_target')} login_id={normalized_login_id}")
+            raise ValueError('아이디 또는 비밀번호가 올바르지 않습니다.')
+        if not row.is_active:
+            print(f"[AUTH] 비활성 계정 로그인 거부: login_id={normalized_login_id}")
+            raise ValueError('아이디 또는 비밀번호가 올바르지 않습니다.')
+        if not _verify_password(password,row.password_hash):
+            from app.services.database_runtime_service import runtime_status
+            status=await runtime_status()
+            print(f"[AUTH] 비밀번호 불일치: provider={status.get('active_provider','')} target={status.get('supabase_target') if status.get('active_provider')=='supabase' else status.get('local_target')} login_id={normalized_login_id}")
+            raise ValueError('아이디 또는 비밀번호가 올바르지 않습니다.')
         pc=current_pc_name()
         pcs=list((await s.execute(select(AgentStudioMemberPc.pc_name).where(AgentStudioMemberPc.member_id==row.id))).scalars().all())
+        pcs=await _reconcile_current_pc_alias(s,row.id,pcs)
         token=secrets.token_urlsafe(48);expires=datetime.utcnow()+timedelta(days=REMEMBER_DAYS) if remember_me else datetime.utcnow()+timedelta(hours=SESSION_HOURS)
         s.add(AgentStudioAuthSession(id=uuid.uuid4().hex,member_id=row.id,token_hash=_token_hash(token),remember_me=remember_me,expires_at=expires))
         await s.commit();return {'ok':True,'token':token,'remember_me':remember_me,'expires_at':expires.isoformat(),'member':_member(row,pcs),'current_pc_name':pc,'current_pc_registered':pc in pcs}
@@ -82,7 +120,7 @@ async def authenticate_token(token:str)->dict|None:
         if not session or session.expires_at<=datetime.utcnow():return None
         row=await s.get(AgentStudioMember,session.member_id)
         if not row or not row.is_active:return None
-        session.last_used_at=datetime.utcnow();pcs=list((await s.execute(select(AgentStudioMemberPc.pc_name).where(AgentStudioMemberPc.member_id==row.id))).scalars().all());await s.commit()
+        session.last_used_at=datetime.utcnow();pcs=list((await s.execute(select(AgentStudioMemberPc.pc_name).where(AgentStudioMemberPc.member_id==row.id))).scalars().all());pcs=await _reconcile_current_pc_alias(s,row.id,pcs);await s.commit()
         return _member(row,pcs)
 
 async def current_pc_status(member_id:str)->dict:

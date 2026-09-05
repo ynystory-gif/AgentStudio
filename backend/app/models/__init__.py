@@ -10,3 +10,36 @@ from app.models.auth_entities import (  # noqa: F401
     AgentStudioMember,
     AgentStudioMemberPc,
 )
+
+from app.models.rag_entities import (  # noqa: F401
+    RagStudioSetting,
+    RagCollection,
+    RagSource,
+    RagCollectionSource,
+    RagDocument,
+    RagChunk,
+    RagEmbedding,
+    RagIndexJob,
+    RagRetrievalSetting,
+    RagSearchLog,
+    RagIntelligenceSetting,
+    RagRecommendationRun,
+    RagAgentTool,
+    RagWorkflowBinding,
+    RagAgentTestLog,
+    RagSourceOperationSetting,
+    RagSyncJob,
+    RagDocumentVersion,
+    RagDocumentSecurity,
+    RagAccessRule,
+    RagSearchAuditLog,
+    RagEvaluationCase,
+    RagEvaluationRun,
+)
+
+from app.models.account_setting_entities import (  # noqa: F401
+    AccountDatabaseProfile,
+    AccountSettingProfile,
+    AccountProjectSetting,
+    ProjectSettingHistory,
+)

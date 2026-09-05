@@ -31,7 +31,7 @@ export function LearningModelStackEnhancer() {
         node.style.display = 'flex'
         node.style.flexDirection = 'column'
         node.style.gap = '3px'
-        node.innerHTML = '<small>자동 학습 모델 구성</small><strong></strong><em style="font-style:normal;opacity:.72;font-size:11px"></em>'
+        node.innerHTML = '<small>자동 학습 모델 구성</small><strong></strong><em style="font-style:normal;opacity:.72;font-size:13px"></em>'
         const button = modelPanel.querySelector('button')
         if (button) modelPanel.insertBefore(node, button)
         else modelPanel.appendChild(node)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.core.config import get_settings
+from app.services.active_ollama_model_service import current_runtime_ollama_model
 from app.services.model_router import LLMTask, provider_for, provider_candidates_for
 
 
@@ -144,7 +145,7 @@ def build_llm_catalog() -> dict:
     for task in LLMTask:
         provider = provider_for(task)
         candidates = provider_candidates_for(task)
-        model = s.openai_model if provider == "openai" else ("ChatGPT Codex" if provider == "codex" else s.ollama_model)
+        model = s.openai_model if provider == "openai" else ("ChatGPT Codex" if provider == "codex" else current_runtime_ollama_model())
         route = _route_for_provider(provider, model, s.ollama_base_url)
         body = dict(route["body_template"])
         if provider == "codex":
@@ -186,7 +187,7 @@ def build_llm_catalog() -> dict:
             "requirements_llm_provider": s.requirements_llm_provider,
             "coding_llm_provider": s.coding_llm_provider,
             "openai_model": s.openai_model,
-            "ollama_model": s.ollama_model,
+            "ollama_model": current_runtime_ollama_model(),
             "ollama_base_url": s.ollama_base_url,
         },
         "items": items,

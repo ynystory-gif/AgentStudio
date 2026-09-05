@@ -27,7 +27,7 @@ export function LearningProblemProgressEnhancer(){
       if(!panel){
         panel=document.createElement('div')
         panel.className='llm-problem-live-detail'
-        panel.style.cssText='display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:9px;padding:9px 10px;border:1px solid #303846;border-radius:7px;background:#111821;font-size:12px;'
+        panel.style.cssText='display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:9px;padding:9px 10px;border:1px solid #303846;border-radius:7px;background:#111821;font-size:13px;'
         root.appendChild(panel)
       }
       const items=[

@@ -4,9 +4,23 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 
-const host = process.env.AGENTSTUDIO_FRONTEND_HOST || '127.0.0.1'
-const port = Number(process.env.AGENTSTUDIO_FRONTEND_PORT || 5173)
 const frontendDir = path.dirname(fileURLToPath(import.meta.url))
+const projectRoot = path.resolve(frontendDir, '..')
+
+function readRootEnvValue(key: string): string {
+  const envPath = path.join(projectRoot, '.env')
+  if (!fs.existsSync(envPath)) return ''
+  const prefix = `${key}=`
+  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/)
+  const match = lines.filter((line) => line.trimStart().startsWith(prefix)).at(-1)
+  return match ? match.slice(match.indexOf('=') + 1).trim() : ''
+}
+
+const host = process.env.AGENTSTUDIO_FRONTEND_HOST || '127.0.0.1'
+const configuredFrontendPort = process.env.AGENTSTUDIO_FRONTEND_PORT || readRootEnvValue('AGENTSTUDIO_FRONTEND_PORT')
+if (!configuredFrontendPort) throw new Error('프로젝트 루트 .env에 AGENTSTUDIO_FRONTEND_PORT가 필요합니다.')
+const port = Number(configuredFrontendPort)
+if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error(`AGENTSTUDIO_FRONTEND_PORT 값이 올바르지 않습니다: ${configuredFrontendPort}`)
 const backendMainPath = path.resolve(frontendDir, '../backend/app/main.py')
 
 function agentStudioVersionSyncPlugin(): Plugin {
@@ -23,7 +37,7 @@ function agentStudioVersionSyncPlugin(): Plugin {
     name: 'agentstudio-version-sync',
     enforce: 'pre',
     transform(code, id) {
-      if (!/[\\/]src[\\/]App\.jsx$/.test(id)) return null
+      if (!/[\\/]src[\\/]app[\\/]App\.tsx$/.test(id)) return null
       const version = readBackendVersion()
       const transformed = code.replace(
         /const\s+AGENTSTUDIO_FRONTEND_VERSION\s*=\s*['"][^'"]+['"]/, 

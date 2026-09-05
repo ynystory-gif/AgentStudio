@@ -1,3 +1,4 @@
+import { asLegacyError } from '../../utils/errors'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api'
 import type { AiAttachmentAnalysisState } from './AiAttachmentPicker'
@@ -60,7 +61,7 @@ export function AgentActivityProgress({
   function addLog(message: string) {
     const text = String(message || '').trim()
     if (!text) return
-    setLogs(current => {
+    setLogs((current: LegacyValue) => {
       const last = current[current.length - 1]
       if (last?.message === text) return current
       return [...current.slice(-19), { at: Date.now(), message: text }]
@@ -95,17 +96,17 @@ export function AgentActivityProgress({
 
     const ping = async () => {
       try {
-        setHeartbeat(current => current === 'OK' ? current : 'CHECKING')
+        setHeartbeat((current: LegacyValue) => current === 'OK' ? current : 'CHECKING')
         await api('/health')
         if (cancelled) return
         setHeartbeat('OK')
         setLastHeartbeatAt(Date.now())
         setHeartbeatFailures(0)
-      } catch (cause: any) {
+      } catch (cause) {
         if (cancelled) return
         setHeartbeat('FAIL')
-        setHeartbeatFailures(value => value + 1)
-        addLog(`Backend Heartbeat 실패: ${cause?.message || String(cause)}`)
+        setHeartbeatFailures((value: LegacyValue) => value + 1)
+        addLog(`Backend Heartbeat 실패: ${asLegacyError(cause).message || String(cause)}`)
       }
     }
 
@@ -195,7 +196,7 @@ export function AgentActivityProgress({
       </div>
 
       <div className="agent-activity-phases">
-        {phases.map((phase, index) => (
+        {phases.map((phase: LegacyValue, index: LegacyValue) => (
           <div className={`agent-activity-phase ${phase.status}`} key={phase.label}>
             <i>{phase.status === 'done' ? '✓' : phase.status === 'active' ? '●' : phase.status === 'error' ? '!' : phase.status === 'skip' ? '–' : '○'}</i>
             <span>{index + 1}. {phase.label}</span>
@@ -228,7 +229,7 @@ export function AgentActivityProgress({
         <details>
           <summary>상세 진행 로그</summary>
           <div className="agent-activity-log">
-            {logs.length ? logs.map((row, index) => (
+            {logs.length ? logs.map((row: LegacyValue, index: LegacyValue) => (
               <div key={`${row.at}-${index}`}><time>{new Date(row.at).toLocaleTimeString()}</time><span>{row.message}</span></div>
             )) : <small>기록된 진행 이벤트가 없습니다.</small>}
           </div>

@@ -9,7 +9,7 @@ import httpx
 from app.core.config import get_settings
 from app.services.codex_app_server_service import codex_app_server_manager
 from app.services.model_router import LLMTask, provider_candidates_for
-from app.services.ollama_model_manager_service import get_recommended_model_status
+from app.services.active_ollama_model_service import resolve_active_ollama_model
 
 
 def _tcp_open(host: str, port: int) -> bool:
@@ -53,8 +53,8 @@ def _provider_model(provider: str, *, openai_model: str, ollama_model: str) -> s
 
 async def get_llm_runtime_status() -> dict:
     settings = get_settings()
-    selected = await get_recommended_model_status()
-    selected_ollama_model = str(selected.get("current_model") or settings.ollama_model or "").strip()
+    selected = await resolve_active_ollama_model()
+    selected_ollama_model = str(selected.get("active_model") or "").strip()
     ollama = await _ollama_status(settings.ollama_base_url)
     openai_configured = bool((settings.openai_api_key or "").strip())
     codex_status = codex_app_server_manager.status()
@@ -110,7 +110,7 @@ async def get_llm_runtime_status() -> dict:
                 "model": settings.openai_model,
                 "status": "비사용" if not settings.openai_enabled else ("설정됨" if openai_configured else "API Key 미설정"),
             },
-            "ollama": {**ollama, "enabled": True, "model": selected_ollama_model},
+            "ollama": {**ollama, "enabled": True, "model": selected_ollama_model, "model_resolution": selected},
             "codex": {
                 "enabled": bool(settings.codex_enabled),
                 "installed": bool(codex_status.get("installed")),

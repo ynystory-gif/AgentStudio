@@ -19,6 +19,11 @@ psycopg[binary,pool]>=3.2
 pgvector>=0.4.0
 openai>=1.100
 
+# Local streaming speech-to-text (PCM16 -> faster-whisper + Silero VAD)
+# Model is loaded lazily; CPU/int8 is the safe default.
+faster-whisper>=1.1.1
+numpy>=1.26
+
 # SQL Workspace external database drivers
 pyodbc>=5.2
 oracledb>=2.5

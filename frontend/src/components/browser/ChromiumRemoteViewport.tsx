@@ -81,7 +81,7 @@ function diagnosticsText(value: ChromiumStartupDiagnostics | null): string {
     `CDP WebSocket: ${value.cdp_ws_url || '-'}`,
     '',
     `브라우저 후보 (${value.candidates?.length || 0})`,
-    ...(value.candidates || []).map((item, index) => `  ${index + 1}. ${item}`),
+    ...(value.candidates || []).map((item: LegacyValue, index: LegacyValue) => `  ${index + 1}. ${item}`),
   ]
   for (const [index, attempt] of (value.attempts || []).entries()) {
     lines.push(
@@ -101,7 +101,7 @@ function diagnosticsText(value: ChromiumStartupDiagnostics | null): string {
       '  실행 명령:',
       `    ${(attempt.command || []).join(' ') || '-'}`,
       '  Chrome startup log tail:',
-      attempt.startup_log_tail ? attempt.startup_log_tail.split(/\r?\n/).map(line => `    ${line}`).join('\n') : '    (내용 없음)',
+      attempt.startup_log_tail ? attempt.startup_log_tail.split(/\r?\n/).map((line: LegacyValue) => `    ${line}`).join('\n') : '    (내용 없음)',
     )
   }
   return lines.join('\n')
@@ -186,7 +186,7 @@ export function ChromiumRemoteViewport({
     for (const popup of state.popups || []) {
       onRemotePopup(tab.id, popup)
     }
-    setFrameRevision(value => value + 1)
+    setFrameRevision((value: LegacyValue) => value + 1)
   }, [onRemotePopup, onRemoteState, tab.id])
 
   const sendAction = useCallback(async (
@@ -222,7 +222,7 @@ export function ChromiumRemoteViewport({
     if (tab.remoteSessionId && remoteUrlRef.current === '') {
       remoteUrlRef.current = target
       setReady(true)
-      setFrameRevision(value => value + 1)
+      setFrameRevision((value: LegacyValue) => value + 1)
       return
     }
     if (remoteUrlRef.current === target) return
@@ -244,7 +244,7 @@ export function ChromiumRemoteViewport({
           force_restart: forceRestart,
         }),
       },
-    ).then(applyState).catch(cause => {
+    ).then(applyState).catch((cause: LegacyValue) => {
       captureFailure(cause)
       setLoading(false)
     }).finally(() => {
@@ -259,12 +259,12 @@ export function ChromiumRemoteViewport({
     const node = viewportRef.current
     if (!node || typeof ResizeObserver === 'undefined') return
     let timer = 0
-    const observer = new ResizeObserver(entries => {
+    const observer = new ResizeObserver((entries: LegacyValue) => {
       const rect = entries[0]?.contentRect
       if (!rect) return
       const width = Math.max(MIN_WIDTH, Math.round(rect.width))
       const height = Math.max(MIN_HEIGHT, Math.round(rect.height))
-      setViewportSize(current => current.width === width && current.height === height ? current : { width, height })
+      setViewportSize((current: LegacyValue) => current.width === width && current.height === height ? current : { width, height })
       window.clearTimeout(timer)
       timer = window.setTimeout(() => {
         if (ready && !error) void sendAction('resize', { viewport_width: width, viewport_height: height })
@@ -287,7 +287,7 @@ export function ChromiumRemoteViewport({
     const connect = () => {
       if (disposed) return
       socket = new WebSocket(streamUrl)
-      socket.onmessage = event => {
+      socket.onmessage = (event: LegacyValue) => {
         if (disposed) return
         try {
           const message = JSON.parse(event.data) as ChromiumScreencastFrame
@@ -327,7 +327,7 @@ export function ChromiumRemoteViewport({
     if (!tab.url || !ready || error) return
     const poll = window.setInterval(() => {
       void api<ChromiumBrowserState>(`/web-browser/chromium/${encodedSessionId}/state`)
-        .then(state => {
+        .then((state: LegacyValue) => {
           if (!closedRef.current) applyState(state)
         })
         .catch(() => undefined)
@@ -400,7 +400,7 @@ export function ChromiumRemoteViewport({
           force_restart: true,
         }),
       },
-    ).then(applyState).catch(cause => {
+    ).then(applyState).catch((cause: LegacyValue) => {
       captureFailure(cause)
       setLoading(false)
     }).finally(() => {
@@ -428,7 +428,7 @@ export function ChromiumRemoteViewport({
       <small>외부 사이트는 Chrome DevTools Protocol 실시간 screencast로 표시합니다.</small>
     </div>}
     {loading && ready && !error && <div className="chromium-remote-loading">불러오는 중…</div>}
-    {error && <div className="chromium-remote-error" onMouseDown={event => event.stopPropagation()} onWheel={event => event.stopPropagation()}>
+    {error && <div className="chromium-remote-error" onMouseDown={(event: LegacyValue) => event.stopPropagation()} onWheel={(event: LegacyValue) => event.stopPropagation()}>
       <div className="chromium-remote-error-summary">
         <strong>외부 Chromium 브라우저 연결 실패</strong>
         <p>{error}</p>
@@ -458,7 +458,7 @@ export function ChromiumRemoteViewport({
             <span>Helper 로그</span><code>{diagnostics.worker?.log_path || '-'}</code>
             <span>Helper 예외</span><b>{diagnostics.worker?.exception_type ? `${diagnostics.worker.exception_type}: ${diagnostics.worker.exception_repr || '-'}` : '-'}</b>
           </div>
-          {(diagnostics.attempts || []).map((attempt, index) => <section className="chromium-remote-diag-attempt" key={`${attempt.executable}-${index}`}>
+          {(diagnostics.attempts || []).map((attempt: LegacyValue, index: LegacyValue) => <section className="chromium-remote-diag-attempt" key={`${attempt.executable}-${index}`}>
             <h4>브라우저 시도 {index + 1} · {attempt.browser || 'Browser'}</h4>
             <div className="chromium-remote-diag-grid">
               <span>실행 파일</span><code>{attempt.executable || '-'}</code>

@@ -100,7 +100,7 @@ export function SchedulerPanel({
       </div>
       <div className="scheduler-hero-actions">
         <label className="scheduler-history-toggle">
-          <input type="checkbox" checked={includeTerminal} onChange={event=>onIncludeTerminalChange?.(event.target.checked)}/>
+          <input type="checkbox" checked={includeTerminal} onChange={(event: LegacyValue)=>onIncludeTerminalChange?.(event.target.checked)}/>
           <span>종료된 작업 포함</span>
         </label>
         <button type="button" onClick={()=>onRefresh?.()} disabled={loading}>{loading?'조회 중...':'↻ 새로고침'}</button>
@@ -129,7 +129,7 @@ export function SchedulerPanel({
         <div className="scheduler-table scheduler-table-header" aria-hidden="true">
           <span>작업</span><span>상태</span><span>진행률</span><span>현재 단계 / 메시지</span><span>시작 / 갱신</span><span>실행</span>
         </div>
-        {jobs.map(job=>{
+        {jobs.map((job: LegacyValue)=>{
           const status=String(job.status||'').toUpperCase()
           const active=Boolean(job.active)||ACTIVE_STATUSES.has(status)
           const key=`${job.source||'JOB'}:${job.id||''}`

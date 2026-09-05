@@ -43,7 +43,7 @@ export function ServicePortSettingsPanel({
     <section className="settings-panel settings-panel-wide service-port-settings">
       <h2>서비스 포트 설정</h2>
       <div className="hint-box">
-        PC마다 이미 사용 중인 포트가 다를 수 있습니다. 기본값은 Backend 8000 / Frontend 5173이며,
+        PC마다 이미 사용 중인 포트가 다를 수 있습니다. 프로젝트 루트 .env의 Backend/Frontend 포트를 기준으로 사용하며,
         저장한 값은 다음 SYSTEM_ADMIN.cmd 실행부터 적용됩니다. 다른 프로그램이 사용 중인 포트는 강제로 종료하지 않습니다.
       </div>
       <div className="two-col-fields">
@@ -51,7 +51,7 @@ export function ServicePortSettingsPanel({
           <span>Backend API 포트</span>
           <input
             type="number" min="1024" max="65535"
-            value={String(valueOf('AGENTSTUDIO_BACKEND_PORT') || '8000')}
+            value={String(valueOf('AGENTSTUDIO_BACKEND_PORT') || window.__AGENTSTUDIO_CONFIG__?.BACKEND_PORT || '')}
             onChange={(event: ChangeEvent<HTMLInputElement>) => setValue('AGENTSTUDIO_BACKEND_PORT', event.target.value)}
           />
           <small>현재 실행: {runtimeApiBase}</small>
@@ -63,7 +63,7 @@ export function ServicePortSettingsPanel({
           <span>Frontend 포트</span>
           <input
             type="number" min="1024" max="65535"
-            value={String(valueOf('AGENTSTUDIO_FRONTEND_PORT') || '5173')}
+            value={String(valueOf('AGENTSTUDIO_FRONTEND_PORT') || window.__AGENTSTUDIO_CONFIG__?.FRONTEND_PORT || '')}
             onChange={(event: ChangeEvent<HTMLInputElement>) => setValue('AGENTSTUDIO_FRONTEND_PORT', event.target.value)}
           />
           <small>현재 실행: {frontendOrigin}</small>
@@ -360,7 +360,7 @@ export function SystemStatusSummary({ status }: SystemStatusSummaryProps) {
     <section className="status-summary">
       <h2>현재 상태 요약</h2>
       <div className="system-grid">
-        {items.map(([name, ok]) => <div className="status-row" key={name}>
+        {items.map(([name, ok]: LegacyValue) => <div className="status-row" key={name}>
           <span><StatusDot ok={!!ok}/>{name}</span><strong>{ok ? '정상/설정됨' : '확인 필요'}</strong>
         </div>)}
         <div className="status-row">

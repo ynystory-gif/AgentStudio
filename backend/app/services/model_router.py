@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from app.core.config import get_settings
 from app.services.codex_app_server_service import codex_app_server_manager
 from app.services.llm_provider import get_chat_model
+from app.services.active_ollama_model_service import current_runtime_ollama_model
 from app.services.llm_usage_service import UsageTrackedChatModel, current_usage_context
 
 
@@ -163,6 +164,41 @@ def _prompt_from_invocation(args: tuple[Any, ...], kwargs: dict[str, Any]) -> st
     return str(value or "")
 
 
+def _response_text(result: Any) -> str:
+    """Normalize LangChain/Ollama response content to visible text.
+
+    Newer LangChain providers can return content as a string, a list of content
+    blocks, or dictionaries. Treating those shapes as a plain string can make a
+    valid Ollama response look empty to downstream code.
+    """
+    content = getattr(result, "content", result)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, dict):
+        for key in ("text", "content", "response", "output_text"):
+            value = content.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+    if isinstance(content, (list, tuple)):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+            elif isinstance(item, dict):
+                for key in ("text", "content", "response", "output_text"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        parts.append(value.strip())
+                        break
+            else:
+                text = getattr(item, "text", None)
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        return "\n".join(parts).strip()
+    return str(content or "").strip()
+
+
 class AdaptiveTaskChatModel:
     """Minimal LangChain-compatible adapter with provider failover.
 
@@ -185,7 +221,7 @@ class AdaptiveTaskChatModel:
             s = get_settings()
             provider = self.candidates[0]
             if provider == "ollama":
-                return s.ollama_model
+                return current_runtime_ollama_model()
             if provider == "openai":
                 return s.openai_model
             return "codex"
@@ -213,9 +249,19 @@ class AdaptiveTaskChatModel:
                 model = get_chat_model(provider)
                 tracked = UsageTrackedChatModel(model=model, provider=provider, task=self.task.value)
                 result = await tracked.ainvoke(*args, **kwargs)
-                content = getattr(result, "content", None)
-                if content is not None and not str(content).strip():
-                    raise RuntimeError("LLM이 빈 응답을 반환했습니다.")
+                content = _response_text(result)
+                if not content:
+                    # v5.562: transient Ollama empty generations are retried once
+                    # before provider failover/local summary fallback is used.
+                    result = await tracked.ainvoke(*args, **kwargs)
+                    content = _response_text(result)
+                if not content:
+                    raise RuntimeError("LLM이 2회 연속 빈 응답을 반환했습니다.")
+                if not isinstance(getattr(result, "content", None), str):
+                    try:
+                        result.content = content
+                    except Exception:
+                        result = AIMessage(content=content, response_metadata=dict(getattr(result, "response_metadata", None) or {}))
                 self.last_provider = provider
                 try:
                     metadata = dict(getattr(result, "response_metadata", None) or {})
@@ -248,9 +294,17 @@ class AdaptiveTaskChatModel:
                 model = get_chat_model(provider)
                 tracked = UsageTrackedChatModel(model=model, provider=provider, task=self.task.value)
                 result = tracked.invoke(*args, **kwargs)
-                content = getattr(result, "content", None)
-                if content is not None and not str(content).strip():
-                    raise RuntimeError("LLM이 빈 응답을 반환했습니다.")
+                content = _response_text(result)
+                if not content:
+                    result = tracked.invoke(*args, **kwargs)
+                    content = _response_text(result)
+                if not content:
+                    raise RuntimeError("LLM이 2회 연속 빈 응답을 반환했습니다.")
+                if not isinstance(getattr(result, "content", None), str):
+                    try:
+                        result.content = content
+                    except Exception:
+                        result = AIMessage(content=content, response_metadata=dict(getattr(result, "response_metadata", None) or {}))
                 self.last_provider = provider
                 try:
                     metadata = dict(getattr(result, "response_metadata", None) or {})
