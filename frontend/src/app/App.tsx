@@ -74,7 +74,19 @@ import { PromptToolStudio } from '../features/prompt-tool-studio/components/Prom
 import { RagStudio } from '../features/rag/components/RagStudio'
 import { ProjectHistoryPanel } from '../features/history/ProjectHistoryPanel'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.600'
+const AGENTSTUDIO_FRONTEND_VERSION='5.601'
+
+const stableJsonSignature=(value:any):string=>{
+  const normalize=(item:any):any=>{
+    if(Array.isArray(item))return item.map(normalize)
+    if(item&&typeof item==='object'){
+      return Object.keys(item).sort().reduce((acc:Record<string,any>,key)=>{acc[key]=normalize(item[key]);return acc},{})
+    }
+    return item
+  }
+  try{return JSON.stringify(normalize(value??null))}catch{return String(value??'')}
+}
+
 
 const DEFAULT_TOOL_PROMPT_SETTINGS={
   configured:false,
@@ -2718,6 +2730,8 @@ function IDE() {
     targetWorkflowQuality,setTargetWorkflowQuality,loadWorkflowDefinition,inspectWorkflowProviderStatus,
     beginWorkflowProgress,finishWorkflowProgress,failWorkflowProgress,
   }=useWorkflowController()
+  const [workflowSaveBusy,setWorkflowSaveBusy]=useState(false)
+  const [workflowSavedSignature,setWorkflowSavedSignature]=useState('')
 
   const syncRagAgentToolToPromptStudio=(tool:LegacyRecord)=>{
     const studioTool=tool?.studio_tool&&typeof tool.studio_tool==='object'?tool.studio_tool:null
@@ -2733,7 +2747,7 @@ function IDE() {
       const ruleMarker=`[RAG_CONTEXT:${String(tool?.id||studioTool.id||'')}]`
       let mustDo=(Array.isArray(current.mustDo)?current.mustDo:[]).filter((item:LegacyValue)=>!String(item||'').startsWith(ruleMarker))
       if(tool?.prompt_context_enabled&&tool?.prompt_context_rule)mustDo=[...mustDo,`${ruleMarker} ${String(tool.prompt_context_rule)}`]
-      const next:LegacyRecord={...current,tools:[...tools,studioTool],routes,toolId:String(studioTool.id||''),savedAt:new Date().toISOString()}
+      const next:LegacyRecord={...current,tools:[...tools,{...studioTool,syncStatus:studioTool.syncStatus||'NEW'}],routes,toolId:String(studioTool.id||''),savedAt:new Date().toISOString()}
       if(Array.isArray(current.mustDo)||tool?.prompt_context_enabled)next.mustDo=mustDo
       return next
     })
@@ -7042,6 +7056,97 @@ function IDE() {
     }
   }
 
+  const mergeExistingProjectPromptToolDiscovery=(currentState:LegacyRecord,discovery:LegacyValue,projectRoot:LegacyValue)=>{
+    const current=currentState&&typeof currentState==='object'?currentState:{}
+    const incomingPrompts=Array.isArray(discovery?.prompts)?discovery.prompts:[]
+    const incomingTools=Array.isArray(discovery?.tools)?discovery.tools:[]
+    const savedPrompts=Array.isArray(current.sourcePrompts)?current.sourcePrompts:[]
+    const savedTools=Array.isArray(current.tools)?current.tools:[]
+    const hasSourceBaseline=Boolean(current.sourceSyncInitialized)
+    const promptKey=(item:LegacyValue)=>`${String(item?.path||item?.sourceOriginPath||'').replace(/\\/g,'/').toLowerCase()}::${String(item?.name||'').toLowerCase()}`
+    const toolKey=(item:LegacyValue)=>`${String(item?.path||item?.sourceOriginPath||'').replace(/\\/g,'/').toLowerCase()}::${String(item?.name||'').toLowerCase()}`
+    const savedPromptMap=new Map(savedPrompts.map((item:LegacyValue)=>[promptKey(item),item]))
+    const savedToolMap=new Map(savedTools.filter((item:LegacyValue)=>item?.sourceOriginPath).map((item:LegacyValue)=>[toolKey(item),item]))
+    const sourcePrompts=incomingPrompts.map((item:LegacyValue)=>{
+      const saved=savedPromptMap.get(promptKey(item))
+      const currentFingerprint=String(item?.fingerprint||'')
+      const previousFingerprint=String(saved?.fingerprint||'')
+      const syncStatus=!hasSourceBaseline
+        ? 'SYNCED'
+        : !saved
+          ? 'NEW'
+          : previousFingerprint
+            ? (previousFingerprint===currentFingerprint?'SYNCED':'CHANGED')
+            : (String(saved?.content||'')===String(item?.content||'')?'SYNCED':'CHANGED')
+      return {
+        id:String(saved?.id||item?.id||`prompt_${Date.now()}`),
+        name:String(item?.name||saved?.name||'Project Prompt'),
+        content:String(item?.content||''),
+        path:String(item?.path||saved?.path||''),
+        line:Number(item?.line||0)||undefined,
+        kind:String(item?.kind||saved?.kind||'SOURCE_PROMPT'),
+        fingerprint:currentFingerprint,
+        syncStatus,
+      }
+    })
+    const consumedSavedToolIds=new Set<string>()
+    const sourceTools=incomingTools.map((item:LegacyValue)=>{
+      const key=toolKey(item)
+      const saved=savedToolMap.get(key)
+        ||savedTools.find((candidate:LegacyValue)=>String(candidate?.id||'')===String(item?.id||''))
+        ||savedTools.find((candidate:LegacyValue)=>!candidate?.sourceOriginPath&&String(candidate?.name||'').toLowerCase()===String(item?.name||'').toLowerCase())
+      if(saved?.id)consumedSavedToolIds.add(String(saved.id))
+      const currentFingerprint=String(item?.fingerprint||'')
+      const previousFingerprint=String(saved?.sourceFingerprint||'')
+      const wasPlannedNew=Boolean(saved&&!saved?.sourceOriginPath&&String(saved?.syncStatus||'')==='NEW')
+      const syncStatus=!hasSourceBaseline
+        ? 'SYNCED'
+        : !saved
+          ? 'NEW'
+          : wasPlannedNew
+            ? 'SYNCED'
+            : previousFingerprint
+              ? (previousFingerprint===currentFingerprint?'SYNCED':'CHANGED')
+              : (String(saved?.source||'')===String(item?.source||'')?'SYNCED':'CHANGED')
+      const allowedTypes=['Python','API','MCP','Database','Agent']
+      const normalizedType=allowedTypes.includes(String(item?.type||''))?String(item.type):'API'
+      return {
+        ...(saved||{}),
+        id:String(saved?.id||item?.id||`tool_${Date.now()}`),
+        name:String(item?.name||saved?.name||'project_tool'),
+        type:normalizedType,
+        description:String(saved?.description||item?.description||'기존 프로젝트 소스에서 감지된 Tool'),
+        inputSchema:String(saved?.inputSchema||item?.inputSchema||'{}'),
+        outputSchema:String(saved?.outputSchema||item?.outputSchema||'{}'),
+        permissions:Array.isArray(saved?.permissions)?saved.permissions:(Array.isArray(item?.permissions)?item.permissions:[]),
+        timeout:Number(saved?.timeout||item?.timeout||30),
+        retry:Number(saved?.retry??item?.retry??1),
+        source:String(item?.source||saved?.source||''),
+        usage:Array.isArray(saved?.usage)?saved.usage:(Array.isArray(item?.usage)?item.usage:['Existing Project']),
+        version:Number(saved?.version||item?.version||1),
+        sourceOriginPath:String(item?.path||saved?.sourceOriginPath||''),
+        sourceLine:Number(item?.line||0)||undefined,
+        sourceFingerprint:currentFingerprint,
+        discoveryKind:String(item?.discoveryKind||saved?.discoveryKind||'PROJECT_SOURCE'),
+        syncStatus,
+      }
+    })
+    const plannedOrManualTools=savedTools.filter((item:LegacyValue)=>!item?.sourceOriginPath&&!consumedSavedToolIds.has(String(item?.id||'')))
+    const fingerprintSignature=[
+      ...sourcePrompts.map((item:LegacyValue)=>`${item.path}:${item.fingerprint}:${item.syncStatus}`),
+      ...sourceTools.map((item:LegacyValue)=>`${item.sourceOriginPath}:${item.sourceFingerprint}:${item.syncStatus}`),
+    ].join('|')
+    const currentSystemPrompt=String(current.systemPrompt||'').trim()
+    return {
+      ...current,
+      systemPrompt:currentSystemPrompt?current.systemPrompt:(sourcePrompts[0]?.content||current.systemPrompt),
+      sourcePrompts,
+      tools:[...plannedOrManualTools,...sourceTools],
+      sourceSyncInitialized:true,
+      sourceSyncRevision:`${String(projectRoot||'')}|${Date.now()}|${fingerprintSignature}`,
+    }
+  }
+
   const refreshAdaptiveProjectAnalysis=async(projectRoot: LegacyValue,requestText: LegacyValue='',expectedContextEpoch:LegacyValue=null)=>{
     const targetRoot=String(projectRoot||'').trim()
     if(!targetRoot) return null
@@ -7065,6 +7170,9 @@ function IDE() {
           ...adaptive,
           adaptive_report:adaptive
         }))
+        if(adaptive?.prompt_tool_discovery&&typeof adaptive.prompt_tool_discovery==='object'){
+          setPromptToolStudioState((prev:LegacyRecord)=>mergeExistingProjectPromptToolDiscovery(prev,adaptive.prompt_tool_discovery,targetRoot))
+        }
         return adaptive
       }
     }catch(error){
@@ -7088,6 +7196,29 @@ function IDE() {
       serverResult=await api(`/workflow/design-checkpoint?project_root=${encodeURIComponent(targetRoot)}`)
     }catch(error){
       console.warn('프로젝트 설계 Checkpoint 자동 복원 조회 실패',error)
+    }
+    let savedWorkflowValue:LegacyValue|null=null
+    try{
+      const savedWorkflowResult=await api(`/account-settings/project/value?project_root=${encodeURIComponent(targetRoot)}&setting_group=WORKFLOW&setting_key=default`)
+      const rawValue=savedWorkflowResult?.item?.value
+      if(rawValue&&typeof rawValue==='object'){
+        savedWorkflowValue=rawValue
+        setWorkflowSavedSignature(stableJsonSignature(rawValue))
+      }else{
+        setWorkflowSavedSignature('')
+      }
+    }catch(error){
+      console.warn('프로젝트 Workflow 저장 상태 조회 실패',error)
+      setWorkflowSavedSignature('')
+    }
+
+    let savedPromptToolValue:LegacyValue|null=null
+    try{
+      const savedStudioResult=await api(`/account-settings/project/value?project_root=${encodeURIComponent(targetRoot)}&setting_group=PROMPT_TOOL_STUDIO&setting_key=default`)
+      const rawStudioValue=savedStudioResult?.item?.value
+      if(rawStudioValue&&typeof rawStudioValue==='object')savedPromptToolValue=rawStudioValue
+    }catch(error){
+      console.warn('프로젝트 Prompt/Tool Studio 저장 상태 조회 실패',error)
     }
 
     if(Number.isInteger(expectedContextEpoch)&&projectContextEpochRef.current!==expectedContextEpoch){
@@ -7126,7 +7257,14 @@ function IDE() {
       requirementDraftDecisionPendingRef.current=false
       setRequirementDraftCandidate(null)
       setRequirementDraftDecisionPending(false)
-      return {restored:false,source:'',hasDatabaseSql:false}
+      if(savedPromptToolValue&&typeof savedPromptToolValue==='object')setPromptToolStudioState(savedPromptToolValue)
+      if(savedWorkflowValue&&typeof savedWorkflowValue==='object'){
+        setTargetWorkflowPreview(savedWorkflowValue)
+        setPreviousTargetWorkflowPreview(savedWorkflowValue)
+        const savedPlan=savedWorkflowValue?.database_plan||{}
+        return {restored:true,source:'PROJECT_SETTING_WORKFLOW',hasDatabaseSql:Boolean(String(savedPlan?.ddl||savedPlan?.ddl_preview||'').trim())}
+      }
+      return {restored:Boolean(savedPromptToolValue),source:savedPromptToolValue?'PROJECT_SETTING_PROMPT_TOOL_STUDIO':'',hasDatabaseSql:false}
     }
 
     const buildResume={
@@ -7158,17 +7296,26 @@ function IDE() {
       : null
     setRedevelopmentInfo(redevelopment?.available?redevelopment:null)
     const restored=await restoreRequirementDraft(key,snapshot,buildResume,targetRoot)
+    if(savedPromptToolValue&&typeof savedPromptToolValue==='object')setPromptToolStudioState(savedPromptToolValue)
     requirementDraftDecisionPendingRef.current=false
     setRequirementDraftDecisionPending(false)
     setRequirementDraftCandidate(null)
 
-    const plan=snapshot?.workflow_preview?.database_plan
+    // An explicit Workflow-tab save is newer/more intentional than a design checkpoint
+    // fallback. Keep the checkpoint for the rest of the design state, but overlay the
+    // independently saved WORKFLOW/default value when it exists.
+    if(savedWorkflowValue&&typeof savedWorkflowValue==='object'){
+      setTargetWorkflowPreview(savedWorkflowValue)
+      setPreviousTargetWorkflowPreview(savedWorkflowValue)
+    }
+    const plan=savedWorkflowValue?.database_plan
+      ||snapshot?.workflow_preview?.database_plan
       ||buildResume?.workflow_state?.database_plan
       ||{}
     const hasDatabaseSql=Boolean(String(plan?.ddl||plan?.ddl_preview||'').trim())
     return {
-      restored:Boolean(restored),
-      source:String(serverResult?.checkpoint_source||(serverSnapshot?'PROJECT_CHECKPOINT':'LOCAL_DRAFT')),
+      restored:Boolean(restored||savedWorkflowValue),
+      source:String(savedWorkflowValue?'PROJECT_SETTING_WORKFLOW':(serverResult?.checkpoint_source||(serverSnapshot?'PROJECT_CHECKPOINT':'LOCAL_DRAFT'))),
       hasDatabaseSql
     }
   }
@@ -7235,6 +7382,7 @@ function IDE() {
       setDesignProjectSavedAt('')
       setTargetWorkflowPreview(null)
       setPreviousTargetWorkflowPreview(null)
+      setWorkflowSavedSignature('')
       setTargetWorkflowQuality(null)
       setDevelopmentFinalStatus(null)
       setLoadedProjectAnalysis(null)
@@ -7450,6 +7598,7 @@ function IDE() {
     setWorkflow(null)
     setTargetWorkflowPreview(null)
     setPreviousTargetWorkflowPreview(null)
+    setWorkflowSavedSignature('')
     setTargetWorkflowQuality(null)
     setBuilderStarted(false)
     setInterviewAttachments([])
@@ -10246,6 +10395,51 @@ function IDE() {
     return {status,progress:Math.max(0,Math.min(100,progress))}
   }
 
+  const workflowSaveValue=targetWorkflowPreview||(selectedProjectId&&loadedProjectAnalysis?.adaptive_report?.workflow?{target_agent_workflow:loadedProjectAnalysis.adaptive_report.workflow,source:'PROJECT_SOURCE_INFERENCE'}:null)
+  const workflowSaveDirty=Boolean(workflowSaveValue&&stableJsonSignature(workflowSaveValue)!==workflowSavedSignature)
+  const saveTargetWorkflowDefinition=async()=>{
+    const targetRoot=String(newAgentProjectRoot||root||'').trim()
+    if(!targetRoot){
+      setProjectLoadMessage('Workflow를 저장할 프로젝트 경로가 없습니다.')
+      return
+    }
+    if(!workflowSaveValue||typeof workflowSaveValue!=='object'){
+      setProjectLoadMessage('저장할 개발 대상 Workflow가 없습니다.')
+      return
+    }
+    const signature=stableJsonSignature(workflowSaveValue)
+    if(signature===workflowSavedSignature){
+      setProjectLoadMessage('Workflow 변경사항이 없어 저장하지 않았습니다.')
+      return
+    }
+    setWorkflowSaveBusy(true)
+    try{
+      const result=await api('/account-settings/project',{
+        method:'PUT',
+        body:JSON.stringify({
+          project_root:targetRoot,
+          setting_group:'WORKFLOW',
+          setting_key:'default',
+          value:workflowSaveValue,
+          title:'Workflow 설계 저장',
+          summary:`${String(workflowSaveValue?.target_agent_workflow?.name||newAgentName||'Agent')} Workflow 저장`,
+        })
+      })
+      if(result?.ok){
+        setWorkflowSavedSignature(signature)
+        setTargetWorkflowPreview(workflowSaveValue)
+        setPreviousTargetWorkflowPreview(workflowSaveValue)
+        setProjectLoadMessage(result?.item?.changed===false?'Workflow 변경사항이 없어 저장하지 않았습니다.':'Workflow를 저장했습니다. 이력정보에서 변경 내용을 확인할 수 있습니다.')
+      }else{
+        setProjectLoadMessage(result?.detail||result?.message||'Workflow 저장에 실패했습니다.')
+      }
+    }catch(error){
+      setProjectLoadMessage('Workflow 저장 실패: '+String(asLegacyError(error).message||error))
+    }finally{
+      setWorkflowSaveBusy(false)
+    }
+  }
+
   const saveAgentDesignProject=async({createVersion=false,versionLabel='',silent=false}:LegacyRecord={})=>{
     if(designProjectSaving) return null
     const activeRegisteredProject=selectedProjectId?projectList.find((item: LegacyValue)=>item?.id===selectedProjectId):null
@@ -10292,9 +10486,13 @@ function IDE() {
         setDesignProjectVersion(project.version_no||1)
         setRequirementDraftSavedAt(project.updated_at||snapshot.saved_at)
         if(!silent){
-          setAgentBuildMessage(createVersion
-            ? `설계 프로젝트 v${project.version_no||1} 저장 완료 · 변경 전 Snapshot을 보존했습니다.`
-            : 'Agent 설계 프로젝트를 저장했습니다. 다른 작업 후 프로젝트 목록에서 다시 열어 이어서 진행할 수 있습니다.')
+          if(result?.unchanged===true||result?.saved===false){
+            setAgentBuildMessage(result?.message||'변경사항이 없어 저장하지 않았습니다.')
+          }else{
+            setAgentBuildMessage(createVersion
+              ? `설계 프로젝트 v${project.version_no||1} 저장 완료 · 변경 전 Snapshot을 보존했습니다.`
+              : 'Agent 설계 프로젝트를 저장했습니다. 다른 작업 후 프로젝트 목록에서 다시 열어 이어서 진행할 수 있습니다.')
+          }
         }
       }
       return project||null
@@ -17843,9 +18041,9 @@ function IDE() {
               </button>
             </div>
           </section>}
-          {designCenterTab==='STUDIO'&&<PromptToolStudio key={`prompt-tool-studio-${designProjectId||'new'}`} chat={chat} pendingQuestion={chat.filter((m: LegacyValue)=>m.role==='assistant').slice(-1)[0]?.content||''} agentName={newAgentName} providerLabel={aiInterviewLabel} provider={provider} projectRoot={String(newAgentProjectRoot||root||'')} projectState={promptToolStudioState} onProjectStateChange={setPromptToolStudioState} onApplyState={(items)=>{const patch:LegacyRecord={};items.filter((item:LegacyValue)=>item?.source==='USER'&&(item?.status==='CONFIRMED'||item?.status==='CHANGED')).forEach((item:LegacyValue)=>{patch[String(item.key||'')]=item.value});if(Object.keys(patch).length)setConfirmedInterviewRequirements((prev:LegacyValue)=>({...prev,...patch}))}}/>}
+          {designCenterTab==='STUDIO'&&<PromptToolStudio key={`prompt-tool-studio-${designProjectId||selectedProjectId||String(newAgentProjectRoot||root||'new')}`} chat={chat} pendingQuestion={chat.filter((m: LegacyValue)=>m.role==='assistant').slice(-1)[0]?.content||''} agentName={newAgentName} providerLabel={aiInterviewLabel} provider={provider} projectRoot={String(newAgentProjectRoot||root||'')} projectState={promptToolStudioState} onProjectStateChange={setPromptToolStudioState} onApplyState={(items)=>{const patch:LegacyRecord={};items.filter((item:LegacyValue)=>item?.source==='USER'&&(item?.status==='CONFIRMED'||item?.status==='CHANGED')).forEach((item:LegacyValue)=>{patch[String(item.key||'')]=item.value});if(Object.keys(patch).length)setConfirmedInterviewRequirements((prev:LegacyValue)=>({...prev,...patch}))}}/>}
           {designCenterTab==='RAG'&&<RagStudio key={`rag-studio-${designProjectId||'new'}`} projectRoot={String(newAgentProjectRoot||root||'')} agentDesignProjectId={Number(designProjectId)||null} onSyncPromptTool={syncRagAgentToolToPromptStudio} onBindWorkflow={bindRagToolToTargetWorkflow} onOpenPromptToolStudio={openRagToolInPromptStudio} onOpenAgentTest={openRagAgentTestInPromptStudio}/>}
-          {designCenterTab==='HISTORY'&&<ProjectHistoryPanel key={`project-history-${designProjectId||'new'}`} projectRoot={String(newAgentProjectRoot||root||'')}/>}
+          {designCenterTab==='HISTORY'&&<ProjectHistoryPanel key={`project-history-${designProjectId||'new'}`} projectRoot={String(newAgentProjectRoot||root||'')} onOpenTemporarySql={async(relativePath,result)=>{const targetRoot=String(newAgentProjectRoot||root||'').trim();if(targetRoot)await loadFiles(targetRoot);await openFile(relativePath);setWorkspaceTab('CODE');setProjectLoadMessage(result?.message||'수정 이력 SQL 임시 파일을 열었습니다.')}}/>}
         </div>}
         {workspaceTab==='DESIGN'&&<UILayoutTemplateGallery
           open={uiLayoutGalleryOpen}
@@ -17868,6 +18066,15 @@ function IDE() {
               <p>단계를 나열하는 화면이 아니라, Agent가 어떻게 설계되고 움직이는지 한눈에 보는 구조도입니다.</p>
             </div>
             <div className="workspace-export-actions">
+              <button
+                type="button"
+                className={`workspace-workflow-save-button ${workflowSaveDirty?'dirty':'saved'}`}
+                onClick={saveTargetWorkflowDefinition}
+                disabled={workflowSaveBusy||!workflowSaveValue||!workflowSaveDirty}
+                title={workflowSaveDirty?'변경된 Workflow 정보를 저장합니다.':'저장 이후 변경된 Workflow 정보가 없습니다.'}
+              >
+                {workflowSaveBusy?'저장 중...':workflowSaveDirty?'💾 저장':'✓ 저장됨'}
+              </button>
               <button
                 type="button"
                 className="workspace-ppt-export-button"
@@ -18193,7 +18400,7 @@ function IDE() {
               onWorkflowChange={(nextWorkflow: LegacyValue)=>{
                 setTargetWorkflowPreview((prev: LegacyValue)=>prev?{...prev,target_agent_workflow:nextWorkflow}:prev)
                 setPreviousTargetWorkflowPreview((prev: LegacyValue)=>prev?{...prev,target_agent_workflow:nextWorkflow}:prev)
-                setAgentBuildMessage("Media Workflow Editor 변경사항을 설계에 반영했습니다. 자동 저장하지 않습니다. 필요하면 Agent 설계의 '지금 저장'을 눌러 주세요.")
+                setAgentBuildMessage("Workflow 변경사항을 설계에 반영했습니다. 자동 저장하지 않습니다. Workflow 상단의 '저장' 버튼을 눌러 저장하세요.")
               }}
             />
           </div>}

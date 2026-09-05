@@ -1797,6 +1797,30 @@ def _design_project_payload(row: AgentDesignProject, *, include_snapshot: bool =
 
 
 
+def _design_compare_value(value):
+    """Remove volatile UI/save metadata before deciding whether a design save is meaningful."""
+    volatile_keys = {
+        "saved_at", "savedAt", "updated_at", "updatedAt",
+        "design_project_id", "design_project_version", "sourceSyncRevision",
+    }
+    if isinstance(value, list):
+        return [_design_compare_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _design_compare_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in volatile_keys
+        }
+    return value
+
+
+def _design_values_equal(left, right) -> bool:
+    try:
+        return json.dumps(_design_compare_value(left), ensure_ascii=False, sort_keys=True, separators=(",", ":")) == json.dumps(_design_compare_value(right), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        return _design_compare_value(left) == _design_compare_value(right)
+
+
 async def _ensure_ui_theme_storage() -> None:
     """Self-heal Theme storage on the currently active runtime DB.
 
@@ -2137,6 +2161,35 @@ async def save_agent_design_project(req: AgentDesignProjectSaveRequest, authoriz
                     ),
                 )
 
+        if row is not None:
+            requested_name = (req.name or row.name or "새 Agent 설계").strip()
+            requested_root = (req.project_root or "").strip()
+            requested_status = (req.status or "INTERVIEWING").strip().upper()
+            requested_progress = max(0, min(100, int(req.progress or 0)))
+            requested_stage = (req.current_stage or "REQUIREMENTS").strip()
+            requested_question = req.current_question or ""
+            requested_thread = req.langgraph_thread_id or row.langgraph_thread_id or f"agent_design_{row.id}"
+            unchanged = (
+                str(row.name or "") == requested_name
+                and str(row.project_root or "").strip() == requested_root
+                and str(row.status or "") == requested_status
+                and int(row.progress or 0) == requested_progress
+                and str(row.current_stage or "") == requested_stage
+                and str(row.current_question or "") == requested_question
+                and str(row.langgraph_thread_id or "") == str(requested_thread)
+                and _design_values_equal(row.snapshot or {}, req.snapshot or {})
+                and _design_values_equal(row.feature_registry or [], req.feature_registry or [])
+            )
+            if unchanged:
+                return {
+                    "ok": True,
+                    "project": _design_project_payload(row, include_snapshot=True),
+                    "synced_project_settings": 0,
+                    "unchanged": True,
+                    "saved": False,
+                    "message": "변경사항이 없어 저장하지 않았습니다.",
+                }
+
         if row is None:
             row = AgentDesignProject(
                 pc_name=current_pc_name(),
@@ -2184,7 +2237,7 @@ async def save_agent_design_project(req: AgentDesignProjectSaveRequest, authoriz
                 after={"design_project_id": row.id, "version_no": row.version_no, "status": row.status, "progress": row.progress},
             )
 
-    return {"ok": True, "project": _design_project_payload(row, include_snapshot=True), "synced_project_settings": synced_setting_count}
+    return {"ok": True, "project": _design_project_payload(row, include_snapshot=True), "synced_project_settings": synced_setting_count, "unchanged": False, "saved": True}
 
 
 @router.post("/agent-design-projects/{design_project_id}/version")
@@ -2201,6 +2254,16 @@ async def snapshot_agent_design_project(design_project_id: int, req: AgentDesign
         ).scalar_one_or_none()
         if not row:
             raise HTTPException(status_code=404, detail="Agent 설계 프로젝트를 찾을 수 없습니다.")
+        incoming_snapshot = req.snapshot or row.snapshot or {}
+        incoming_registry = req.feature_registry or row.feature_registry or []
+        if _design_values_equal(row.snapshot or {}, incoming_snapshot) and _design_values_equal(row.feature_registry or [], incoming_registry):
+            return {
+                "ok": True,
+                "project": _design_project_payload(row, include_snapshot=True),
+                "unchanged": True,
+                "saved": False,
+                "message": "변경사항이 없어 버전을 저장하지 않았습니다.",
+            }
         version_no = int(row.version_no or 1)
         version = AgentDesignProjectVersion(
             design_project_id=row.id,
@@ -3736,7 +3799,7 @@ async def web_browser_proxy(
 
 @router.get("/health")
 async def health():
-    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.600", "build": "DatabaseWorkflowCodexFeatureSeparation+EditorProjectNotebookFeatureSeparation+EnvAuthoritativeDatabaseProviderAuthFix+RootEnvRuntimeConfigNoPortHardcode+LegacyAppCleanup+RootEnvDbOnly+IncrementalEditorFeatureSeparation+IncrementalAppFeatureSeparation+StaleTypeShimAutoCleanup+ReactTypeDeclarationCollisionFix+TypeScriptStrictStabilization+EnvDatabaseSourceOfTruthFix+ReactTypeScriptFrontendMigrationComplete+GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering+SchedulerWorkspace+ParallelRenderedThemeFallback+AuthenticatedPptExportCors+InteractiveThemePagePreview+RenderedMenuMotionProbe+UILayoutSidebarHeaderIconOptions+Blender3DAgentTemplate+RequirementRecommendationToolRouting+AuthenticatedBinaryDocumentPreview+LearningProblemPersistenceRepair+LearningDatasetTopicScrollLayout+LearningExactMisjudgmentTraceSqlExport+LearningCenterLoadProgressHeartbeat+LearningSqlListParityCurrentPcFastRead+LearningSchemaDeadlockGuard+CodeEditorSelectionLlmReference+EditableLlmReferenceCompactChat+LlmComposerBottomDock+CodeSaveLabelClarification+TopSaveToolbar+ReferenceHeaderSummaryRelocation+InlineDirtySaveButton+PdfPreviewHeadingRemoval+AdaptiveDevelopmentStagePlannerApprovalWorkflow+NewAgentDevelopmentPlanUXStageEditor+DatabaseResourceProvisionPlanApprovalFlow+RuntimeDatabaseFinalPreviewTablePolicyPortRecommendationUX+CodeDocumentationOption+SmartPairTypingEscapedQuoteCaretGuard+CodeDocumentationCssLiteralNewlineFix+CodeDocumentationToggleTitleRelocation+CodeIntelligenceDefinitionHoverSignatureNavigation+NotebookNameErrorDiagnostic+DocumentWideLlmReferenceSelection+StaleReferenceSelectionGuard+FrontendBuildFailureDetail+ElevatedFailureWindowHold+PowerShellNpmStderrGuard+CtrlSpaceSymbolCompletion+ManualLlmReferenceEntry+UnifiedSaveDirtyDot+SelectedTextExactReplacePairTyping+ContextAwareCallArgumentCompletion+CodexCodeResponseAiProposalRouting+CtrlSpaceCompletionNavigationSeparation+NotebookLongRunProgressHeartbeat+ProjectFileMemoTab+SingleMemoPerFileResizableMemoSplit+SaveButtonEventGuard+GlobalMediaSessionBackgroundRecording+LiveTranscriptPersistence+TemporaryExternalMediaTab+UserCodingStyleProfile+BackendFasterWhisperStreamingStt+SttOverlapVad+StopTimeTranscriptRefinement+MediaSessionLastSegmentUndefinedGuard+CodingStylePopoverLayout+LiveTranscriptSummary+ScreenAudioTrackGuard+AttachmentSummaryFileOpen+ManualDatabaseResourceCreate+Global13pxTextFloor+CodingStylePanelPolish+LiveTranscriptProvisionalImmediateRender+TimeRangeRefinedReplacement+TranscriptCollectionRefineCompleteStatus+NotebookStreamingRecovery+PackageInstallProtectedExecution+ExternalPythonWorkerRuntime+BackendPackageExecution+WindowsRuntimeRegression+NotebookWarningOutputClassification+DocumentDrivenAgentCodingStyle+ResilientAgentCodingStyle+PromptToolStudioRuntimeExecutorLangGraphTraceVersioning+PromptToolStudioUnifiedExecutorExecutionTraceDiffReports+PromptToolStudioReadabilityRoleSeparationToolbarPolish+RagStudioPhase1KnowledgeSkeleton+RagStudioPhase2Indexing+RagStudioPhase3Retrieval+RagStudioPhase4AgentIntegration+RagStudioPhase4StrictTypeSafetyBuildFix+RagStudioPhase5Intelligence+RagStudioPhase6OperationSecurityEvaluation+TableSpecificPrimaryKeyNamingPolicy+TablePkUiBuildFix+RagLegacyPkPreCreateMigrationFix+RagStudioApiBaseSourcePickerDarkUiFix+AccountProjectSettingsDbHistory+ProjectHistoryStrictTypeSafetyBuildFix"}
+    return {"ok": True, "name": "THEANOVA AgentStudio", "version": "5.601", "build": "DatabaseWorkflowCodexFeatureSeparation+EditorProjectNotebookFeatureSeparation+EnvAuthoritativeDatabaseProviderAuthFix+RootEnvRuntimeConfigNoPortHardcode+LegacyAppCleanup+RootEnvDbOnly+IncrementalEditorFeatureSeparation+IncrementalAppFeatureSeparation+StaleTypeShimAutoCleanup+ReactTypeDeclarationCollisionFix+TypeScriptStrictStabilization+EnvDatabaseSourceOfTruthFix+ReactTypeScriptFrontendMigrationComplete+GeneratedAgentSetupIncrementalBuildTraceTsFrontend+ProjectSearchAndTextFind+SearchTreeToggleUnifiedFind+NotebookTopLevelAwait+ValidNotebookCreate+EditablePresentationExport+LargeArchitectureVisualAssets+ProjectAdaptiveWorkflowReportArchitecture+SeparatedAgentStudioPptExport+DatabaseErdWorkspacePpt+AgentProgressHeartbeatUX+FastInterviewStateDedupRepairRecovery+AttachmentAnalysisSummaryVisibility+DeepAttachmentRequirementMining+RootSourceFenceRepair+NewAgentProjectContextIsolation+ErdKeyBadgeRelationRouting+GeneratedDatabaseUrlGuide+ResizableAttachmentAnalysisPanel+AgentUILayoutTemplateGallery+DatabaseSummaryDedupFix+FrontendInputMemoryLayoutVisibilityFix+ReactTypeScriptLegacySourceCleanupFix+FailedBuildResumeCheckpoint+FailedBuildRedevelopmentCheckpoint+GlobalCommandPalette+AgentWorkCenter+HelpCenter+NotebookWorkspaceRootResolver+CtrlSNotebookSaveRootFix+PdfUnifiedFindSupport+PdfSearchDedupPageNavigationFix+PdfWhitespaceInsensitiveSearchFix+GpuAccelerationRecommendationControl+ExecutionStopLifecycle+ErdObstacleRouting+EnvExampleOnlySetupGuide+PdfMultiExtractorSearch+NotebookRuntimeContextIsolation+NotebookCaretPersistence+ManualPairTyping+CodexUsageSettingsPopover+NotebookLineBookmarkNavigation+SourceTextLineBookmarkNavigation+AgentUILayoutRuntimePersistenceControls+GeneratedAgentTestEnvironmentRoleSeed+AgentDesignProjectFeatureLifecycle+ImportedThemeLibrary+FrontendAgnosticThemeAdapters+UnifiedDesignProjectControlsAndThemeRegistryUX+DesignPanelControlRelocation+UnifiedThemeSourceMerge+MenuStateThemeExtraction+ValidationInfrastructureFallback+ExecutionTerminalStateReconcile+RequirementSupersession+WorkflowDatabaseDesignRecoveryUX+NotebookRawHtmlImageRenderingFix+NotebookCellDebugger+UnifiedSourceDebuggerAndNotebookDebugUXFix+EducationalCodeProposalExplanation+CodeEditorPathBarRemoval+CodeToolbarRightPanelFit+ThemeLivePreview+TripleScreenshotSlots+InteractiveThemeBehaviorVerification+CodeToolbarRightAlignment+MobileInteractiveThemeMenuPreview+CsvSpreadsheetGridViewer+ResizableCodeToolbarSplit+HighSpeedAnalysisPipeline+DualEditorSplitView+ResponsiveNotebookToolbarWrap+NotebookInlineDataImageRenderingFix+NotebookLiveRichOutputStreaming+NotebookSmoothLiveOutputRendering+SchedulerWorkspace+ParallelRenderedThemeFallback+AuthenticatedPptExportCors+InteractiveThemePagePreview+RenderedMenuMotionProbe+UILayoutSidebarHeaderIconOptions+Blender3DAgentTemplate+RequirementRecommendationToolRouting+AuthenticatedBinaryDocumentPreview+LearningProblemPersistenceRepair+LearningDatasetTopicScrollLayout+LearningExactMisjudgmentTraceSqlExport+LearningCenterLoadProgressHeartbeat+LearningSqlListParityCurrentPcFastRead+LearningSchemaDeadlockGuard+CodeEditorSelectionLlmReference+EditableLlmReferenceCompactChat+LlmComposerBottomDock+CodeSaveLabelClarification+TopSaveToolbar+ReferenceHeaderSummaryRelocation+InlineDirtySaveButton+PdfPreviewHeadingRemoval+AdaptiveDevelopmentStagePlannerApprovalWorkflow+NewAgentDevelopmentPlanUXStageEditor+DatabaseResourceProvisionPlanApprovalFlow+RuntimeDatabaseFinalPreviewTablePolicyPortRecommendationUX+CodeDocumentationOption+SmartPairTypingEscapedQuoteCaretGuard+CodeDocumentationCssLiteralNewlineFix+CodeDocumentationToggleTitleRelocation+CodeIntelligenceDefinitionHoverSignatureNavigation+NotebookNameErrorDiagnostic+DocumentWideLlmReferenceSelection+StaleReferenceSelectionGuard+FrontendBuildFailureDetail+ElevatedFailureWindowHold+PowerShellNpmStderrGuard+CtrlSpaceSymbolCompletion+ManualLlmReferenceEntry+UnifiedSaveDirtyDot+SelectedTextExactReplacePairTyping+ContextAwareCallArgumentCompletion+CodexCodeResponseAiProposalRouting+CtrlSpaceCompletionNavigationSeparation+NotebookLongRunProgressHeartbeat+ProjectFileMemoTab+SingleMemoPerFileResizableMemoSplit+SaveButtonEventGuard+GlobalMediaSessionBackgroundRecording+LiveTranscriptPersistence+TemporaryExternalMediaTab+UserCodingStyleProfile+BackendFasterWhisperStreamingStt+SttOverlapVad+StopTimeTranscriptRefinement+MediaSessionLastSegmentUndefinedGuard+CodingStylePopoverLayout+LiveTranscriptSummary+ScreenAudioTrackGuard+AttachmentSummaryFileOpen+ManualDatabaseResourceCreate+Global13pxTextFloor+CodingStylePanelPolish+LiveTranscriptProvisionalImmediateRender+TimeRangeRefinedReplacement+TranscriptCollectionRefineCompleteStatus+NotebookStreamingRecovery+PackageInstallProtectedExecution+ExternalPythonWorkerRuntime+BackendPackageExecution+WindowsRuntimeRegression+NotebookWarningOutputClassification+DocumentDrivenAgentCodingStyle+ResilientAgentCodingStyle+PromptToolStudioRuntimeExecutorLangGraphTraceVersioning+PromptToolStudioUnifiedExecutorExecutionTraceDiffReports+PromptToolStudioReadabilityRoleSeparationToolbarPolish+RagStudioPhase1KnowledgeSkeleton+RagStudioPhase2Indexing+RagStudioPhase3Retrieval+RagStudioPhase4AgentIntegration+RagStudioPhase4StrictTypeSafetyBuildFix+RagStudioPhase5Intelligence+RagStudioPhase6OperationSecurityEvaluation+TableSpecificPrimaryKeyNamingPolicy+TablePkUiBuildFix+RagLegacyPkPreCreateMigrationFix+RagStudioApiBaseSourcePickerDarkUiFix+AccountProjectSettingsDbHistory+ProjectHistoryStrictTypeSafetyBuildFix+HistorySqlWorkflowSaveExistingPromptToolSyncNoopSave"}
 
 @router.get("/system/project-roots")
 async def system_project_roots():

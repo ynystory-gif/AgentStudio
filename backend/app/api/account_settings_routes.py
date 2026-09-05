@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.services.account_setting_service import (
     append_project_history,
+    create_project_history_sql_scratch,
     get_account_database_profile,
     get_project_setting,
     list_account_database_profiles,
@@ -61,6 +62,10 @@ class ProjectHistoryRequest(BaseModel):
     summary: str = ''
     before: dict = Field(default_factory=dict)
     after: dict = Field(default_factory=dict)
+
+
+class ProjectHistorySqlRequest(BaseModel):
+    project_root: str = ''
 
 
 @router.get('/database-profiles')
@@ -140,6 +145,18 @@ async def project_history_item(history_id: int, authorization: str = Header(defa
     if row is None:
         raise HTTPException(status_code=404, detail='수정 이력을 찾을 수 없습니다.')
     return {'ok': True, 'item': row}
+
+
+@router.post('/history/{history_id}/sql')
+async def project_history_sql(history_id: int, req: ProjectHistorySqlRequest, authorization: str = Header(default='')):
+    member = await _current(authorization)
+    try:
+        result = await create_project_history_sql_scratch(member['id'], history_id, project_root=req.project_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail='수정 이력을 찾을 수 없습니다.')
+    return result
 
 
 @router.post('/history')

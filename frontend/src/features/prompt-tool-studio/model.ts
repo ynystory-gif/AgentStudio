@@ -7,7 +7,7 @@ export type SemanticUnit={id:string;text:string;types:string[];intents:string[]}
 export type PendingQuestion={id:string;question:string;expectedSchema:Record<string,string>}
 export type ValidationResult={valid:boolean;missing:string[];conflicts:string[];warnings:string[];confidence:number}
 export type LocalAnalysis={types:string[];intents:string[];units:SemanticUnit[];extraction:StateItem[];contextRelations:string[];validation:ValidationResult}
-export type StudioTool={id:string;name:string;type:'Python'|'API'|'MCP'|'Database'|'Agent';description:string;inputSchema:string;outputSchema:string;permissions:string[];timeout:number;retry:number;source:string;usage:string[];version:number;registryId?:number;serverId?:number;runtimeStatus?:string;riskLevel?:number;requiresConfirmation?:boolean}
+export type StudioTool={id:string;name:string;type:'Python'|'API'|'MCP'|'Database'|'Agent';description:string;inputSchema:string;outputSchema:string;permissions:string[];timeout:number;retry:number;source:string;usage:string[];version:number;registryId?:number;serverId?:number;runtimeStatus?:string;riskLevel?:number;requiresConfirmation?:boolean;syncStatus?:'NEW'|'CHANGED'|'SYNCED'|'MANUAL';sourceOriginPath?:string;sourceLine?:number;sourceFingerprint?:string;discoveryKind?:string}
 export type RouteRule={id:string;intent:string;condition:string;targetType:'TOOL'|'WORKFLOW'|'LLM'|'NEXT_QUESTION';target:string;enabled:boolean}
 
 export const statusLabel:Record<StateStatus,string>={CONFIRMED:'● 확정',CANDIDATE:'◐ 후보',MISSING:'○ 미정',RECOMMENDED:'★ 추천',CHANGED:'↺ 변경',CONFLICT:'⚠ 충돌'}

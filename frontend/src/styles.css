@@ -17039,3 +17039,32 @@ small{font-size:var(--agentstudio-min-readable-font-size);}
 .sql-account-profile-manager{display:grid;gap:8px;padding:9px;border:1px solid #26394a;border-radius:7px;background:#0a131c}.sql-account-profile-manager>div:first-child{display:flex;flex-direction:column;gap:3px}.sql-account-profile-manager strong{font-size:13px;color:#d7e7f5}.sql-account-profile-manager small{font-size:13px;color:#7895ad}.sql-account-profile-list{display:grid;gap:6px;max-height:180px;overflow:auto}.sql-account-profile-list>button{display:grid;grid-template-columns:auto 1fr;gap:3px 8px;align-items:center;text-align:left;padding:8px;border:1px solid #27445a;border-radius:6px;background:#0d1a26;color:#cfe1ef;cursor:pointer}.sql-account-profile-list>button:hover:not(:disabled){border-color:#3e82b1;background:#102437}.sql-account-profile-list>button>span{grid-row:1/3;font-size:13px;color:#65b5e9}.sql-account-profile-list>button>b{font-size:13px}.sql-account-profile-list>button>small{font-size:13px;color:#7895ad}.sql-account-profile-list>button:disabled{opacity:.5;cursor:not-allowed}
 /* v5.599 account/project scoped Agent Database settings */
 .agent-account-db-profiles{display:grid;gap:8px;margin:8px 0 10px;padding:9px;border:1px solid #29465b;border-radius:7px;background:#0a1723}.agent-account-db-profiles>div:first-child{display:flex;flex-direction:column;gap:3px}.agent-account-db-profiles strong{font-size:13px;color:#d7e8f5}.agent-account-db-profiles small,.agent-account-db-profiles em{font-size:13px;color:#7897ad;font-style:normal}.agent-account-db-profile-list{display:grid;gap:6px}.agent-account-db-profile-list>button{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 8px;text-align:left;align-items:center;padding:8px;border:1px solid #29485e;border-radius:6px;background:#0d1b28;color:#cfe2ef;cursor:pointer}.agent-account-db-profile-list>button:hover:not(:disabled){border-color:#3f83b2;background:#102538}.agent-account-db-profile-list>button>b{font-size:13px}.agent-account-db-profile-list>button>span{font-size:13px;color:#65b4e7}.agent-account-db-profile-list>button>small{grid-column:1/-1;font-size:13px}.agent-db-no-account-profile{display:block;padding:8px;border:1px dashed #29465b;border-radius:6px}
+
+/* v5.601 · Existing project Prompt/Tool source synchronization */
+.pts-source-prompts{margin:0 14px 12px;border:1px solid var(--border,#24384a);border-radius:10px;background:rgba(10,24,36,.72);overflow:hidden}
+.pts-source-prompts>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:12px 14px;border-bottom:1px solid var(--border,#24384a)}
+.pts-source-prompts>header>div{display:flex;flex-direction:column;gap:4px;min-width:0}
+.pts-source-prompts>header b{font-size:13px}
+.pts-source-prompts>header small,.pts-source-empty{font-size:13px;color:var(--muted,#89a0b5)}
+.pts-source-prompts>header>span{font-size:13px;white-space:nowrap;color:#8ccdf1}
+.pts-source-prompt-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;padding:12px;max-height:260px;overflow:auto}
+.pts-source-prompt-list article{display:flex;flex-direction:column;gap:7px;padding:11px;border:1px solid #284357;border-radius:9px;background:#0b1a27}
+.pts-source-prompt-list article>div{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.pts-source-prompt-list strong,.pts-source-prompt-list small,.pts-source-prompt-list p,.pts-source-prompt-list button{font-size:13px}
+.pts-source-prompt-list p{margin:0;white-space:pre-wrap;word-break:break-word;color:#c5d4df;line-height:1.5}
+.pts-source-empty{display:block;padding:14px}
+.pts-tool-title-line{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-width:0}
+.pts-tool-title-line>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pts-sync-badge{display:inline-flex;align-items:center;justify-content:center;min-width:38px;padding:2px 7px;border-radius:999px;font-size:13px;font-weight:700;line-height:1.35;white-space:nowrap}
+.pts-sync-badge.sync-new{background:rgba(47,142,255,.18);border:1px solid rgba(73,163,255,.55);color:#89c7ff}
+.pts-sync-badge.sync-changed{background:rgba(255,174,51,.17);border:1px solid rgba(255,185,73,.55);color:#ffd08a}
+.pts-sync-badge.sync-synced{background:rgba(59,187,125,.14);border:1px solid rgba(69,195,136,.45);color:#8be0b7}
+.pts-source-sync-meta{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;padding:10px 12px;border:1px solid #2a4458;border-radius:8px;background:#0a1824}
+.pts-source-sync-meta>b,.pts-source-sync-meta>span{font-size:13px}
+.pts-source-sync-meta>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#afc5d5}
+
+/* v5.601 · explicit Workflow save state */
+.workspace-workflow-save-button{min-width:92px;font-size:13px;font-weight:700}
+.workspace-workflow-save-button.dirty{box-shadow:inset 0 0 0 1px rgba(82,177,255,.45)}
+.workspace-workflow-save-button.saved:disabled{opacity:.72;cursor:default}
+.pts-block-title-status{display:flex;align-items:center;justify-content:space-between;gap:10px}

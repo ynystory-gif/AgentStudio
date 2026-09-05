@@ -1,12 +1,13 @@
 # THEANOVA AgentStudio
 
-## Current baseline: v5.600
+## Current baseline: v5.601
 
-계정별 저장 설정과 프로젝트별 설정을 DB에서 분리 관리하고, 코드 편집 DB 연결 / Agent Database / RAG Studio가 동일한 계정 저장 DB 목록을 재사용할 수 있도록 개선했습니다. 프로젝트별 설정 변경은 `project_setting_histories`에 이력으로 남기며, Agent 설계 중앙 탭에서 RAG Studio 오른쪽의 `이력 정보` 탭으로 목록과 변경 전/후 상세 Diff를 확인할 수 있습니다. DB 비밀번호 같은 민감정보는 DB에 평문 저장하지 않고 기존 Windows DPAPI 보관 방식을 유지합니다.
-See `README_V5_599_AccountProjectSettingsHistory.md`.
+v5.600의 계정/프로젝트 설정 DB와 수정 이력 구조를 유지하면서, 이력 SQL 임시 파일, Workflow 명시 저장/복원, 변경 없는 저장 차단, 기존 프로젝트 Prompt/Tool Source 동기화와 `신규/변경/동일` 표시를 추가했습니다. DB 비밀번호 같은 민감정보는 DB에 평문 저장하지 않고 기존 Windows DPAPI 보관 방식을 유지합니다.
+See `README_V5_601_HistorySqlWorkflowPromptToolSync.md`.
 
 ## Current distribution baseline
 
+- v5.601 HistorySqlWorkflowSaveExistingPromptToolSyncNoopSave
 - v5.600 ProjectHistoryStrictTypeSafetyBuildFix
 - v5.599 AccountProjectSettingsDbHistory
 - v5.598 RagStudioIntegrationUxFix
@@ -168,6 +169,16 @@ See `README_V5_599_AccountProjectSettingsHistory.md`.
 
 
 
+
+
+## v5.601 History SQL / Workflow Save / Existing Prompt·Tool Sync / No-op Save
+
+- `이력 정보` 목록과 상세에 SQL 버튼을 추가했습니다. 선택한 이력은 프로젝트 `.agentstudio/sql_scratch/` 아래 임시 `.sql` 파일로 생성되며 자동 실행하지 않습니다.
+- Workflow 탭 상단에 명시적 `저장` 버튼을 추가하고 `WORKFLOW/default` 프로젝트 설정으로 저장·복원합니다. 실제 Workflow 내용이 바뀌지 않으면 버튼은 `✓ 저장됨` 상태가 되고 DB 저장/이력을 추가하지 않습니다.
+- Account DB Profile, 프로젝트 설정, Agent 설계 Snapshot/Version, Prompt/Tool/Routing/State/Test Report/Studio Version 저장 경로에 동일 내용 저장 방지 규칙을 적용했습니다. 프로젝트 이력도 동일한 연속 이벤트는 중복 Row를 만들지 않습니다.
+- 기존 프로젝트 로드시 저장된 `PROMPT_TOOL_STUDIO/default` 설정과 현재 프로젝트 소스의 Prompt/Tool 정의를 함께 복원합니다. Prompt 변수, LangChain PromptTemplate, Python/MCP Tool decorator/registration 등을 제한된 Source Scan으로 감지합니다.
+- 기존 소스와 동일하면 `동일`, 새 설계 Tool/Prompt가 아직 소스에 생성되지 않았으면 `신규`, 기존 Source fingerprint 또는 Studio 편집 내용이 달라지면 `변경`으로 표시합니다.
+- v5.600의 Account/Project Settings 및 Project History DB 구조를 그대로 사용하며 신규 테이블은 추가하지 않습니다.
 
 ## v5.600 Project History Strict Type Safety Build Fix
 

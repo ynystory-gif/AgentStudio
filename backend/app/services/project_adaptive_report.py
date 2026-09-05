@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +40,203 @@ def _entry(label: str, description: str, kind: str = "component") -> dict[str, s
 def _step(label: str, description: str, kind: str = "process") -> dict[str, str]:
     return {"label": label, "description": description, "type": kind}
 
+
+
+def _fingerprint(*parts: Any) -> str:
+    text = "\n".join(str(part or "") for part in parts)
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:24]
+
+
+def _line_number(text: str, offset: int) -> int:
+    return text.count("\n", 0, max(0, offset)) + 1
+
+
+def _project_prompt_tool_discovery(files: list[dict[str, Any]]) -> dict[str, Any]:
+    """Discover explicit prompt/tool definitions from existing project source only."""
+    prompts: list[dict[str, Any]] = []
+    tools: list[dict[str, Any]] = []
+    prompt_seen: set[str] = set()
+    tool_seen: set[str] = set()
+
+    prompt_assign = re.compile(
+        r"(?is)\b(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:prompt)[A-Za-z0-9_]*)\s*[:=]\s*(?P<prefix>[rubfRUBF]{0,2})(?P<quote>\"\"\"|'''|\"|')(?P<body>.*?)(?P=quote)"
+    )
+    prompt_template = re.compile(
+        r"(?is)(?P<kind>PromptTemplate\.from_template|ChatPromptTemplate\.from_template)\s*\(\s*(?P<prefix>[rubfRUBF]{0,2})(?P<quote>\"\"\"|'''|\"|')(?P<body>.*?)(?P=quote)"
+    )
+    python_tool = re.compile(
+        r"(?ms)^\s*@(?P<decorator>(?:[A-Za-z_][A-Za-z0-9_]*\.)?(?:tool|mcp\.tool|server\.tool)(?:\([^\n]*\))?)\s*\n\s*(?:async\s+)?def\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<args>[^)]*)\)"
+    )
+    register_tool = re.compile(
+        r"(?is)\b(?:registerTool|register_tool|addTool|add_tool|server\.tool|mcp\.tool)\s*\(\s*(?:name\s*=\s*)?[\"'](?P<name>[A-Za-z_][A-Za-z0-9_.:-]{1,100})[\"']"
+    )
+
+    # scan_project() exposes a 4,000-char preview for performance. Prompt/Tool definitions
+    # are often declared later in a source file, so discovery may read a bounded source
+    # excerpt. Files whose path suggests prompt/tool/agent code are scanned first and the
+    # whole discovery pass has a fixed budget to avoid slowing large projects.
+    discovery_budget = 8_000_000
+    source_suffixes = {
+        ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+        ".md", ".txt", ".json", ".yaml", ".yml", ".toml",
+    }
+
+    def discovery_priority(item: dict[str, Any]) -> tuple[int, str]:
+        rel = _text(item.get("relative")).replace("\\", "/").casefold()
+        preferred = any(token in f"/{rel}/" for token in (
+            "/prompt", "/tool", "/mcp", "/agent", "/workflow", "/chain", "/llm",
+        ))
+        return (0 if preferred else 1, rel)
+
+    for file in sorted(files, key=discovery_priority):
+        rel = _text(file.get("relative")).replace("\\", "/")
+        preview = _text(file.get("preview"))
+        if not rel or not preview:
+            continue
+
+        source_text = preview
+        source_path = Path(_text(file.get("path"))) if _text(file.get("path")) else None
+        suffix = Path(rel).suffix.casefold()
+        if source_path is not None and suffix in source_suffixes and discovery_budget > len(preview):
+            try:
+                size = int(file.get("size_bytes") or 0)
+                if 0 < size <= 1_000_000 and source_path.is_file():
+                    limit = min(120_000, discovery_budget)
+                    source_text = source_path.read_text(encoding="utf-8", errors="replace")[:limit]
+                    discovery_budget = max(0, discovery_budget - len(source_text))
+            except Exception:
+                source_text = preview
+
+        for match in prompt_assign.finditer(source_text):
+            body = match.group("body").strip()
+            if not body:
+                continue
+            name = match.group("name")
+            key = f"{rel.casefold()}::{name.casefold()}"
+            if key in prompt_seen:
+                continue
+            prompt_seen.add(key)
+            prompts.append({
+                "id": "prompt_" + _fingerprint(rel, name),
+                "name": name,
+                "content": body[:6000],
+                "path": rel,
+                "line": _line_number(source_text, match.start()),
+                "kind": "SOURCE_PROMPT_VARIABLE",
+                "fingerprint": _fingerprint(rel, name, body),
+            })
+
+        for index, match in enumerate(prompt_template.finditer(source_text), start=1):
+            body = match.group("body").strip()
+            if not body:
+                continue
+            name = f"{match.group('kind').split('.')[0]}_{index}"
+            key = f"{rel.casefold()}::{name.casefold()}::{_fingerprint(body)}"
+            if key in prompt_seen:
+                continue
+            prompt_seen.add(key)
+            prompts.append({
+                "id": "prompt_" + _fingerprint(rel, name, body[:80]),
+                "name": name,
+                "content": body[:6000],
+                "path": rel,
+                "line": _line_number(source_text, match.start()),
+                "kind": "PROMPT_TEMPLATE",
+                "fingerprint": _fingerprint(rel, name, body),
+            })
+
+        for match in python_tool.finditer(source_text):
+            name = match.group("name")
+            key = f"{rel.casefold()}::{name.casefold()}"
+            if key in tool_seen:
+                continue
+            tool_seen.add(key)
+            snippet = source_text[match.start(): min(len(source_text), match.end() + 900)].strip()
+            decorator = match.group("decorator")
+            tool_type = "MCP" if ("mcp." in decorator.casefold() or "server.tool" in decorator.casefold()) else "Python"
+            tools.append({
+                "id": "tool_" + _fingerprint(rel, name),
+                "name": name,
+                "type": tool_type,
+                "description": f"기존 프로젝트 소스에서 감지된 {tool_type} Tool",
+                "inputSchema": "{}",
+                "outputSchema": "{}",
+                "permissions": [],
+                "timeout": 30,
+                "retry": 1,
+                "source": snippet[:5000],
+                "usage": ["Existing Project"],
+                "version": 1,
+                "path": rel,
+                "line": _line_number(source_text, match.start()),
+                "fingerprint": _fingerprint(rel, name, snippet),
+                "discoveryKind": "TOOL_DECORATOR",
+            })
+
+        for match in register_tool.finditer(source_text):
+            name = match.group("name")
+            key = f"{rel.casefold()}::{name.casefold()}"
+            if key in tool_seen:
+                continue
+            tool_seen.add(key)
+            snippet = source_text[max(0, match.start() - 120): min(len(source_text), match.end() + 800)].strip()
+            tool_type = "MCP" if ("mcp" in match.group(0).casefold() or "server.tool" in match.group(0).casefold()) else "API"
+            tools.append({
+                "id": "tool_" + _fingerprint(rel, name),
+                "name": name,
+                "type": tool_type,
+                "description": f"기존 프로젝트 등록 코드에서 감지된 {tool_type} Tool",
+                "inputSchema": "{}",
+                "outputSchema": "{}",
+                "permissions": [],
+                "timeout": 30,
+                "retry": 1,
+                "source": snippet[:5000],
+                "usage": ["Existing Project"],
+                "version": 1,
+                "path": rel,
+                "line": _line_number(source_text, match.start()),
+                "fingerprint": _fingerprint(rel, name, snippet),
+                "discoveryKind": "TOOL_REGISTRATION",
+            })
+
+        rel_cf = f"/{rel.casefold()}/"
+        is_tool_path = "/tools/" in rel_cf or Path(rel).name.casefold().endswith("_tool.py")
+        if is_tool_path:
+            for symbol in (file.get("symbols") or [])[:30]:
+                name = _text(symbol)
+                if not name or name.startswith("_"):
+                    continue
+                key = f"{rel.casefold()}::{name.casefold()}"
+                if key in tool_seen:
+                    continue
+                tool_seen.add(key)
+                tools.append({
+                    "id": "tool_" + _fingerprint(rel, name),
+                    "name": name,
+                    "type": "Python",
+                    "description": "기존 프로젝트 tools 경로에서 감지된 Python Tool 후보",
+                    "inputSchema": "{}",
+                    "outputSchema": "{}",
+                    "permissions": [],
+                    "timeout": 30,
+                    "retry": 1,
+                    "source": source_text[:5000],
+                    "usage": ["Existing Project"],
+                    "version": 1,
+                    "path": rel,
+                    "line": 1,
+                    "fingerprint": _fingerprint(rel, name, source_text[:1800]),
+                    "discoveryKind": "TOOL_PATH_SYMBOL",
+                })
+
+    return {
+        "source": "PROJECT_SOURCE_INFERENCE",
+        "prompts": prompts[:100],
+        "tools": tools[:150],
+        "prompt_count": len(prompts),
+        "tool_count": len(tools),
+    }
 
 def _detect_test_command(names: set[str], haystack: str) -> str:
     if "pytest.ini" in names or "conftest.py" in names or _has(haystack, "pytest"):
@@ -344,6 +543,8 @@ def _detect_profile(files: list[dict[str, Any]], project_name: str, request: str
         "워크플로우·리포트·아키텍처를 프로젝트 맞춤형으로 구성합니다."
     )
 
+    prompt_tool_discovery = _project_prompt_tool_discovery(files)
+
     return {
         "project_name": project_name,
         "project_type": project_type,
@@ -394,6 +595,7 @@ def _detect_profile(files: list[dict[str, Any]], project_name: str, request: str
             "source": "PROJECT_SOURCE_INFERENCE",
         },
         "infrastructure": infrastructure,
+        "prompt_tool_discovery": prompt_tool_discovery,
         "analysis_mode": "SOURCE_ONLY_ADAPTIVE",
         "llm_called": False,
     }
