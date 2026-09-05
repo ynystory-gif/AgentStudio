@@ -28,19 +28,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_BASE='60302491c0e2bd7af7fbaa2bd49cb1db8a331a13'
-          ACTUAL_BASE="$(git rev-parse HEAD^)"
-          test "$ACTUAL_BASE" = "$EXPECTED_BASE"
+          EXPECTED_PARENT='a58f946a5cab39bb47a81e79d9b246f800f9894d'
+          ACTUAL_PARENT="$(git rev-parse HEAD^)"
+          test "$ACTUAL_PARENT" = "$EXPECTED_PARENT"
           grep -q 'version="5.600"' backend/app/main.py
-          echo "Base verified: $ACTUAL_BASE"
+          echo "Base verified: $ACTUAL_PARENT"
 
-      - name: Decode and apply v5.601 patch
+      - name: Reassemble and apply v5.601 patch
         shell: bash
         run: |
           set -euo pipefail
-          B64='.release/v5.601/patch.xz.b64'
-          test "$(sha256sum "$B64" | awk '{print $1}')" = '62e0e44581eb669e0578d7f175d7c156b343049a6bd52b10bcacc2944c3e9d08'
-          base64 -d "$B64" > /tmp/v5601.patch.xz
+          test "$(wc -c < .release/v5.601/part000.b64)" -eq 16000
+          test "$(wc -c < .release/v5.601/part001.b64)" -eq 16000
+          test "$(wc -c < .release/v5.601/part002.b64)" -eq 15760
+          cat .release/v5.601/part000.b64 .release/v5.601/part001.b64 .release/v5.601/part002.b64 > /tmp/v5601.patch.xz.b64
+          test "$(sha256sum /tmp/v5601.patch.xz.b64 | awk '{print $1}')" = '62e0e44581eb669e0578d7f175d7c156b343049a6bd52b10bcacc2944c3e9d08'
+          base64 -d /tmp/v5601.patch.xz.b64 > /tmp/v5601.patch.xz
           test "$(sha256sum /tmp/v5601.patch.xz | awk '{print $1}')" = '4be8d0953f3c08351394767b38fe51eca4b46ee0a4c0792e30a14f43ed0643c6'
           xz -dc /tmp/v5601.patch.xz > /tmp/v5601.patch
           git apply --check --whitespace=nowarn /tmp/v5601.patch
@@ -60,11 +63,13 @@ jobs:
             backend/app/services/project_adaptive_report.py \
             backend/validate_v5601_history_sql_workflow_prompt_tool_sync.py
           python backend/validate_v5601_history_sql_workflow_prompt_tool_sync.py
-          if command -v node >/dev/null 2>&1; then
-            node frontend/validate_frontend_contracts.cjs
-          fi
+          node frontend/validate_frontend_contracts.cjs
           grep -q 'version="5.601"' backend/app/main.py
           grep -q "AGENTSTUDIO_FRONTEND_VERSION='5.601'" frontend/src/app/App.tsx
+          test -f README_V5_601_HistorySqlWorkflowPromptToolSync.md
+          test -f VERIFY_V5_601.ps1
+          test ! -f README_V5_600_ProjectHistoryStrictTypeSafetyBuildFix.md
+          test ! -f VERIFY_V5_600.ps1
 
       - name: Commit v5.601 directly to main
         shell: bash
