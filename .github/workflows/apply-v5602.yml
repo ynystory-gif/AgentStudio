@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - '.release/v5.602/patch.xz.b64'
+      - '.release/v5.602/**'
       - '.github/workflows/apply-v5602.yml'
 
 permissions:
@@ -19,23 +19,23 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Verify expected v5.601 base
+      - name: Verify expected v5.601 prep base
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_BASE='a0b965fe18baa1b2abdd76abe143ec480a561169'
+          EXPECTED_BASE='f4c8bd724a65f710b63fae05f35a8b7a39de97a5'
           ACTUAL_BASE="$(git rev-parse HEAD^)"
           test "$ACTUAL_BASE" = "$EXPECTED_BASE"
           grep -q 'version="5.601"' backend/app/main.py
           echo "Base verified: $ACTUAL_BASE"
 
-      - name: Apply v5.602 changed-file patch
+      - name: Reassemble and apply v5.602 changed-file patch
         shell: bash
         run: |
           set -euo pipefail
-          B64='.release/v5.602/patch.xz.b64'
-          test "$(sha256sum "$B64" | awk '{print $1}')" = '52059413455830dd5ff2bfecb986f12b155a2e9a985449e52de2e1868d599622'
-          base64 -d "$B64" > /tmp/v5602.patch.xz
+          cat .release/v5.602/part*.b64 > /tmp/v5602.b64
+          test "$(sha256sum /tmp/v5602.b64 | awk '{print $1}')" = '52059413455830dd5ff2bfecb986f12b155a2e9a985449e52de2e1868d599622'
+          base64 -d /tmp/v5602.b64 > /tmp/v5602.patch.xz
           test "$(sha256sum /tmp/v5602.patch.xz | awk '{print $1}')" = '4a9b641f02103c187f2a5e4beee9dc3ed46f65278100ca0d068baebdc5175f08'
           xz -dc /tmp/v5602.patch.xz > /tmp/v5602.patch
           git apply --check --whitespace=nowarn /tmp/v5602.patch
