@@ -1,12 +1,13 @@
 # THEANOVA AgentStudio
 
-## Current baseline: v5.601
+## Current baseline: v5.602
 
 v5.600의 계정/프로젝트 설정 DB와 수정 이력 구조를 유지하면서, 이력 SQL 임시 파일, Workflow 명시 저장/복원, 변경 없는 저장 차단, 기존 프로젝트 Prompt/Tool Source 동기화와 `신규/변경/동일` 표시를 추가했습니다. DB 비밀번호 같은 민감정보는 DB에 평문 저장하지 않고 기존 Windows DPAPI 보관 방식을 유지합니다.
 See `README_V5_601_HistorySqlWorkflowPromptToolSync.md`.
 
 ## Current distribution baseline
 
+- v5.602 HistoryListSqlSchemaQualifiedDbBindingSemanticQwenDynamicModel
 - v5.601 HistorySqlWorkflowSaveExistingPromptToolSyncNoopSave
 - v5.600 ProjectHistoryStrictTypeSafetyBuildFix
 - v5.599 AccountProjectSettingsDbHistory
@@ -170,6 +171,16 @@ See `README_V5_601_HistorySqlWorkflowPromptToolSync.md`.
 
 
 
+
+## v5.602 History List SQL / Schema-qualified SQL / DB Binding Semantics / Dynamic Qwen Model
+
+- 프로젝트 수정 이력의 SQL 버튼을 개별 리스트 아이템에서 제거하고, 목록 조회 영역에 하나의 `SQL` 버튼으로 통합했습니다. 현재 프로젝트/분류/limit 조건을 그대로 반영한 임시 SQL을 생성합니다.
+- 수정 이력 목록/상세 SQL과 LLM 학습 센터 SQL 내보내기는 현재 Runtime PostgreSQL Schema를 명시한 `"schema"."table"` 형식을 사용합니다.
+- 계정 DB Profile을 Agent 프로젝트에 적용할 때 PostgreSQL/Redis/Firestore를 각각 독립 binding key로 저장합니다. 처음 추가한 Provider는 `신규(CREATE)`, 동일 Provider의 실제 변경만 `변경(UPDATE)` 이력으로 기록합니다. v5.601의 legacy cross-provider UPDATE 이력은 audit 원문을 바꾸지 않고 화면에서 `신규` 의미로 보정합니다.
+- 변경사항이 없는 Project/Account/Workflow/Prompt/Tool 저장은 기존 v5.601 no-op 저장 방지 정책을 유지합니다.
+- Qwen 최신 권장 모델을 `qwen3.8:27b-mtp-q4_K_M`으로 변경했습니다. 기존 프로젝트의 qwen3.5 설정 및 QLoRA qwen3.5-4B 호환 경로는 유지합니다.
+- 메인 AI Trends와 LLM 학습 센터는 동일한 project-aware Qwen resolver를 사용해 프로젝트 → 계정 → 현재 AgentStudio 설정/기본값 → 설치 모델 fallback 기준으로 실제 표시 모델을 동적으로 결정합니다. 프로젝트가 바뀌면 Dataset 카드도 해당 Qwen 모델로 다시 조회합니다.
+- Qwen 정보는 provider/family/model/version/parameter/quantization/MTP/install 상태 구조로 전달하며, Frontend에 qwen3.8 문자열을 현재 사용 모델로 하드코딩하지 않습니다.
 
 ## v5.601 History SQL / Workflow Save / Existing Prompt·Tool Sync / No-op Save
 

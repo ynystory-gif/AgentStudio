@@ -29,6 +29,11 @@ _ERROR_MARKERS = ("error", "exception", "traceback", "실패", "오류", "invali
 _ALLOWED_CASE_STATUS = {"candidate", "confirmed", "rejected"}
 _ALLOWED_DATASET_STATUS = {"draft", "review", "validated", "training", "trained", "deployed"}
 
+# True QLoRA/adapter pipeline remains explicitly compatible with Qwen3.5-4B.
+# This is separate from AgentStudio's current runtime/recommended Qwen model.
+WEIGHT_TRAINING_OLLAMA_BASE_MODEL = "qwen3.5:4b"
+WEIGHT_TRAINING_HF_BASE_MODEL = "Qwen/Qwen3.5-4B"
+
 
 def _artifact_dir() -> Path:
     override = str(os.environ.get("THEANOVA_AGENTSTUDIO_DATA_DIR") or "").strip()
@@ -638,8 +643,8 @@ async def prepare_training(dataset_id: str, base_model: str = "") -> dict:
             with (out / f"{name}.jsonl").open("w", encoding="utf-8") as handle:
                 for item in rows:
                     handle.write(json.dumps({"instruction": item["instruction"], "input": item.get("input", ""), "output": item["output"]}, ensure_ascii=False) + "\n")
-        selected_base = str(base_model or BASE_MODEL_NAME)
-        hf_base = {BASE_MODEL_NAME.casefold(): "Qwen/Qwen3.5-4B"}.get(selected_base.casefold(), selected_base)
+        selected_base = str(base_model or WEIGHT_TRAINING_OLLAMA_BASE_MODEL)
+        hf_base = {WEIGHT_TRAINING_OLLAMA_BASE_MODEL.casefold(): WEIGHT_TRAINING_HF_BASE_MODEL}.get(selected_base.casefold(), selected_base)
         manifest = {
             "dataset_id": dataset_id,
             "prepared_by_pc_name": current_pc_name(),
@@ -701,7 +706,7 @@ async def apply_to_ollama(dataset_id: str, model_name: str, adapter_path: str = 
         adapter = Path(adapter_path or training.get("adapter_dir") or "")
         if not adapter.exists():
             raise ValueError("학습 Adapter 경로가 이 PC에 존재하지 않습니다. Dataset은 공용이지만 학습 산출물은 PC 로컬 파일입니다.")
-        base_model = str(training.get("ollama_base_model") or BASE_MODEL_NAME)
+        base_model = str(training.get("ollama_base_model") or WEIGHT_TRAINING_OLLAMA_BASE_MODEL)
         deployment = await asyncio.to_thread(_apply_ollama_local, base_model, adapter, model_name, dataset_id)
         dataset.status = "deployed"
         dataset.deployment_json = deployment

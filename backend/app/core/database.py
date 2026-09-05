@@ -118,6 +118,18 @@ settings = get_settings()
 database_url = normalize_async_database_url(settings.database_url)
 runtime_schema = ""
 
+
+def current_runtime_schema_name(*, default: str = "public") -> str:
+    """Return the schema currently bound to AgentStudio runtime SQL.
+
+    Exported/generated SQL must always be schema-qualified.  Local PostgreSQL
+    runs on ``public`` while Supabase/custom runtime rebinds set ``runtime_schema``.
+    Keeping this as a function (instead of importing the variable by value) makes
+    later rebinds visible to SQL generators.
+    """
+    return normalize_schema_name(runtime_schema, default=default)
+
+
 if not database_url:
     raise RuntimeError(
         "DATABASE_URL이 설정되지 않았습니다. 프로젝트 루트 .env에 "

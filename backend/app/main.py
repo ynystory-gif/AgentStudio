@@ -22,7 +22,7 @@ import app.services.llm_usage_db_bridge  # noqa: F401
 # Problem collection reuses AgentStudio's configured high-level model priority.
 # v5.427 additionally repairs malformed Teacher JSON and falls through to the next Teacher.
 import app.services.learning_teacher_bridge  # noqa: F401
-# v5.428 guarantees qwen3.5:4b as the automatic Base Model for the cumulative learned model.
+# v5.602 keeps the cumulative learned model aligned with the configured latest Qwen runtime base.
 # This bridge must load before learning API routes import the apply service.
 import app.services.learning_base_model_auto_bridge  # noqa: F401
 # Hide exact Dataset source cases already applied on the current PC before routes bind the function.
@@ -156,7 +156,7 @@ async def lifespan(app: FastAPI):
         await chromium_browser_manager.shutdown()
         await codex_app_server_manager.shutdown()
 
-app = FastAPI(title="THEANOVA AgentStudio", version="5.601", lifespan=lifespan)
+app = FastAPI(title="THEANOVA AgentStudio", version="5.602", lifespan=lifespan)
 
 _PUBLIC_API_PATHS = {
     "/api/health",

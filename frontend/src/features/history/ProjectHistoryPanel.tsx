@@ -27,6 +27,8 @@ const CATEGORY_LABEL:Record<string,string>={
   AGENT_DESIGN:'Agent 설계',REQUIREMENTS:'요구사항',REQUIREMENTS_OVERRIDE:'요구사항 수정',RUNTIME:'실행 환경',DATABASE:'Database',DATABASE_PROFILE_BINDING:'Database',DATABASE_RESOURCE_PLAN:'DB Resource Plan',
   CODE_EDITOR_DB:'코드 편집 DB',WORKFLOW:'Workflow',RAG:'RAG',RAG_KNOWLEDGE:'RAG Knowledge',RAG_RETRIEVAL:'RAG Retrieval',RAG_INTELLIGENCE:'RAG Intelligence',UI_LAYOUT:'UI / Layout',TOOL_PROMPT:'Tool / Prompt',PROMPT_TOOL_STUDIO:'Prompt & Tool Studio',DEVELOPMENT_STAGE:'개발 Stage',RECOMMENDATION:'AI 추천',CODING_STYLE:'코딩 스타일',CODE_DOCUMENTATION:'코드 문서화',GENERAL:'기타',
 }
+const ACTION_LABEL:Record<string,string>={CREATE:'신규',ADD:'신규',INSERT:'신규',UPDATE:'변경',RENAME:'이름 변경',DELETE:'삭제',REMOVE:'삭제'}
+const actionLabel=(value:string)=>ACTION_LABEL[String(value||'').toUpperCase()]||value
 
 function fmt(value:string):string{
   if(!value)return '-'
@@ -42,6 +44,7 @@ export function ProjectHistoryPanel({projectRoot,onOpenTemporarySql}:ProjectHist
   const [filter,setFilter]=useState('ALL')
   const [busy,setBusy]=useState(false)
   const [sqlBusyId,setSqlBusyId]=useState<number|null>(null)
+  const [sqlListBusy,setSqlListBusy]=useState(false)
   const [error,setError]=useState('')
   const projectReady=Boolean(String(projectRoot||'').trim())
 
@@ -71,6 +74,19 @@ export function ProjectHistoryPanel({projectRoot,onOpenTemporarySql}:ProjectHist
     finally{setSqlBusyId(null)}
   }
 
+  const createListSql=async()=>{
+    if(sqlListBusy||!projectReady)return
+    setSqlListBusy(true);setError('')
+    try{
+      const result=await api<HistorySqlResult>('/account-settings/history/sql-list',{
+        method:'POST',
+        body:JSON.stringify({project_root:projectRoot,category:filter,limit:200}),
+      })
+      if(result?.relative_path)await onOpenTemporarySql?.(result.relative_path,result)
+    }catch(exc){setError(asLegacyError(exc).message||String(exc))}
+    finally{setSqlListBusy(false)}
+  }
+
   useEffect(()=>{void load()},[projectRoot])
   useEffect(()=>{
     let cancelled=false
@@ -91,28 +107,28 @@ export function ProjectHistoryPanel({projectRoot,onOpenTemporarySql}:ProjectHist
     {error&&<div className="project-history-error">{error}</div>}
     {projectReady&&<div className="project-history-toolbar">
       <span>총 {items.length}건</span>
-      <select value={filter} onChange={(e)=>setFilter(e.target.value)}>
-        <option value="ALL">전체 분류</option>
-        {categories.map((category)=><option key={category} value={category}>{CATEGORY_LABEL[category]||category}</option>)}
-      </select>
+      <div className="project-history-toolbar-actions">
+        <button type="button" className="project-history-list-sql-button" onClick={()=>void createListSql()} disabled={sqlListBusy} title="현재 이력 목록 조회 조건을 Schema 포함 SQL 임시 파일로 생성">{sqlListBusy?'SQL 생성 중...':'SQL'}</button>
+        <select value={filter} onChange={(e)=>setFilter(e.target.value)}>
+          <option value="ALL">전체 분류</option>
+          {categories.map((category)=><option key={category} value={category}>{CATEGORY_LABEL[category]||category}</option>)}
+        </select>
+      </div>
     </div>}
     {projectReady&&<div className="project-history-layout">
       <div className="project-history-list">
         {visible.length===0?<div className="project-history-empty">아직 저장된 수정 이력이 없습니다.</div>:visible.map((item)=><article key={item.id} className={`project-history-list-row ${selectedId===item.id?'active':''}`}>
           <button type="button" className="project-history-select" onClick={()=>setSelectedId(item.id)}>
-            <div><span>{CATEGORY_LABEL[item.category]||item.category}</span><em>{item.action}</em></div>
+            <div><span>{CATEGORY_LABEL[item.category]||item.category}</span><em>{actionLabel(item.action)}</em></div>
             <strong>{item.title||'설정 변경'}</strong>
             {item.summary&&<small>{item.summary}</small>}
             <time>{fmt(item.created_at)}</time>
-          </button>
-          <button type="button" className="project-history-sql-button" onClick={()=>void createSql(item.id)} disabled={sqlBusyId===item.id} title="이 이력과 관련된 SQL을 .agentstudio/sql_scratch 임시 파일로 생성">
-            {sqlBusyId===item.id?'SQL 생성 중...':'SQL'}
           </button>
         </article>)}
       </div>
       <div className="project-history-detail">
         {!detail?<div className="project-history-empty">왼쪽 이력을 선택하면 상세 변경 내용을 확인할 수 있습니다.</div>:<>
-          <header><div><span>{CATEGORY_LABEL[detail.category]||detail.category}</span><em>{detail.action}</em></div><strong>{detail.title}</strong><small>{fmt(detail.created_at)}</small><div className="project-history-detail-actions"><button type="button" onClick={()=>void createSql(detail.id)} disabled={sqlBusyId===detail.id}>{sqlBusyId===detail.id?'SQL 생성 중...':'SQL 임시 파일'}</button></div></header>
+          <header><div><span>{CATEGORY_LABEL[detail.category]||detail.category}</span><em>{actionLabel(detail.action)}</em></div><strong>{detail.title}</strong><small>{fmt(detail.created_at)}</small><div className="project-history-detail-actions"><button type="button" onClick={()=>void createSql(detail.id)} disabled={sqlBusyId===detail.id}>{sqlBusyId===detail.id?'SQL 생성 중...':'SQL 임시 파일'}</button></div></header>
           {detail.summary&&<p>{detail.summary}</p>}
           <div className="project-history-diff">
             <section><h4>변경 전</h4><pre>{pretty(detail.before)}</pre></section>

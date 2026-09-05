@@ -8,7 +8,6 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
-from app.services.active_ollama_model_service import current_runtime_ollama_model
 
 SEOUL = ZoneInfo("Asia/Seoul")
 HF = "https://huggingface.co"
@@ -169,21 +168,18 @@ async def _blog(client: httpx.AsyncClient) -> list[dict[str, Any]]:
     return items
 
 
-def _dataset_model_query() -> tuple[str, str]:
-    active = str(current_runtime_ollama_model() or "qwen3.5:4b").strip()
-    lowered = active.lower()
-    # THEANOVA learned model is built from qwen3.5, so dataset discovery must use the base family.
-    if lowered.startswith("theanova-learn"):
-        query = "qwen3.5"
-    else:
-        query = active.split(":", 1)[0].strip() or "qwen3.5"
-    return active, query
+def _dataset_model_query(active_model: str = "", dataset_query: str = "") -> tuple[str, str]:
+    active = str(active_model or "").strip()
+    query = str(dataset_query or "").strip()
+    if not query and active:
+        query = active.split(":", 1)[0].rsplit("/", 1)[-1].strip()
+    return active, query or "qwen"
 
 
-async def collect_huggingface_trends() -> dict[str, Any]:
+async def collect_huggingface_trends(*, active_model: str = "", dataset_query: str = "") -> dict[str, Any]:
     now = datetime.now(SEOUL)
     start_date = now.date() - timedelta(days=6)
-    active_model, dataset_query = _dataset_model_query()
+    active_model, dataset_query = _dataset_model_query(active_model, dataset_query)
 
     timeout = httpx.Timeout(15.0, connect=5.0)
     headers = {"User-Agent": "THEANOVA-AgentStudio/5.577", "Accept": "application/json,text/xml,*/*"}

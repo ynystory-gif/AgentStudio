@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.core.database import SessionLocal
+from app.core.database import SessionLocal, current_runtime_schema_name, quote_identifier
 from app.models.account_setting_entities import (
     AccountDatabaseProfile,
     AccountProjectSetting,
@@ -82,12 +82,33 @@ def _safe_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def _history_display_action(row: ProjectSettingHistory) -> str:
+    """Return the semantic action without rewriting immutable audit rows.
+
+    v5.601 stored every account DB provider binding under one legacy ``default`` key.
+    Applying PostgreSQL and then Redis therefore produced an UPDATE row even though the
+    user added a second provider.  v5.602 stores provider-specific keys; this display
+    compatibility maps only those legacy cross-provider/empty-before rows to CREATE.
+    """
+    raw = str(row.action or 'UPDATE').upper()
+    if str(row.category or '').upper() != 'DATABASE_PROFILE_BINDING' or raw != 'UPDATE':
+        return raw
+    before = dict(row.before_json or {})
+    after = dict(row.after_json or {})
+    before_provider = str(before.get('provider') or before.get('db_type') or '').strip().casefold()
+    after_provider = str(after.get('provider') or after.get('db_type') or '').strip().casefold()
+    if after_provider and (not before_provider or before_provider != after_provider):
+        return 'CREATE'
+    return raw
+
+
 def _history_payload(row: ProjectSettingHistory, *, detail: bool = False) -> dict[str, Any]:
     result = {
         'project_setting_histories_id': row.project_setting_histories_id,
         'id': row.project_setting_histories_id,
         'category': row.category,
-        'action': row.action,
+        'action': _history_display_action(row),
+        'stored_action': str(row.action or '').upper(),
         'title': row.title,
         'summary': row.summary,
         'project_root': row.project_root,
@@ -286,7 +307,7 @@ async def upsert_project_setting(
     source_profile_id: int | None = None,
     history_title: str = '',
     history_summary: str = '',
-    history_action: str = 'UPDATE',
+    history_action: str = 'AUTO',
 ) -> dict[str, Any]:
     project_key = normalize_project_key(project_root)
     group = str(setting_group or 'GENERAL').strip().upper()
@@ -342,11 +363,14 @@ async def upsert_project_setting(
         await session.refresh(row)
         row_id = row.account_project_settings_id
     if history_title and changed:
+        resolved_history_action = str(history_action or 'AUTO').upper()
+        if resolved_history_action == 'AUTO':
+            resolved_history_action = 'CREATE' if created else 'UPDATE'
         await append_project_history(
             member_id,
             project_root,
             category=group,
-            action=history_action,
+            action=resolved_history_action,
             title=history_title,
             summary=history_summary,
             before=before,
@@ -571,8 +595,12 @@ async def create_project_history_sql_scratch(
             seen.add(key)
             deduped.append((source, key))
 
+    schema_name = current_runtime_schema_name()
+    history_table = f'{quote_identifier(schema_name)}."project_setting_histories"'
+
     lines = [
         '-- THEANOVA AgentStudio · 프로젝트 수정 이력 SQL 임시 파일',
+        f'-- Schema: {schema_name}',
         f'-- History ID: {int(history_id)}',
         f'-- Category: {payload.get("category") or "GENERAL"}',
         f'-- Action: {payload.get("action") or "UPDATE"}',
@@ -593,7 +621,7 @@ async def create_project_history_sql_scratch(
         '    before_json,',
         '    after_json,',
         '    created_at',
-        'FROM project_setting_histories',
+        f'FROM {history_table}',
         f'WHERE project_setting_histories_id = {int(history_id)};',
         '',
         '-- [변경 전 JSON]',
@@ -619,6 +647,80 @@ async def create_project_history_sql_scratch(
         'content': content,
         'sql_fragment_count': len(deduped),
         'message': '수정 이력 관련 SQL을 임시 파일로 생성했습니다.',
+    }
+
+
+async def create_project_history_list_sql_scratch(
+    member_id: str,
+    project_root: str,
+    *,
+    category: str = 'ALL',
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Create the SQL used to inspect the current project-history list.
+
+    This is intentionally a *list query* SQL button, not one button per list row.
+    The generated query mirrors the project/category/limit filters and always uses
+    an explicit runtime schema-qualified table name.
+    """
+    root_text = str(project_root or '').strip()
+    if not root_text:
+        raise ValueError('프로젝트 경로가 필요합니다.')
+    root = Path(root_text).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise ValueError('프로젝트 경로를 찾을 수 없습니다.')
+
+    project_key = normalize_project_key(root_text)
+    category_value = str(category or 'ALL').strip().upper()
+    safe_limit = max(1, min(int(limit or 200), 500))
+    schema_name = current_runtime_schema_name()
+    history_table = f'{quote_identifier(schema_name)}."project_setting_histories"'
+
+    conditions = [
+        f'member_id = {_sql_literal(member_id)}',
+        f'project_key = {_sql_literal(project_key)}',
+    ]
+    if category_value and category_value != 'ALL':
+        conditions.append(f'category = {_sql_literal(category_value)}')
+
+    scratch_dir = root / '.agentstudio' / 'sql_scratch'
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
+    file_name = f'history_list_{_safe_scratch_name(category_value or "ALL")}_{stamp}.sql'
+    path = scratch_dir / file_name
+    where_sql = '\n  AND '.join(conditions)
+    content = (
+        '-- THEANOVA AgentStudio · 프로젝트 수정 이력 목록 조회 SQL\n'
+        f'-- Schema: {schema_name}\n'
+        f'-- Project: {root_text}\n'
+        f'-- Category: {category_value or "ALL"}\n'
+        f'-- Limit: {safe_limit}\n'
+        '-- 이 파일은 자동 실행되지 않습니다. SQL 실행 전 반드시 내용을 검토하세요.\n\n'
+        'SELECT\n'
+        '    project_setting_histories_id,\n'
+        '    project_root,\n'
+        '    category,\n'
+        '    action,\n'
+        '    title,\n'
+        '    summary,\n'
+        '    before_json,\n'
+        '    after_json,\n'
+        '    created_at\n'
+        f'FROM {history_table}\n'
+        f'WHERE {where_sql}\n'
+        'ORDER BY created_at DESC, project_setting_histories_id DESC\n'
+        f'LIMIT {safe_limit};\n'
+    )
+    path.write_text(content, encoding='utf-8', newline='\n')
+    return {
+        'ok': True,
+        'history_id': 0,
+        'relative_path': path.relative_to(root).as_posix(),
+        'content': content,
+        'schema': schema_name,
+        'category': category_value,
+        'limit': safe_limit,
+        'message': '현재 프로젝트 수정 이력 목록 조회 SQL을 임시 파일로 생성했습니다.',
     }
 
 

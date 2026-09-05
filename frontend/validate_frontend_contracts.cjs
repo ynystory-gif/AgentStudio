@@ -692,7 +692,7 @@ console.log('[frontend-contract] RUN/CODE tab swap + RUN design left context: OK
 const aiTrendsComponent=fs.readFileSync(path.join(__dirname,'src','features','ai-trends','components','AITrendsDashboard.tsx'),'utf8')
 const aiTrendsHook=fs.readFileSync(path.join(__dirname,'src','features','ai-trends','hooks','useAITrends.ts'),'utf8')
 if(!source.includes('<AITrendsDashboard data={aiTrends.data}')) fail('Home AI Trends dashboard missing')
-if(!source.includes("useAITrends(screen==='HOME')")) fail('Home AI Trends daily load hook missing')
+if(!source.includes("useAITrends(screen==='HOME',String(activeWorkspaceRoot||''))") && !source.includes("useAITrends(screen==='HOME')")) fail('Home AI Trends daily load hook missing')
 if(!aiTrendsComponent.includes('오늘 수집한 데이터를 표시하고 있습니다.')) fail('AI Trends daily cache status UI missing')
 if(!aiTrendsHook.includes("api") && !aiTrendsHook.includes("loadAITrends")) fail('AI Trends hook service binding missing')
 console.log('[frontend-contract] AI Trends feature + daily cache UI: OK')
