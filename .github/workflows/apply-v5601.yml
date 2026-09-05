@@ -1,0 +1,114 @@
+name: Apply AgentStudio v5.601
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.release/v5.601/**'
+      - '.github/workflows/apply-v5601.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agentstudio-v5601-main
+  cancel-in-progress: false
+
+jobs:
+  apply-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout payload commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Verify expected v5.600 base
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_BASE='60302491c0e2bd7af7fbaa2bd49cb1db8a331a13'
+          ACTUAL_BASE="$(git rev-parse HEAD^)"
+          test "$ACTUAL_BASE" = "$EXPECTED_BASE"
+          grep -q 'version="5.600"' backend/app/main.py
+          echo "Base verified: $ACTUAL_BASE"
+
+      - name: Decode and apply v5.601 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          B64='.release/v5.601/patch.xz.b64'
+          test "$(sha256sum "$B64" | awk '{print $1}')" = '62e0e44581eb669e0578d7f175d7c156b343049a6bd52b10bcacc2944c3e9d08'
+          base64 -d "$B64" > /tmp/v5601.patch.xz
+          test "$(sha256sum /tmp/v5601.patch.xz | awk '{print $1}')" = '4be8d0953f3c08351394767b38fe51eca4b46ee0a4c0792e30a14f43ed0643c6'
+          xz -dc /tmp/v5601.patch.xz > /tmp/v5601.patch
+          git apply --check --whitespace=nowarn /tmp/v5601.patch
+          git apply --whitespace=nowarn /tmp/v5601.patch
+          rm -rf .release/v5.601
+          rm -f .github/workflows/apply-v5601.yml
+
+      - name: Validate v5.601
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile \
+            backend/app/api/account_settings_routes.py \
+            backend/app/api/routes.py \
+            backend/app/main.py \
+            backend/app/services/account_setting_service.py \
+            backend/app/services/project_adaptive_report.py \
+            backend/validate_v5601_history_sql_workflow_prompt_tool_sync.py
+          python backend/validate_v5601_history_sql_workflow_prompt_tool_sync.py
+          if command -v node >/dev/null 2>&1; then
+            node frontend/validate_frontend_contracts.cjs
+          fi
+          grep -q 'version="5.601"' backend/app/main.py
+          grep -q "AGENTSTUDIO_FRONTEND_VERSION='5.601'" frontend/src/app/App.tsx
+
+      - name: Commit v5.601 directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'THEANOVA AgentStudio Build'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git commit -m 'THEANOVA AgentStudio v5.601'
+          git push origin HEAD:main
+
+      - name: Package v5.601 ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          root = Path('.').resolve()
+          out = root / 'AgentStudio_v5_601.zip'
+          skip_names = {'.git', '.release', 'node_modules', '.venv', 'dist', '__pycache__'}
+          files = []
+          for p in root.rglob('*'):
+              if not p.is_file():
+                  continue
+              rel = p.relative_to(root)
+              if p == out or any(part in skip_names for part in rel.parts) or p.suffix == '.pyc':
+                  continue
+              files.append((p, rel))
+          with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+              for p, rel in sorted(files, key=lambda item: item[1].as_posix()):
+                  zf.write(p, (Path('AgentStudio') / rel).as_posix())
+          with zipfile.ZipFile(out, 'r') as zf:
+              bad = zf.testzip()
+              if bad is not None:
+                  raise SystemExit(f'ZIP integrity failure: {bad}')
+          print(out, out.stat().st_size)
+          PY
+
+      - name: Upload v5.601 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentStudio_v5_601_GitHubArtifact
+          path: AgentStudio_v5_601.zip
+          if-no-files-found: error
+          retention-days: 30
