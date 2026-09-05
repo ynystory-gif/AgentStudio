@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.services.account_setting_service import (
     append_project_history,
+    create_project_history_list_sql_scratch,
     create_project_history_sql_scratch,
     get_account_database_profile,
     get_project_setting,
@@ -66,6 +67,12 @@ class ProjectHistoryRequest(BaseModel):
 
 class ProjectHistorySqlRequest(BaseModel):
     project_root: str = ''
+
+
+class ProjectHistoryListSqlRequest(BaseModel):
+    project_root: str
+    category: str = 'ALL'
+    limit: int = 200
 
 
 @router.get('/database-profiles')
@@ -136,6 +143,20 @@ async def save_project_setting(req: ProjectSettingRequest, authorization: str = 
 async def project_history(project_root: str = Query(...), limit: int = Query(100), authorization: str = Header(default='')):
     member = await _current(authorization)
     return {'ok': True, 'items': await list_project_history(member['id'], project_root, limit)}
+
+
+@router.post('/history/sql-list')
+async def project_history_list_sql(req: ProjectHistoryListSqlRequest, authorization: str = Header(default='')):
+    member = await _current(authorization)
+    try:
+        return await create_project_history_list_sql_scratch(
+            member['id'],
+            req.project_root,
+            category=req.category,
+            limit=req.limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get('/history/{history_id}')

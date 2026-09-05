@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.services.learning_apply_job_service import (
@@ -35,6 +35,7 @@ from app.services.ollama_model_manager_service import (
     start_recommended_model_job,
 )
 from app.services.learning_weight_model_status_service import get_active_weight_model_status
+from app.services.active_ollama_model_service import resolve_qwen_model_context
 from app.services.learning_sql_export_service import build_learning_list_sql
 
 router = APIRouter(prefix="/learning", tags=["LLM Learning"])
@@ -110,15 +111,22 @@ class LearningSqlExportRequest(BaseModel):
 
 
 @router.get("/summary")
-async def summary():
+async def summary(request: Request, project_root: str = Query(default="")):
     result = await learning_summary()
     applications = await list_pc_applications(include_all_pcs=False)
     recommended = await get_recommended_model_status()
+    member = getattr(request.state, "member", {}) or {}
+    qwen_context = await resolve_qwen_model_context(
+        member_id=str(member.get("id") or ""),
+        project_root=project_root,
+    )
     result["pc_applications"] = applications.get("items", [])
     result["application_scope"] = "current_pc_summary"
     result["recommended_ollama"] = recommended
-    # The PC-specific model selection is the runtime truth. learning_summary's
-    # cached Settings value may still represent an older bootstrap default.
+    result["current_qwen_model"] = str(qwen_context.get("model") or "")
+    result["current_qwen_context"] = qwen_context
+    # Runtime Ollama and project-aware Qwen selection are separate fields. Existing
+    # projects can keep qwen3.5 while the recommended model moves forward.
     result["current_ollama_model"] = str(recommended.get("current_model") or result.get("current_ollama_model") or "")
     return result
 

@@ -187,7 +187,8 @@ export function AgentDatabaseSetupPanel({value,projectRoot='',onChange,onTest,on
     if(root){
       setAccountProfileBusy(true)
       try{
-        await api('/account-settings/project',{method:'PUT',body:JSON.stringify({project_root:root,setting_group:'DATABASE_PROFILE_BINDING',setting_key:'default',value:{account_profile_id:profile.account_profile_id||profile.account_database_profiles_id,connection_id:profile.connection_id,name:profile.name,db_type:profile.db_type},source_profile_id:profile.account_profile_id||profile.account_database_profiles_id,title:'계정 DB 설정을 Agent 프로젝트에 적용',summary:profile.name||profile.db_type})})
+        const bindingKey=kind==='supabase'?'postgresql':kind
+        await api('/account-settings/project',{method:'PUT',body:JSON.stringify({project_root:root,setting_group:'DATABASE_PROFILE_BINDING',setting_key:bindingKey,value:{account_profile_id:profile.account_profile_id||profile.account_database_profiles_id,connection_id:profile.connection_id,name:profile.name,db_type:profile.db_type,provider:bindingKey},source_profile_id:profile.account_profile_id||profile.account_database_profiles_id,title:'계정 DB 설정을 Agent 프로젝트에 적용',summary:profile.name||profile.db_type})})
         setHasSavedProjectDatabaseSetting(true)
       }catch{}finally{setAccountProfileBusy(false)}
     }

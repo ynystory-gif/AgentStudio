@@ -26,6 +26,7 @@ export type AITrendsDashboardData={
   updated_at:string
   active_model?:string
   dataset_query?:string
+  model_context?:{provider?:string;family?:string;model?:string;source?:string;version?:string;parameter?:string;quantization?:string;mtp?:boolean;installed?:boolean;recommended_model?:string;current_runtime_model?:string}
   cache:{hit:boolean;daily:boolean}
   translation?:{status:'OK'|'ERROR'|'SKIPPED';translated_items?:number;batch_requests?:number;providers?:string[];warnings?:string[];message:string}
   models:AITrendCategory

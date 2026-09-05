@@ -1,7 +1,6 @@
 import { useEffect } from 'react'
 
 const LEARNED_MODEL = 'theanova-learn:latest'
-const BASE_MODEL = 'qwen3.5:4b'
 
 /**
  * Adds the cumulative-model explanation to the Learning Center.
@@ -39,21 +38,23 @@ export function LearningModelStackEnhancer() {
 
       const currentBlock = modelPanel.querySelector('div:first-child')
       const currentText = String(currentBlock?.textContent || '')
+      const recommendedText = String(modelPanel.querySelector('.llm-learning-recommended-model strong')?.textContent || '').trim()
+      const baseModel = recommendedText || 'Qwen 권장 모델'
       const active = currentText.includes(LEARNED_MODEL)
 
       const downloadButton = modelPanel.querySelector('button')
       if (downloadButton instanceof HTMLButtonElement && active) {
         downloadButton.disabled = true
-        downloadButton.textContent = `${BASE_MODEL} 포함 적용됨`
-        downloadButton.title = `${LEARNED_MODEL}이 ${BASE_MODEL}를 Base Model로 사용 중입니다.`
+        downloadButton.textContent = `${baseModel} 포함 적용됨`
+        downloadButton.title = `${LEARNED_MODEL}이 ${baseModel}를 Base Model로 사용 중입니다.`
       }
 
       const strong = node.querySelector('strong')
       const em = node.querySelector('em')
-      const strongText = `${LEARNED_MODEL} + ${BASE_MODEL}`
+      const strongText = `${LEARNED_MODEL} + ${baseModel}`
       const statusText = active
-        ? `적용됨 · ${BASE_MODEL} 기반 + 누적 Dataset 학습층`
-        : `학습 적용 시 AgentStudio가 ${BASE_MODEL}를 자동 준비 후 결합합니다.`
+        ? `적용됨 · ${baseModel} 기반 + 누적 Dataset 학습층`
+        : `학습 적용 시 AgentStudio가 ${baseModel}를 자동 준비 후 결합합니다.`
 
       if (strong && strong.textContent !== strongText) strong.textContent = strongText
       if (em && em.textContent !== statusText) em.textContent = statusText

@@ -16,6 +16,7 @@ the downloaded SQL returns the same list row count as the screen at download tim
 """
 
 from app.core.machine_identity import current_pc_name
+from app.core.database import current_runtime_schema_name, quote_identifier
 
 
 def _sql_literal(value: str) -> str:
@@ -52,10 +53,19 @@ def build_learning_list_sql(
     cases = _unique_ids(case_ids)
     datasets = _unique_ids(dataset_ids)
     provider_note = str(provider or "").strip() or "전체"
+    schema_name = current_runtime_schema_name()
+    qschema = quote_identifier(schema_name)
+    tables = {
+        "cases": f'{qschema}."llm_misjudgment_cases"',
+        "datasets": f'{qschema}."llm_learning_datasets"',
+        "problems": f'{qschema}."llm_learning_problems"',
+        "applications": f'{qschema}."llm_learning_pc_applications"',
+    }
 
     if normalized_kind == "cases":
         cte = _values_cte("visible_cases", "misjudgment_id", cases)
-        sql = f"""-- THEANOVA AgentStudio v5.448
+        sql = f"""-- THEANOVA AgentStudio v5.602
+-- Schema: {schema_name}
 -- LLM 학습 센터 > 1. 오판 수집 > 화면 조회 SQL
 -- 다운로드 시점 화면 행 수: {len(cases)}건
 -- 화면 Provider 필터: {provider_note}
@@ -86,12 +96,12 @@ SELECT
     c.created_at                       AS created_at,
     c.updated_at                       AS updated_at,
     (SELECT COUNT(*)
-       FROM llm_learning_datasets d0
+       FROM {tables["datasets"]} d0
       WHERE d0.source_case_id = c.id)  AS exact_dataset_count,
     EXISTS (
         SELECT 1
-          FROM llm_learning_datasets d1
-          JOIN llm_learning_pc_applications a1
+          FROM {tables["datasets"]} d1
+          JOIN {tables["applications"]} a1
             ON a1.dataset_id = d1.id
            AND a1.pc_name = {_sql_literal(pc_name)}
          WHERE d1.source_case_id = c.id
@@ -99,7 +109,7 @@ SELECT
            AND a1.enabled = TRUE
     )                                  AS current_pc_exact_learning_applied
 FROM visible_cases v
-JOIN llm_misjudgment_cases c
+JOIN {tables["cases"]} c
   ON c.id = v.misjudgment_id
 ORDER BY v.display_order;
 """
@@ -115,7 +125,8 @@ ORDER BY v.display_order;
 
     if normalized_kind == "datasets":
         cte = _values_cte("visible_datasets", "dataset_id", datasets)
-        sql = f"""-- THEANOVA AgentStudio v5.448
+        sql = f"""-- THEANOVA AgentStudio v5.602
+-- Schema: {schema_name}
 -- LLM 학습 센터 > 2. 수집 문제 / Dataset > 화면 조회 SQL
 -- 다운로드 시점 화면 행 수: {len(datasets)}건
 -- Dataset은 모든 PC의 공용 학습 데이터이므로 source_pc_name으로 WHERE 필터하지 않습니다.
@@ -134,7 +145,7 @@ SELECT
     d.source_model                     AS source_model,
     d.problem_count                    AS dataset_problem_count,
     (SELECT COUNT(*)
-       FROM llm_learning_problems p0
+       FROM {tables["problems"]} p0
       WHERE p0.dataset_id = d.id)      AS problem_row_count,
     d.scope_json                       AS learning_scope,
     COALESCE(a.pc_name, {_sql_literal(pc_name)}) AS current_pc_name,
@@ -146,7 +157,7 @@ SELECT
       WHEN c.id IS NULL THEN 'SOURCE_CASE_MISSING'
       WHEN EXISTS (
           SELECT 1
-            FROM llm_learning_problems p1
+            FROM {tables["problems"]} p1
            WHERE p1.dataset_id = d.id
              AND COALESCE(p1.source_case_id, '') <> COALESCE(d.source_case_id, '')
       ) THEN 'PROBLEM_SOURCE_ID_MISMATCH'
@@ -155,11 +166,11 @@ SELECT
     d.created_at                       AS dataset_created_at,
     d.updated_at                       AS dataset_updated_at
 FROM visible_datasets v
-JOIN llm_learning_datasets d
+JOIN {tables["datasets"]} d
   ON d.id = v.dataset_id
-LEFT JOIN llm_misjudgment_cases c
+LEFT JOIN {tables["cases"]} c
   ON c.id = d.source_case_id
-LEFT JOIN llm_learning_pc_applications a
+LEFT JOIN {tables["applications"]} a
   ON a.dataset_id = d.id
  AND a.pc_name = {_sql_literal(pc_name)}
 ORDER BY v.display_order;
@@ -176,7 +187,8 @@ ORDER BY v.display_order;
 
     if normalized_kind == "training":
         cte = _values_cte("visible_datasets", "dataset_id", datasets)
-        sql = f"""-- THEANOVA AgentStudio v5.448
+        sql = f"""-- THEANOVA AgentStudio v5.602
+-- Schema: {schema_name}
 -- LLM 학습 센터 > 3. PC별 학습 적용 관리 > 화면 조회 SQL
 -- 다운로드 시점 화면 행 수: {len(datasets)}건
 -- Dataset 자체는 공용 전체 조회이며, 학습 적용 상태만 현재 PC({pc_name}) 조건으로 조회합니다.
@@ -199,12 +211,12 @@ SELECT
     a.applied_at                       AS applied_at,
     a.updated_at                       AS application_updated_at,
     (SELECT COUNT(*)
-       FROM llm_learning_pc_applications ax
+       FROM {tables["applications"]} ax
       WHERE ax.dataset_id = d.id)      AS all_pc_application_count
 FROM visible_datasets v
-JOIN llm_learning_datasets d
+JOIN {tables["datasets"]} d
   ON d.id = v.dataset_id
-LEFT JOIN llm_learning_pc_applications a
+LEFT JOIN {tables["applications"]} a
   ON a.dataset_id = d.id
  AND a.pc_name = {_sql_literal(pc_name)}
 ORDER BY v.display_order;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -19,11 +20,38 @@ from app.core.database import SessionLocal
 from app.core.machine_identity import current_pc_name
 from app.models.entities import AppSetting
 
-LATEST_RECOMMENDED_MODEL = "qwen3.5:4b"
+LATEST_RECOMMENDED_MODEL = "qwen3.8:27b-mtp-q4_K_M"
 _MODEL_JOBS: dict[str, dict] = {}
 _MODEL_STATUS_CACHE: dict = {}
 _MODEL_STATUS_CACHE_AT: float = 0.0
 _MODEL_STATUS_TTL_SECONDS = 600.0
+
+
+def qwen_model_metadata(model_name: str) -> dict:
+    model = str(model_name or "").strip()
+    lowered = model.casefold()
+    version_match = re.search(r"qwen\s*(\d+(?:\.\d+)?)", lowered)
+    parameter_match = re.search(r"(?:^|:|-)(\d+(?:\.\d+)?b)(?:-|$)", lowered)
+    quant_match = re.search(r"(q\d+_[a-z0-9_]+)$", lowered)
+    return {
+        "provider": "ollama",
+        "family": "qwen",
+        "model": model,
+        "version": version_match.group(1) if version_match else "",
+        "parameter": parameter_match.group(1) if parameter_match else "",
+        "quantization": quant_match.group(1) if quant_match else "",
+        "mtp": "-mtp-" in lowered or lowered.endswith("-mtp"),
+    }
+
+
+def _installed_models_from_api_sync(base_url: str) -> list[str]:
+    target = f"{str(base_url or 'http://127.0.0.1:11434').rstrip('/')}/api/tags"
+    try:
+        with urllib.request.urlopen(target, timeout=2.5) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        return [str(item.get("name") or "").strip() for item in list(payload.get("models") or []) if str(item.get("name") or "").strip()]
+    except Exception:
+        return []
 
 
 def _candidate_ollama_executables() -> list[str]:
@@ -191,9 +219,9 @@ def _pull_model_with_progress_sync(job_id: str, ollama_exe: str, env: dict[str, 
             if match:
                 percent = max(0, min(100, int(match.group(1))))
                 overall = 35 + int(percent * 0.50)
-                _set_job(job_id, overall, "download", f"qwen3.5:4b 다운로드 중... {percent}%", status="running")
+                _set_job(job_id, overall, "download", f"{LATEST_RECOMMENDED_MODEL} 다운로드 중... {percent}%", status="running")
             elif "pulling manifest" in clean.lower():
-                _set_job(job_id, 37, "download", "qwen3.5:4b manifest 확인 중...", status="running")
+                _set_job(job_id, 37, "download", f"{LATEST_RECOMMENDED_MODEL} manifest 확인 중...", status="running")
             elif clean:
                 _set_job(job_id, int(_MODEL_JOBS.get(job_id, {}).get("progress") or 35), "download", clean[-180:], status="running")
             buffer = ""
@@ -207,8 +235,8 @@ def _pull_model_with_progress_sync(job_id: str, ollama_exe: str, env: dict[str, 
 def _verify_model_sync(ollama_exe: str, env: dict[str, str]) -> str:
     result = subprocess.run([ollama_exe, "list"], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", timeout=30, check=False)
     output = str(result.stdout or "")
-    if result.returncode != 0 or "qwen3.5:4b" not in output.lower():
-        raise RuntimeError("다운로드 명령은 완료됐지만 Ollama 모델 목록에서 qwen3.5:4b를 확인하지 못했습니다. " + output[-2000:])
+    if result.returncode != 0 or LATEST_RECOMMENDED_MODEL.casefold() not in output.casefold():
+        raise RuntimeError(f"다운로드 명령은 완료됐지만 Ollama 모델 목록에서 {LATEST_RECOMMENDED_MODEL}를 확인하지 못했습니다. " + output[-2000:])
     return output
 
 
@@ -236,9 +264,21 @@ async def get_recommended_model_status(force_refresh: bool = False) -> dict:
     common_root = await _pc_setting("COMMON_MODELS_ROOT") or str(os.environ.get("COMMON_MODELS_ROOT", "") or "").strip() or str(settings.common_models_root or "").strip()
     current_model = await _pc_setting("OLLAMA_MODEL") or str(os.environ.get("OLLAMA_MODEL", "") or "").strip() or str(settings.ollama_model or "").strip()
     ollama_exe = next(iter(_candidate_ollama_executables()), "")
+    installed_models = await asyncio.to_thread(_installed_models_from_api_sync, str(settings.ollama_base_url or "http://127.0.0.1:11434"))
+    recommended_installed = any(str(name).casefold() == LATEST_RECOMMENDED_MODEL.casefold() for name in installed_models)
+    metadata = qwen_model_metadata(LATEST_RECOMMENDED_MODEL)
     result = {
         "ok": True,
         "recommended_model": LATEST_RECOMMENDED_MODEL,
+        "recommended_model_info": metadata,
+        "provider": metadata.get("provider"),
+        "family": metadata.get("family"),
+        "version": metadata.get("version"),
+        "parameter": metadata.get("parameter"),
+        "quantization": metadata.get("quantization"),
+        "mtp": metadata.get("mtp"),
+        "installed": recommended_installed,
+        "installed_models": installed_models,
         "current_model": current_model,
         "common_models_root": common_root,
         "ollama_executable": ollama_exe,
@@ -291,13 +331,13 @@ async def _run_download_job(job_id: str, status: dict) -> None:
         await asyncio.to_thread(_persist_windows_ollama_models, str(model_root))
         _set_job(job_id, 22, "restart", "Ollama 서버를 공통 모델 경로로 재시작 중...", status="running")
         restart = await asyncio.to_thread(_restart_local_ollama_sync, ollama_exe, model_root, str(settings.ollama_base_url or "http://127.0.0.1:11434"))
-        _set_job(job_id, 35, "download", "qwen3.5:4b 다운로드 시작... 약 3.4GB입니다.", status="running")
+        _set_job(job_id, 35, "download", f"{LATEST_RECOMMENDED_MODEL} 다운로드 시작...", status="running")
         output = await asyncio.to_thread(_pull_model_with_progress_sync, job_id, ollama_exe, dict(restart["env"]))
         _set_job(job_id, 88, "verify", "다운로드 완료. Ollama 모델 목록을 검증 중...", status="running")
         list_output = await asyncio.to_thread(_verify_model_sync, ollama_exe, dict(restart["env"]))
-        _set_job(job_id, 94, "apply", "현재 PC 기본 모델을 qwen3.5:4b로 변경 중...", status="running")
+        _set_job(job_id, 94, "apply", f"현재 PC 기본 모델을 {LATEST_RECOMMENDED_MODEL}로 변경 중...", status="running")
         await persist_current_ollama_model(LATEST_RECOMMENDED_MODEL, str(model_root))
-        _set_job(job_id, 100, "done", "qwen3.5:4b 다운로드 및 현재 PC 적용이 완료되었습니다.", status="completed", result={"model": LATEST_RECOMMENDED_MODEL, "common_models_root": str(model_root), "ollama_base_url": restart["base_url"], "output_tail": output[-1200:], "list_tail": list_output[-800:]})
+        _set_job(job_id, 100, "done", f"{LATEST_RECOMMENDED_MODEL} 다운로드 및 현재 PC 적용이 완료되었습니다.", status="completed", result={"model": LATEST_RECOMMENDED_MODEL, "common_models_root": str(model_root), "ollama_base_url": restart["base_url"], "output_tail": output[-1200:], "list_tail": list_output[-800:]})
     except Exception as exc:
         _set_job(job_id, int(_MODEL_JOBS.get(job_id, {}).get("progress") or 0), "failed", str(exc) or type(exc).__name__, status="failed", error=str(exc) or type(exc).__name__)
 
@@ -312,7 +352,7 @@ async def start_recommended_model_job() -> dict:
         if job.get("status") == "running":
             return dict(job)
     job_id = uuid.uuid4().hex
-    _set_job(job_id, 1, "queued", "qwen3.5:4b 다운로드 작업을 준비합니다.", status="running", created_at=datetime.utcnow().isoformat())
+    _set_job(job_id, 1, "queued", f"{LATEST_RECOMMENDED_MODEL} 다운로드 작업을 준비합니다.", status="running", created_at=datetime.utcnow().isoformat())
     asyncio.create_task(_run_download_job(job_id, status))
     return dict(_MODEL_JOBS[job_id])
 

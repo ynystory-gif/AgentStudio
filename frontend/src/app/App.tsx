@@ -74,7 +74,7 @@ import { PromptToolStudio } from '../features/prompt-tool-studio/components/Prom
 import { RagStudio } from '../features/rag/components/RagStudio'
 import { ProjectHistoryPanel } from '../features/history/ProjectHistoryPanel'
 
-const AGENTSTUDIO_FRONTEND_VERSION='5.601'
+const AGENTSTUDIO_FRONTEND_VERSION='5.602'
 
 const stableJsonSignature=(value:any):string=>{
   const normalize=(item:any):any=>{
@@ -3438,6 +3438,12 @@ function IDE() {
   const currentProjectName = currentProject?.name || newAgentName || (root ? root.split(/[\\/]/).filter(Boolean).pop() : '') || '프로젝트 선택'
   const currentProjectPath = currentProject?.project_root || currentProject?.root_path || root || newAgentProjectRoot || ''
   const activeWorkspaceRoot = currentProjectPath
+  useEffect(()=>{
+    try{
+      if(activeWorkspaceRoot)localStorage.setItem('theanova.agentstudio.active-project-root',String(activeWorkspaceRoot))
+      else localStorage.removeItem('theanova.agentstudio.active-project-root')
+    }catch{}
+  },[activeWorkspaceRoot])
   const resolveWorkspaceRoot=(preferredRoot: LegacyValue='')=>{
     const activeTerminalRoot=String(
       terminalSessions.find((item: LegacyValue)=>item.id===activeTerminalId)?.root
@@ -13266,7 +13272,7 @@ function IDE() {
     }
   },[screen])
 
-  const aiTrends=useAITrends(screen==='HOME')
+  const aiTrends=useAITrends(screen==='HOME',String(activeWorkspaceRoot||''))
 
   const openAITrendUrl=(url:string)=>{
     const target=String(url||'').trim()

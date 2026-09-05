@@ -2,15 +2,15 @@ from __future__ import annotations
 
 """Single source of truth for the Ollama model used by AgentStudio requests.
 
-Priority policy (v5.494):
+Priority policy (v5.602):
 1. ``theanova-learn:latest`` when it is applied to the current PC.
-2. ``qwen3.5:4b`` as the supported base model.
-3. Another installed non-embedding model only as a last-resort fallback.
+2. Explicitly configured Ollama/Qwen model (existing qwen3.5 settings are preserved).
+3. Current recommended Qwen model for new/default configuration.
+4. Another installed non-embedding model only as a last-resort fallback.
 
-The learned model is currently an Ollama derivative whose Modelfile uses
-``FROM qwen3.5:4b`` plus the validated cumulative THEANOVA curriculum/System
-prompt. It therefore runs as one Ollama model name even before true weight
-fine-tuning is performed.
+The weight fine-tuning pipeline may still keep its explicit Qwen3.5 compatibility
+base. Runtime recommendation and weight-training compatibility are intentionally
+separate concerns.
 """
 
 import os
@@ -24,7 +24,9 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.machine_identity import current_pc_name
 from app.models.learning_entities import LlmLearningPcApplication
-from app.services.ollama_model_manager_service import LATEST_RECOMMENDED_MODEL, get_recommended_model_status
+from app.models.account_setting_entities import AccountProjectSetting, AccountSettingProfile
+from app.services.account_setting_service import normalize_project_key
+from app.services.ollama_model_manager_service import LATEST_RECOMMENDED_MODEL, get_recommended_model_status, qwen_model_metadata
 
 LEARNED_MODEL_NAME = "theanova-learn:latest"
 BASE_MODEL_NAME = LATEST_RECOMMENDED_MODEL
@@ -172,12 +174,12 @@ async def resolve_active_ollama_model(*, force_refresh: bool = False, persist: b
     elif _key(configured) == LEARNED_MODEL_NAME and (learned_installed or not ollama_reachable):
         selected = learned_installed or LEARNED_MODEL_NAME
         reason = "configured_learned_model"
-    elif base_installed:
-        selected = base_installed
-        reason = "recommended_base_model"
     elif configured_installed and _is_usable_chat_model(configured_installed):
         selected = configured_installed
         reason = "configured_installed_model"
+    elif base_installed:
+        selected = base_installed
+        reason = "recommended_base_model"
     else:
         selected = next((name for name in installed if _is_usable_chat_model(name)), "")
         if selected:
@@ -224,6 +226,186 @@ async def resolve_active_ollama_model(*, force_refresh: bool = False, persist: b
     _CACHE = dict(result)
     _CACHE_AT = now
     return result
+
+
+_QWEN_VALUE_KEYS = (
+    "qwen_model",
+    "ollama_model",
+    "model_name",
+    "model",
+    "default_model",
+    "selected_model",
+)
+
+
+def _is_qwen_family_model(value: object) -> bool:
+    text = _normalized(value).casefold()
+    if not text or any(token in text for token in ("embed", "embedding")):
+        return False
+    tail = text.rsplit("/", 1)[-1]
+    return tail.startswith("qwen")
+
+
+def _extract_qwen_model(value: object, path: str = "") -> str:
+    if isinstance(value, dict):
+        lowered = {str(key).casefold(): item for key, item in value.items()}
+        for key in _QWEN_VALUE_KEYS:
+            candidate = lowered.get(key)
+            if isinstance(candidate, str) and _is_qwen_family_model(candidate):
+                return _normalized(candidate)
+        for key, item in value.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            if "embed" in child_path.casefold():
+                continue
+            found = _extract_qwen_model(item, child_path)
+            if found:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            found = _extract_qwen_model(item, f"{path}[{index}]")
+            if found:
+                return found
+    elif isinstance(value, str) and _is_qwen_family_model(value) and "embed" not in path.casefold():
+        return _normalized(value)
+    return ""
+
+
+async def _project_qwen_model(member_id: str, project_root: str) -> tuple[str, str]:
+    member = _normalized(member_id)
+    root = _normalized(project_root)
+    if not member or not root:
+        return "", ""
+    key = normalize_project_key(root)
+    preferred_groups = ("LLM_MODEL", "MODEL", "RUNTIME", "EXECUTION_ENVIRONMENT", "AGENT_DESIGN")
+    try:
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(AccountProjectSetting).where(
+                        AccountProjectSetting.member_id == member,
+                        AccountProjectSetting.project_key == key,
+                    )
+                )
+            ).scalars().all()
+    except Exception:
+        return "", ""
+    ordered = sorted(
+        rows,
+        key=lambda row: preferred_groups.index(str(row.setting_group or "").upper())
+        if str(row.setting_group or "").upper() in preferred_groups
+        else len(preferred_groups),
+    )
+    for row in ordered:
+        model = _extract_qwen_model(row.value_json or {})
+        if model:
+            return model, f"project:{row.setting_group}/{row.setting_key}"
+    return "", ""
+
+
+async def _account_qwen_model(member_id: str) -> tuple[str, str]:
+    member = _normalized(member_id)
+    if not member:
+        return "", ""
+    try:
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(AccountSettingProfile)
+                    .where(
+                        AccountSettingProfile.member_id == member,
+                        AccountSettingProfile.is_default == True,
+                    )
+                    .order_by(AccountSettingProfile.updated_at.desc())
+                )
+            ).scalars().all()
+    except Exception:
+        return "", ""
+    preferred = [row for row in rows if str(row.setting_group or "").upper() in {"LLM_MODEL", "MODEL", "RUNTIME"}]
+    for row in preferred + [row for row in rows if row not in preferred]:
+        model = _extract_qwen_model(row.value_json or {})
+        if model:
+            return model, f"account:{row.setting_group}/{row.profile_name}"
+    return "", ""
+
+
+async def _learned_model_base_qwen() -> str:
+    try:
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(LlmLearningPcApplication)
+                    .where(
+                        LlmLearningPcApplication.pc_name == current_pc_name(),
+                        LlmLearningPcApplication.model_name == LEARNED_MODEL_NAME,
+                        LlmLearningPcApplication.enabled == True,
+                    )
+                    .order_by(LlmLearningPcApplication.updated_at.desc())
+                )
+            ).scalars().all()
+        for row in rows:
+            candidate = _normalized(getattr(row, "base_model", ""))
+            if _is_qwen_family_model(candidate):
+                return candidate
+    except Exception:
+        pass
+    return ""
+
+
+async def resolve_qwen_model_context(
+    *,
+    member_id: str = "",
+    project_root: str = "",
+    force_refresh: bool = False,
+) -> dict:
+    """Resolve the Qwen model shown by project-aware UI surfaces.
+
+    Display priority follows the product rule: project setting -> account/default
+    setting -> current AgentStudio runtime/default -> installed Qwen fallback.
+    Existing qwen3.5 project/account settings are never rewritten to qwen3.8.
+    """
+    manager_status = await get_recommended_model_status(force_refresh=force_refresh)
+    project_model, project_source = await _project_qwen_model(member_id, project_root)
+    account_model, account_source = await _account_qwen_model(member_id)
+    runtime_model = current_runtime_ollama_model()
+    source = ""
+    selected = ""
+
+    if project_model:
+        selected, source = project_model, project_source
+    elif account_model:
+        selected, source = account_model, account_source
+    elif _is_qwen_family_model(runtime_model):
+        selected, source = runtime_model, "runtime:OLLAMA_MODEL"
+    elif _key(runtime_model) == LEARNED_MODEL_NAME:
+        learned_base = await _learned_model_base_qwen()
+        if learned_base:
+            selected, source = learned_base, "runtime:learned_base_model"
+    if not selected:
+        selected, source = LATEST_RECOMMENDED_MODEL, "agentstudio:recommended_default"
+
+    installed_models = [str(item or "").strip() for item in list(manager_status.get("installed_models") or []) if str(item or "").strip()]
+    if not _is_qwen_family_model(selected):
+        installed_qwen = next((name for name in installed_models if _is_qwen_family_model(name)), "")
+        if installed_qwen:
+            selected, source = installed_qwen, "ollama:installed_fallback"
+
+    metadata = qwen_model_metadata(selected)
+    dataset_query = selected.split(":", 1)[0].rsplit("/", 1)[-1].strip() if selected else "qwen"
+    installed = any(_key(name) == _key(selected) for name in installed_models)
+    return {
+        "ok": True,
+        "provider": "ollama",
+        "family": "qwen",
+        "model": selected,
+        "source": source,
+        "dataset_query": dataset_query or "qwen",
+        "recommended_model": LATEST_RECOMMENDED_MODEL,
+        "recommended_model_info": qwen_model_metadata(LATEST_RECOMMENDED_MODEL),
+        "current_runtime_model": runtime_model,
+        "installed": installed,
+        "installed_models": installed_models,
+        **metadata,
+    }
 
 
 async def sync_active_ollama_model() -> dict:

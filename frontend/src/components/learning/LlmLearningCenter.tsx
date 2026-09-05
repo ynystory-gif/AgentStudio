@@ -22,6 +22,7 @@ type LearningLoadState={
 const REOPEN_KEY='theanova.agentstudio.learning.reopen'
 const TAB_KEY='theanova.agentstudio.learning.active-tab'
 const SCROLL_KEY='theanova.agentstudio.learning.scroll-top'
+const ACTIVE_PROJECT_KEY='theanova.agentstudio.active-project-root'
 
 
 type LearningSqlKind='cases'|'datasets'|'training'
@@ -114,7 +115,9 @@ export function LlmLearningCenter() {
       setLoadState((prev: LegacyValue)=>({...prev,visible:true,active:false,progress:100,error:errorText,stage:`${label} 로드 실패`,parts:{...prev.parts,[part]:'error'}}))
     }
 
-    const summaryPromise=api<LegacyValue>('/learning/summary').then((value: LegacyValue)=>{
+    const activeProjectRoot=String(localStorage.getItem(ACTIVE_PROJECT_KEY)||'').trim()
+    const summaryQuery=activeProjectRoot?`?project_root=${encodeURIComponent(activeProjectRoot)}`:''
+    const summaryPromise=api<LegacyValue>(`/learning/summary${summaryQuery}`).then((value: LegacyValue)=>{
       if(requestId===refreshSequence.current)setSummary(value||{})
       finishPart('summary','학습 요약/모델 상태')
       return value
@@ -162,7 +165,7 @@ export function LlmLearningCenter() {
         const next=await api<LegacyValue>(`/learning/recommended-ollama/download-job/${modelJob.id}`)
         setModelJob(next)
         if(next?.status==='completed'){
-          setMessage(next?.message||'qwen3.5:4b 다운로드 및 적용이 완료되었습니다.')
+          setMessage(next?.message||`${next?.result?.model||summary?.recommended_ollama?.recommended_model||'권장 Qwen 모델'} 다운로드 및 적용이 완료되었습니다.`)
           window.clearInterval(timer)
           await refresh()
           sessionStorage.setItem(REOPEN_KEY,'1')
@@ -314,6 +317,10 @@ export function LlmLearningCenter() {
 
   const nav=createPortal(<button type="button" data-agentstudio-learning-nav="true" className={open?'studio-nav-icon active':'studio-nav-icon'} onClick={()=>setOpen((v: LegacyValue)=>!v)} title="LLM 학습" aria-label="LLM 학습">♧</button>,navHost)
   const recommended=summary?.recommended_ollama||{}
+  const recommendedModel=String(recommended.recommended_model||'').trim()
+  const currentOllamaModel=String(summary.current_ollama_model||'').trim()
+  const currentQwenModel=String(summary.current_qwen_model||currentOllamaModel).trim()
+  const recommendedApplied=Boolean(recommendedModel&&currentQwenModel.toLowerCase()===recommendedModel.toLowerCase())
   const downloadRunning=modelJob?.status==='running'
   const problemRunning=problemJob?.status==='running'
   const applyRunning=applyJob?.status==='running'
@@ -331,7 +338,7 @@ export function LlmLearningCenter() {
     <div className="nav-page-head"><div><div className="eyebrow">LEARNING</div><h2>LLM 학습 센터</h2><p>오판 수집 → 문제 수집 → 문제 확인/검증 → 현재 PC 학습 적용</p></div></div>
     {loadProgressPanel}
     <div className="llm-learning-shared-db-note"><b>공용 학습 데이터</b><span>유사 오판은 하나의 주제로 묶어 횟수와 최근 발생일을 관리합니다. 75% 이상은 자동 확정합니다. 현재 PC에 학습 적용된 과거 오판은 이 PC 목록에서 숨깁니다.</span><em>현재 PC: {summary.current_pc_name||'-'}</em></div>
-    <div className="llm-learning-model-upgrade"><div><small>현재 Ollama</small><strong>{summary.current_ollama_model||'-'}</strong></div><div><small>권장 최신 로컬 모델</small><strong>{recommended.recommended_model||'qwen3.5:4b'}</strong></div><div className="llm-learning-model-path"><small>공통 모델 관리 경로</small><code>{recommended.common_models_root||'설정되지 않음'}</code></div><button disabled={downloadRunning||summary.current_ollama_model==='qwen3.5:4b'} onClick={startDownloadRecommended}>{summary.current_ollama_model==='qwen3.5:4b'?'qwen3.5:4b 적용됨':downloadRunning?'다운로드 중...':'qwen3.5:4b 다운로드 및 적용'}</button></div>
+    <div className="llm-learning-model-upgrade"><div><small>현재 Qwen 설정</small><strong title={currentQwenModel}>{currentQwenModel||'-'}</strong><span>{summary.current_qwen_context?.source||'runtime'}</span></div><div className="llm-learning-recommended-model"><small>Qwen 최신 권장 모델</small><strong title={recommendedModel}>{recommendedModel||'-'}</strong><span>{recommended.installed?'설치됨':'미설치'} · {String(recommended.provider||'ollama').toUpperCase()} · {recommended.parameter||'-'} · {recommended.quantization||'-'}{recommended.mtp?' · MTP':''}</span></div><div className="llm-learning-model-path"><small>공통 모델 관리 경로</small><code>{recommended.common_models_root||'설정되지 않음'}</code></div><button disabled={downloadRunning||recommendedApplied} onClick={startDownloadRecommended}>{recommendedApplied?`${recommendedModel} 적용됨`:downloadRunning?'다운로드 중...':`${recommendedModel||'권장 Qwen 모델'} 다운로드 및 적용`}</button></div>
     {progressBlock(modelJob,'모델 다운로드/적용')}{progressBlock(problemJob,'문제 수집')}{progressBlock(applyJob,'학습 적용')}
     <div className="llm-learning-metrics"><div><b>{candidateCount}</b><span>75% 미만 검토 후보</span></div><div><b>{confirmedCount}</b><span>자동/확정 오판 주제</span></div><div><b>{datasets.length}</b><span>공용 Dataset</span></div><div><b>{summary.current_ollama_model||'-'}</b><span>현재 Ollama</span></div></div>
     <div className="llm-learning-toolbar"><button className={tab==='cases'?'active':''} onClick={()=>{setTab('cases');refresh('오판 수집 탭 로드').catch(()=>{})}}>1. 오판 수집</button><button className={tab==='datasets'?'active':''} onClick={()=>{sessionStorage.setItem(TAB_KEY,'datasets');setTab('datasets');refresh('수집 문제 / Dataset 탭 로드').catch(()=>{})}}>2. 수집 문제 / Dataset</button><button className={tab==='training'?'active':''} onClick={()=>{setTab('training');refresh('PC별 학습 적용 관리 탭 로드').catch(()=>{})}}>3. PC별 학습 적용 관리</button><span/><button disabled={!!busy||problemRunning||applyRunning} onClick={()=>run('오판 수집',()=>api('/learning/misjudgments/sync',{method:'POST'}))}>↻ 오판 수집</button><button className="primary" disabled={!!busy||problemRunning||applyRunning} onClick={startProblemCollection}>＋ 문제 수집</button></div>

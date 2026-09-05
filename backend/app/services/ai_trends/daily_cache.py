@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 SEOUL = ZoneInfo("Asia/Seoul")
 
 
@@ -24,8 +24,14 @@ def persistent_data_dir() -> Path:
     return Path.home() / ".theanova" / "AgentStudio"
 
 
-def cache_path() -> Path:
-    path = persistent_data_dir() / "cache" / "ai_trends_daily.json"
+def _safe_cache_key(value: str) -> str:
+    raw = str(value or "default").strip().casefold() or "default"
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in raw)
+    return safe[:80] or "default"
+
+
+def cache_path(cache_key: str = "default") -> Path:
+    path = persistent_data_dir() / "cache" / f"ai_trends_daily_{_safe_cache_key(cache_key)}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -34,8 +40,8 @@ def today_key() -> str:
     return datetime.now(SEOUL).date().isoformat()
 
 
-def read_daily() -> dict[str, Any] | None:
-    path = cache_path()
+def read_daily(cache_key: str = "default") -> dict[str, Any] | None:
+    path = cache_path(cache_key)
     if not path.exists():
         return None
     try:
@@ -52,8 +58,8 @@ def read_daily() -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def write_daily(data: dict[str, Any]) -> None:
-    path = cache_path()
+def write_daily(data: dict[str, Any], cache_key: str = "default") -> None:
+    path = cache_path(cache_key)
     payload = {
         "cache_version": CACHE_VERSION,
         "collection_date": today_key(),

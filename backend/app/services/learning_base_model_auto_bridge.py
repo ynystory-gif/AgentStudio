@@ -4,9 +4,9 @@ from __future__ import annotations
 
 AgentStudio's learned model is a reproducible derived Ollama model:
 
-    qwen3.5:4b + validated cumulative curriculum -> theanova-learn:latest
+    current recommended Qwen base + validated cumulative curriculum -> theanova-learn:latest
 
-Users must not have to manually pull/select qwen3.5:4b before applying learning.
+Users must not have to manually pull/select the recommended Qwen base before applying learning.
 This bridge wraps the existing rebuild job before API routes import the service.
 
 After a successful learning apply, the current PC's applied Dataset -> misjudgment-case

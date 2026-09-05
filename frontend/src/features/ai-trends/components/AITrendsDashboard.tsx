@@ -60,7 +60,8 @@ function SpacesCategory({category,onOpen}:{category?:AITrendCategory;onOpen:(url
   </section>
 }
 export function AITrendsDashboard({data,busy,error,onRefresh,onOpen}:Props){
-  const datasetTitle=`사용중인 모델 데이터셋${data?.dataset_query?` · ${data.dataset_query}`:''}`
+  const currentQwenModel=String(data?.model_context?.model||data?.active_model||'').trim()
+  const datasetTitle=`사용중인 모델 데이터셋${currentQwenModel?` · ${currentQwenModel}`:''}`
   return <section className="ai-trends-section">
     <div className="ai-trends-head">
       <div><small>AI DEVELOPMENT TRENDS</small><strong>🔥 최근 AI 개발 동향</strong>
@@ -80,7 +81,7 @@ export function AITrendsDashboard({data,busy,error,onRefresh,onOpen}:Props){
         <StandardCategory icon="🔥" title="인기 모델" category={data.models} allUrl="https://huggingface.co/models?sort=trending" onOpen={onOpen} limit={5} modelHover/>
         <StandardCategory icon="📄" title="최신 논문" category={data.papers} allUrl="https://huggingface.co/papers" onOpen={onOpen}/>
         <StandardCategory icon="📰" title="AI 뉴스" category={data.news} allUrl="https://huggingface.co/blog" onOpen={onOpen}/>
-        <StandardCategory icon="🗂️" title={datasetTitle} category={data.datasets} allUrl={`https://huggingface.co/datasets?search=${encodeURIComponent(data.dataset_query||'qwen3.5')}`} onOpen={onOpen}/>
+        <StandardCategory icon="🗂️" title={datasetTitle} category={data.datasets} allUrl={`https://huggingface.co/datasets?search=${encodeURIComponent(data.dataset_query||'qwen')}`} onOpen={onOpen}/>
         <div className="ai-trends-wide"><SpacesCategory category={data.spaces} onOpen={onOpen}/></div>
       </div>
       <footer>Hugging Face · 모델/Spaces는 trending 상위 · 논문/뉴스는 최신 3개 · 현재 모델 관련 Dataset 3개 · 한국어 배치 번역{data.translation?.batch_requests?` ${data.translation.batch_requests}회`:''}{data.translation?.providers?.length?` · ${data.translation.providers.join(' → ')}`:''} · 오늘 결과 캐시</footer>
