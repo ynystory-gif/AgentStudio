@@ -1,0 +1,76 @@
+name: Apply AgentStudio v5.602
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.release/v5.602/patch.xz.b64'
+      - '.github/workflows/apply-v5602.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply-v5602:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout payload commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Verify expected v5.601 base
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_BASE='a0b965fe18baa1b2abdd76abe143ec480a561169'
+          ACTUAL_BASE="$(git rev-parse HEAD^)"
+          test "$ACTUAL_BASE" = "$EXPECTED_BASE"
+          grep -q 'version="5.601"' backend/app/main.py
+          echo "Base verified: $ACTUAL_BASE"
+
+      - name: Apply v5.602 changed-file patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          B64='.release/v5.602/patch.xz.b64'
+          test "$(sha256sum "$B64" | awk '{print $1}')" = '52059413455830dd5ff2bfecb986f12b155a2e9a985449e52de2e1868d599622'
+          base64 -d "$B64" > /tmp/v5602.patch.xz
+          test "$(sha256sum /tmp/v5602.patch.xz | awk '{print $1}')" = '4a9b641f02103c187f2a5e4beee9dc3ed46f65278100ca0d068baebdc5175f08'
+          xz -dc /tmp/v5602.patch.xz > /tmp/v5602.patch
+          git apply --check --whitespace=nowarn /tmp/v5602.patch
+          git apply --whitespace=nowarn /tmp/v5602.patch
+          rm -rf .release/v5.602
+          rm -f .github/workflows/apply-v5602.yml
+
+      - name: Validate v5.602
+        shell: bash
+        run: |
+          set -euo pipefail
+          python backend/validate_v5602_history_sql_qwen_dynamic.py
+          python -m py_compile \
+            backend/app/core/database.py \
+            backend/app/services/account_setting_service.py \
+            backend/app/api/account_settings_routes.py \
+            backend/app/services/learning_sql_export_service.py \
+            backend/app/services/ollama_model_manager_service.py \
+            backend/app/services/active_ollama_model_service.py \
+            backend/app/services/ai_trends/huggingface_provider.py \
+            backend/app/services/ai_trends/daily_cache.py \
+            backend/app/services/ai_trends/service.py \
+            backend/app/api/learning_routes.py \
+            backend/app/api/routes.py \
+            backend/app/main.py
+          (cd frontend && node validate_frontend_contracts.cjs)
+          python backend/validate_v5576_ai_trends_exact_ranking.py
+          grep -q 'version="5.602"' backend/app/main.py
+
+      - name: Commit v5.602 directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'THEANOVA AgentStudio Build'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git commit -m 'THEANOVA AgentStudio v5.602'
+          git push origin HEAD:main
